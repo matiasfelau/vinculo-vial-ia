@@ -1,0 +1,21 @@
+services:
+  vinculo-vial-ia:
+    container_name: vinculo-vial-ia
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    read_only: true
+    networks:
+      - vinculo-vial
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+networks:
+  vinculo-vial:
+    external: true
