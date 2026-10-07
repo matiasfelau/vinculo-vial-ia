@@ -1,0 +1,57 @@
+[project]
+name = "vvi-ia"
+version = "0.1.0"
+description = "Perito stateless de evidencia fotográfica de Vínculo Vial"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aio-pika>=9.4,<10",
+    "aiohttp>=3.10,<4",
+    "boto3>=1.35,<2",
+    "numpy>=2.0,<3",
+    "opencv-python-headless>=4.10,<5",
+    "pydantic>=2.8,<3",
+    "pydantic-settings>=2.4,<3",
+    "pyhpke>=0.6,<0.7",
+    "rapidfuzz>=3.9,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "boto3-stubs[s3]>=1.35,<2",
+    "mypy>=1.11,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.6,<1",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vvi_ia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/vvi_ia/domain", "src/vvi_ia/service"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]
