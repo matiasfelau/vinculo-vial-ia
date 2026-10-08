@@ -244,10 +244,13 @@ class FakeStore:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.error: Exception | None = None
+        self.errors_by_key: dict[str, Exception] = {}
         self.gets: list[str] = []
 
     def get(self, key: str) -> bytes:
         self.gets.append(key)
+        if key in self.errors_by_key:
+            raise self.errors_by_key[key]
         if self.error is not None:
             raise self.error
         if key not in self.objects:

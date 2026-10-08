@@ -96,3 +96,14 @@ def test_el_arranque_falla_con_redaction_required_false_fuera_de_local(
 
     assert main() == EXIT_BAD_CONFIG
     assert "REDACTION_REQUIRED=false solo se acepta con ENV=local" in capsys.readouterr().out
+
+
+def test_evidence_max_part_bytes_por_defecto_es_1_mib_y_es_configurable(base_env: pytest.MonkeyPatch) -> None:
+    assert load_settings().evidence_max_part_bytes == 1_048_576
+
+    base_env.setenv("EVIDENCE_MAX_PART_BYTES", "2048")
+    assert load_settings().evidence_max_part_bytes == 2048
+
+    base_env.setenv("EVIDENCE_MAX_PART_BYTES", "0")
+    with pytest.raises(ValidationError):
+        load_settings()

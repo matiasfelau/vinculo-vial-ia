@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     # S3
     s3_region: str = Field(min_length=1)
     evidence_bucket: str = Field(min_length=1)
+    evidence_max_part_bytes: int = Field(default=1_048_576, ge=1)
     s3_timeout_ms: int = Field(default=5000, ge=1)
     s3_breaker_failure_threshold: int = Field(default=5, ge=1)
     s3_breaker_window_ms: int = Field(default=60000, ge=1)

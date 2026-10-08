@@ -44,6 +44,7 @@ from vvi_ia.domain.model import (
 from vvi_ia.domain.verdict import is_fraud
 from vvi_ia.logging_setup import JsonFormatter
 from vvi_ia.service.ports import (
+    EvidenceTooLargeError,
     ObjectNotFoundError,
     SystemDecryptionError,
     TransientError,
@@ -583,3 +584,18 @@ def test_el_log_final_trae_los_campos_permitidos(caplog: pytest.LogCaptureFixtur
     assert record.__dict__["verdict"] == "GREEN"
     assert set(record.__dict__["durations_ms"]) >= {"load", "burst", "plate", "context"}
     assert record.__dict__["model_versions"]["detector"] == "fake-detector"
+
+
+def test_objeto_que_supera_el_tope_es_evidence_unreadable_sin_correr_modelos() -> None:
+    scenario = build_scenario()
+    key = next(i.key for i in scenario.payload.evidence if i.role == EvidenceRole.PLATE)
+    scenario.store.errors_by_key[key] = EvidenceTooLargeError("grande")
+    models = happy_models()
+
+    result = _run(scenario, models)
+
+    assert result.verdict == Verdict.RED
+    assert result.reason_codes == (R.EVIDENCE_UNREADABLE,)
+    assert models.vehicle.calls == 0
+    assert result.redacted == ()
+    assert not is_fraud(result.reason_codes)
