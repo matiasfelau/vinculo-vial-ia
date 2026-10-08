@@ -5,7 +5,7 @@ from botocore.exceptions import ClientError, ConnectTimeoutError, EndpointConnec
 
 from vvi_ia.adapters.breaker import CircuitBreaker, CircuitOpenError, CircuitState
 from vvi_ia.adapters.storage_s3 import S3EvidenceStore, build_client, is_breaker_failure
-from vvi_ia.service.ports import ObjectNotFoundError, TransientError
+from vvi_ia.service.ports import EvidenceTooLargeError, ObjectNotFoundError, TransientError
 
 KEY = "alerts/a/original/general-0.bin"
 REDACTED_KEY = "alerts/a/redacted/general-0.jpg"
@@ -18,9 +18,15 @@ def _client_error(status: int, code: str = "Err", operation: str = "GetObject") 
 class _Body:
     def __init__(self, data: bytes) -> None:
         self._data = data
+        self.reads: list[int] = []
+        self.closed = False
 
-    def read(self) -> bytes:
-        return self._data
+    def read(self, amt: int = -1) -> bytes:
+        self.reads.append(amt)
+        return self._data if amt < 0 else self._data[:amt]
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class FakeS3Client:
@@ -29,12 +35,22 @@ class FakeS3Client:
         self.objects: dict[str, bytes] = {}
         self.puts: list[dict[str, Any]] = []
         self.calls = 0
+        self.last_body: _Body | None = None
+        self.report_length = True
+        self.declared_length: int | None = None
 
     def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
         self.calls += 1
         if self.error is not None:
             raise self.error
-        return {"Body": _Body(self.objects[Key])}
+        data = self.objects[Key]
+        self.last_body = _Body(data)
+        response: dict[str, Any] = {"Body": self.last_body}
+        if self.report_length:
+            response["ContentLength"] = (
+                self.declared_length if self.declared_length is not None else len(data)
+            )
+        return response
 
     def put_object(self, **kwargs: Any) -> None:
         self.calls += 1
@@ -43,9 +59,12 @@ class FakeS3Client:
         self.puts.append(kwargs)
 
 
+MAX_BYTES = 1024
+
+
 def _store(client: FakeS3Client, threshold: int = 2) -> S3EvidenceStore:
     breaker = CircuitBreaker("s3", threshold, 60, 30, 1)
-    return S3EvidenceStore(client, "bucket", breaker)
+    return S3EvidenceStore(client, "bucket", breaker, MAX_BYTES)
 
 
 def test_get_devuelve_los_bytes() -> None:
@@ -173,3 +192,58 @@ def test_el_cliente_tiene_timeouts_explicitos_y_no_reintenta(monkeypatch: pytest
     assert config.retries is not None
     assert config.retries["total_max_attempts"] == 1
     assert client.meta.endpoint_url.endswith("amazonaws.com")
+
+
+# --- tope de tamaño ---------------------------------------------------------------------
+
+
+def test_content_length_sobre_el_tope_no_descarga_el_cuerpo() -> None:
+    client = FakeS3Client()
+    client.objects[KEY] = b"x" * (MAX_BYTES + 1)
+
+    with pytest.raises(EvidenceTooLargeError):
+        _store(client).get(KEY)
+
+    assert client.last_body is not None
+    assert client.last_body.reads == []  # el cuerpo no se leyó
+    assert client.last_body.closed
+
+
+def test_el_tope_se_aplica_aunque_falte_content_length() -> None:
+    client = FakeS3Client()
+    client.objects[KEY] = b"x" * (MAX_BYTES + 500)
+    client.report_length = False
+
+    with pytest.raises(EvidenceTooLargeError):
+        _store(client).get(KEY)
+
+    assert client.last_body is not None
+    assert client.last_body.reads == [MAX_BYTES + 1]  # lectura acotada, nunca el objeto entero
+
+
+def test_el_tope_se_aplica_aunque_content_length_mienta() -> None:
+    client = FakeS3Client()
+    client.objects[KEY] = b"x" * (MAX_BYTES + 500)
+    client.declared_length = 10
+
+    with pytest.raises(EvidenceTooLargeError):
+        _store(client).get(KEY)
+
+
+def test_un_objeto_justo_en_el_tope_se_acepta() -> None:
+    client = FakeS3Client()
+    client.objects[KEY] = b"x" * MAX_BYTES
+
+    assert len(_store(client).get(KEY)) == MAX_BYTES
+
+
+def test_un_objeto_demasiado_grande_no_abre_el_circuito() -> None:
+    client = FakeS3Client()
+    client.objects[KEY] = b"x" * (MAX_BYTES + 1)
+    store = _store(client, threshold=1)
+
+    for _ in range(3):
+        with pytest.raises(EvidenceTooLargeError):
+            store.get(KEY)
+
+    assert store.breaker.state == CircuitState.CLOSED

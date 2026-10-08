@@ -46,6 +46,7 @@ from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import (
     DecryptionError,
     EvidenceStore,
+    EvidenceTooLargeError,
     EvidenceWriter,
     ImageDecodeError,
     ImageDecoder,
@@ -255,7 +256,10 @@ class ValidateEvidence:
         info = payload.alert_id.encode()
         images: list[EvidenceImage] = []
         for item in payload.evidence:
-            ciphertext = self._store.get(item.key)
+            try:
+                ciphertext = self._store.get(item.key)
+            except EvidenceTooLargeError:
+                return None
             if not hmac.compare_digest(hashlib.sha256(ciphertext).hexdigest(), item.sha256):
                 return None
             try:

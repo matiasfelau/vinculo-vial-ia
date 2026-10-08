@@ -91,7 +91,10 @@ async def run(settings: Settings) -> None:
         half_open_max_calls=settings.s3_breaker_half_open_max_calls,
     )
     store = S3EvidenceStore(
-        build_client(settings.s3_region, settings.s3_timeout_ms), settings.evidence_bucket, breaker
+        build_client(settings.s3_region, settings.s3_timeout_ms),
+        settings.evidence_bucket,
+        breaker,
+        settings.evidence_max_part_bytes,
     )
     use_case = ValidateEvidence(
         store=store,

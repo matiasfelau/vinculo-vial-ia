@@ -10,8 +10,10 @@ from typing import Any
 import pytest
 from aio_pika import DeliveryMode, Message
 from aiormq.exceptions import ChannelInvalidStateError, DeliveryError
+from botocore.exceptions import ClientError
 
-from tests.fakes import build_scenario
+from tests.fakes import REDACTION, THRESHOLDS, FakeWriter, build_scenario, happy_models
+from vvi_ia.adapters.breaker import CircuitBreaker
 from vvi_ia.adapters.broker import (
     DISCARD_REASON_HEADER,
     EVENT_TYPE_IN,
@@ -23,6 +25,8 @@ from vvi_ia.adapters.broker import (
     death_count,
     parse_envelope,
 )
+from vvi_ia.adapters.imaging import JpegRenderer
+from vvi_ia.adapters.storage_s3 import S3EvidenceStore
 from vvi_ia.domain.model import (
     EvidenceRole,
     ReasonCode,
@@ -34,6 +38,7 @@ from vvi_ia.domain.model import (
 from vvi_ia.logging_setup import JsonFormatter
 from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import ObjectNotFoundError, SystemDecryptionError, TransientError
+from vvi_ia.service.validate_evidence import ValidateEvidence
 
 QUEUE = "ia.alert-evidence-uploaded.q"
 MAX_RETRIES = 3
@@ -591,3 +596,49 @@ async def test_un_mensaje_devuelto_se_loguea_sin_el_cuerpo(caplog: pytest.LogCap
 
     assert any("devolvió o rechazó" in r.getMessage() for r in caplog.records)
     assert "cuerpo-sensible" not in "\n".join(JsonFormatter().format(r) for r in caplog.records)
+
+
+# --- NoSuchKey de un original: DLQ directo (adaptador S3 real + caso de uso real) ---------
+
+
+class _MissingObjectClient:
+    def get_object(self, Bucket: str, Key: str) -> dict[str, Any]:  # noqa: N803
+        raise ClientError(
+            {"Error": {"Code": "NoSuchKey"}, "ResponseMetadata": {"HTTPStatusCode": 404}}, "GetObject"
+        )
+
+
+async def test_no_such_key_de_un_original_va_directo_a_la_dlq_sin_reintentos() -> None:
+    rig = Rig()
+    scenario = rig.scenario
+    store = S3EvidenceStore(
+        _MissingObjectClient(), scenario.payload.bucket, CircuitBreaker("s3", 5, 60, 30, 1), 1024
+    )
+    use_case = ValidateEvidence(
+        store=store,
+        writer=FakeWriter(),
+        decryptor=scenario.decryptor,
+        decoder=scenario.decoder,
+        renderer=JpegRenderer(),
+        models=happy_models().as_models(),
+        thresholds=THRESHOLDS,
+        redaction=REDACTION,
+    )
+    rig.handler = EvidenceMessageHandler(
+        queue=QUEUE,
+        max_retries=MAX_RETRIES,
+        bucket=scenario.payload.bucket,
+        use_case=use_case,
+        publisher=rig.publisher,
+        run_blocking=rig._run_blocking,
+        clock=lambda: NOW,
+    )
+    msg = rig.message(headers=_x_death(0))  # primer intento: todavía quedan reintentos
+
+    await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.publisher.dlq[0][0] == QUEUE
+    assert rig.publisher.dlq[0][2] == "system_error:ObjectNotFoundError"
+    assert rig.publisher.events == []
+    assert msg.nack_requeue is None  # nunca se rechazó para reintentar

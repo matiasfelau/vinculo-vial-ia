@@ -17,6 +17,10 @@ class ObjectNotFoundError(Exception):
     """El objeto de evidencia no existe en el almacenamiento: error del sistema, no reintentable."""
 
 
+class EvidenceTooLargeError(Exception):
+    """El objeto supera `EVIDENCE_MAX_PART_BYTES`: la evidencia se trata como ilegible."""
+
+
 class DecryptionError(Exception):
     """El criptograma HPKE no se pudo abrir (clave, `info` o contenido inválidos)."""
 
@@ -33,7 +37,7 @@ class EvidenceStore(Protocol):
     """Lectura de los originales cifrados (S3)."""
 
     def get(self, key: str) -> bytes:
-        """Descarga un objeto. Lanza `ObjectNotFoundError` o `TransientError`."""
+        """Descarga un objeto. Lanza `ObjectNotFoundError`, `EvidenceTooLargeError` o `TransientError`."""
         ...
 
 

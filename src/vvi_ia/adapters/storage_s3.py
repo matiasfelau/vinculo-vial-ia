@@ -13,7 +13,7 @@ from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from vvi_ia.adapters.breaker import CircuitBreaker
-from vvi_ia.service.ports import ObjectNotFoundError, TransientError
+from vvi_ia.service.ports import EvidenceTooLargeError, ObjectNotFoundError, TransientError
 
 if TYPE_CHECKING:
     from mypy_boto3_s3 import S3Client
@@ -56,22 +56,36 @@ def is_breaker_failure(exc: Exception) -> bool:
 class S3EvidenceStore:
     """Implementa `EvidenceStore` (lectura de originales) y sube las versiones redactadas."""
 
-    def __init__(self, client: Any, bucket: str, breaker: CircuitBreaker) -> None:
+    def __init__(self, client: Any, bucket: str, breaker: CircuitBreaker, max_object_bytes: int) -> None:
         self._client = client
         self._bucket = bucket
         self._breaker = breaker
+        self._max_object_bytes = max_object_bytes
 
     @property
     def breaker(self) -> CircuitBreaker:
         return self._breaker
 
     def get(self, key: str) -> bytes:
-        """Descarga un objeto. Lanza `ObjectNotFoundError` o `TransientError`."""
+        """Descarga un objeto de hasta `max_object_bytes`.
+
+        Lanza `ObjectNotFoundError` (NoSuchKey, no reintentable), `EvidenceTooLargeError` o
+        `TransientError`. Si `ContentLength` ya supera el tope no se lee el cuerpo, y la lectura
+        queda acotada igual por si el encabezado faltara o mintiera.
+        """
 
         def operation() -> bytes:
             response = self._client.get_object(Bucket=self._bucket, Key=key)
-            body: bytes = response["Body"].read()
-            return body
+            stream = response["Body"]
+            length = response.get("ContentLength")
+            if isinstance(length, int) and length > self._max_object_bytes:
+                stream.close()
+                raise EvidenceTooLargeError("el objeto supera el tamaño máximo")
+            data: bytes = stream.read(self._max_object_bytes + 1)
+            if len(data) > self._max_object_bytes:
+                stream.close()
+                raise EvidenceTooLargeError("el objeto supera el tamaño máximo")
+            return data
 
         return self._guarded(operation)
 
@@ -88,7 +102,7 @@ class S3EvidenceStore:
     def _guarded(self, operation: Callable[[], T]) -> T:
         try:
             return self._breaker.call(operation, is_breaker_failure)
-        except TransientError:
+        except (TransientError, EvidenceTooLargeError):
             raise
         except ClientError as exc:
             if _is_not_found(exc):
