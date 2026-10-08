@@ -7,6 +7,7 @@ responden según ese marcador. No hay patentes ni imágenes reales en los fixtur
 import base64
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -23,7 +24,11 @@ from vvi_ia.domain.model import (
 )
 from vvi_ia.service.payload import EvidenceItem, EvidenceUploaded
 from vvi_ia.service.ports import DecryptionError, ImageDecodeError, ObjectNotFoundError
-from vvi_ia.service.validate_evidence import Models, Thresholds
+from vvi_ia.service.validate_evidence import (
+    Models,
+    RedactionSettings,
+    Thresholds,
+)
 
 SIZE = 100
 REPORTED_PLATE = "TST123"
@@ -40,8 +45,14 @@ def marker_of(img: Pixels) -> int:
     return int(img[0, 0, 0])
 
 
+BRIGHT = 200
+
+
 def photo(marker: int) -> Pixels:
-    return np.full((SIZE, SIZE, 3), marker, np.uint8)
+    """Foto sintética: el canal R lleva el marcador y G/B son brillantes (el relleno opaco los apaga)."""
+    img = np.full((SIZE, SIZE, 3), BRIGHT, np.uint8)
+    img[..., 0] = marker
+    return img
 
 
 def rect(r1: int, r2: int, c1: int, c2: int) -> Mask:
@@ -127,10 +138,13 @@ class FakePlateReader:
 
     def __init__(self, by_marker: dict[int, tuple[str, float] | None]) -> None:
         self.by_marker = by_marker
+        self.override: Callable[[Pixels], tuple[str, float] | None] | None = None
         self.calls = 0
 
     def read(self, crop: Pixels) -> tuple[str, float] | None:
         self.calls += 1
+        if self.override is not None:
+            return self.override(crop)
         return self.by_marker.get(marker_of(crop))
 
 
@@ -187,6 +201,7 @@ def happy_models() -> FakeModels:
                 GENERAL: [car_box(), plate_box()],
                 PLATE: [plate_box(0.95)],
                 CONTEXT: [car_box(), Box(35, 60, 45, 80, 0.9, BoxLabel.WHEEL)],
+                **{detail_marker(i): [] for i in range(3)},
             }
         ),
         cars=FakeCarSegmenter(
@@ -200,8 +215,26 @@ def happy_models() -> FakeModels:
         embedder=embedder,
         plate=FakePlateReader({GENERAL: (REPORTED_PLATE, 0.9), PLATE: (REPORTED_PLATE, 0.95)}),
         damage=FakeDamageDetector({detail_marker(i): [Box(10, 10, 50, 50, 0.8)] for i in range(3)}),
-        face=FakeFaceDetector(),
+        face=FakeFaceDetector({m: [] for m in (GENERAL, PLATE, CONTEXT, *map(detail_marker, range(3)))}),
     )
+
+
+REDACTION = RedactionSettings(required=True, face_min_conf=0.30, plate_min_conf=0.20, max_side_px=1600)
+
+
+class FakeWriter:
+    """Registra lo que se sube a `redacted/`."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, tuple[bytes, str]] = {}
+        self.puts: list[str] = []
+        self.error: Exception | None = None
+
+    def put(self, key: str, body: bytes, content_type: str) -> None:
+        if self.error is not None:
+            raise self.error
+        self.puts.append(key)
+        self.objects[key] = (body, content_type)
 
 
 # --- almacenamiento, HPKE y decodificación ---------------------------------------------

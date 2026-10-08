@@ -22,9 +22,11 @@ from vvi_ia.domain.model import (
     EvidenceRole,
     Pixels,
     ReasonCode,
+    RedactedRef,
     Scores,
     ValidationResult,
     Vector,
+    Verdict,
 )
 from vvi_ia.domain.plate import PlateCheck, canonicalize, plate_check
 from vvi_ia.domain.ports import (
@@ -37,21 +39,25 @@ from vvi_ia.domain.ports import (
     VehicleDetector,
 )
 from vvi_ia.domain.ramp import DrivewayCheck, driveway_check, wheel_diameter
+from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
 from vvi_ia.domain.reid import ReidOutcome, best_match, same_vehicle
 from vvi_ia.domain.verdict import aggregate
 from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import (
     DecryptionError,
     EvidenceStore,
+    EvidenceWriter,
     ImageDecodeError,
     ImageDecoder,
     PayloadDecryptor,
+    RedactionRenderer,
     SystemDecryptionError,
 )
 
 logger = logging.getLogger(__name__)
 
 MS_PER_SECOND = 1000.0
+JPEG_CONTENT_TYPE = "image/jpeg"
 
 Codes = list[ReasonCode]
 
@@ -94,6 +100,16 @@ class Thresholds:
 
 
 @dataclass(frozen=True)
+class RedactionSettings:
+    """Parámetros de la redacción (paso 8)."""
+
+    required: bool
+    face_min_conf: float
+    plate_min_conf: float
+    max_side_px: int
+
+
+@dataclass(frozen=True)
 class PlateRead:
     """Lectura de patente; solo en RAM."""
 
@@ -108,7 +124,7 @@ class _Run:
     models: Models
     detections: dict[tuple[EvidenceRole, int], list[Box] | None] = field(default_factory=dict)
     cars: dict[tuple[EvidenceRole, int], list[CarInstance] | None] = field(default_factory=dict)
-    reads: dict[tuple[EvidenceRole, int], PlateRead | None] = field(default_factory=dict)
+    reads: dict[tuple[EvidenceRole, int, Box], PlateRead | None] = field(default_factory=dict)
     reference_embeddings: list[Vector] = field(default_factory=list)
 
     def detect(self, image: EvidenceImage) -> list[Box] | None:
@@ -125,20 +141,17 @@ class _Run:
 
     def read_plate(self, image: EvidenceImage) -> PlateRead | None:
         """Lee la caja de patente de mayor confianza, con recorte ajustado y sin padding."""
-        key = (image.role, image.index)
-        if key not in self.reads:
-            self.reads[key] = self._read_best_plate(image)
-        return self.reads[key]
-
-    def _read_best_plate(self, image: EvidenceImage) -> PlateRead | None:
         box = best_plate_box(self.detect(image))
-        if box is None:
-            return None
-        crop = crop_box(image, box)
-        if crop is None:
-            return None
-        read = self.models.plate.read(crop)
-        return None if read is None else PlateRead(text=read[0], conf=read[1])
+        return None if box is None else self.read_box(image, box)
+
+    def read_box(self, image: EvidenceImage, box: Box) -> PlateRead | None:
+        """Lee el recorte de una caja de patente (con caché); `None` si no hay modelo o recorte."""
+        key = (image.role, image.index, box)
+        if key not in self.reads:
+            crop = crop_box(image, box)
+            read = None if crop is None else self.models.plate.read(crop)
+            self.reads[key] = None if read is None else PlateRead(text=read[0], conf=read[1])
+        return self.reads[key]
 
 
 def best_plate_box(detections: Sequence[Box] | None) -> Box | None:
@@ -181,16 +194,22 @@ class ValidateEvidence:
     def __init__(
         self,
         store: EvidenceStore,
+        writer: EvidenceWriter,
         decryptor: PayloadDecryptor,
         decoder: ImageDecoder,
+        renderer: RedactionRenderer,
         models: Models,
         thresholds: Thresholds,
+        redaction: RedactionSettings,
     ) -> None:
         self._store = store
+        self._writer = writer
         self._decryptor = decryptor
         self._decoder = decoder
+        self._renderer = renderer
         self._models = models
         self._t = thresholds
+        self._redaction = redaction
 
     def execute(self, payload: EvidenceUploaded) -> ValidationResult:
         """Valida la evidencia.
@@ -223,7 +242,11 @@ class ValidateEvidence:
             context_conf = self._context(run, payload.alert_type, by_role, codes)
 
         scores = Scores(burst_similarity=similarity, ocr_confidence=ocr_conf, context_confidence=context_conf)
-        return self._finish(payload, codes, scores, durations)
+        redacted: tuple[RedactedRef, ...] = ()
+        if aggregate(codes) != Verdict.RED:
+            with _timed(durations, "redaction"):
+                redacted = self._redact(run, payload, images, reported)
+        return self._finish(payload, codes, scores, durations, redacted)
 
     # --- carga y descifrado -------------------------------------------------------------
 
@@ -386,10 +409,80 @@ class ValidateEvidence:
             return cars[0], None
         return None, None
 
+    # --- redacción (paso 8) --------------------------------------------------------------
+
+    def _redact(
+        self, run: _Run, payload: EvidenceUploaded, images: Sequence[EvidenceImage], reported: str
+    ) -> tuple[RedactedRef, ...]:
+        """Genera y sube las versiones redactadas. Fail-closed: sin modelos no se sube nada.
+
+        Con `REDACTION_REQUIRED=false` (solo `ENV=local`) se sube la imagen re-encodeada sin tapar.
+        """
+        plans: dict[tuple[EvidenceRole, int], list[Box]] | None
+        if self._redaction.required:
+            plans = self._plan_all(run, images, reported)
+            if plans is None:
+                return ()
+        else:
+            logger.warning(
+                "redacción desactivada: se sube la evidencia sin redactar",
+                extra={"alert_id": payload.alert_id},
+            )
+            plans = {(image.role, image.index): [] for image in images}
+        refs: list[RedactedRef] = []
+        for image in images:
+            boxes = plans[(image.role, image.index)]
+            body = self._renderer.render(image.pixels, boxes, self._redaction.max_side_px)
+            key = f"alerts/{payload.alert_id}/redacted/{image.role.value.lower()}-{image.index}.jpg"
+            self._writer.put(key, body, JPEG_CONTENT_TYPE)
+            refs.append(RedactedRef(role=image.role, index=image.index, key=key))
+        return tuple(refs)
+
+    def _plan_all(
+        self, run: _Run, images: Sequence[EvidenceImage], reported: str
+    ) -> dict[tuple[EvidenceRole, int], list[Box]] | None:
+        """Plan de todas las fotos, o `None` si falta algún modelo (no se redacta ninguna)."""
+        thresholds = RedactionThresholds(self._redaction.face_min_conf, self._redaction.plate_min_conf)
+        plans: dict[tuple[EvidenceRole, int], list[Box]] = {}
+        for image in images:
+            faces = self._models.face.detect(image.pixels)
+            detections = run.detect(image)
+            exempt = self._matching_plates(run, image, detections, reported)
+            if faces is None or detections is None or exempt is None:
+                return None
+            plan = plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
+            if plan is None:
+                return None
+            plans[(image.role, image.index)] = plan
+        return plans
+
+    def _matching_plates(
+        self, run: _Run, image: EvidenceImage, detections: Sequence[Box] | None, reported: str
+    ) -> list[Box] | None:
+        """Patentes que coinciden con la reportada (no se tapan). `None` si el OCR no tiene modelo."""
+        exempt: list[Box] = []
+        for box in detections or ():
+            if box.label != BoxLabel.PLATE or box.conf < self._redaction.plate_min_conf:
+                continue
+            read = run.read_box(image, box)
+            if read is None:
+                if crop_box(image, box) is None:
+                    continue  # caja degenerada: no hay nada que leer y se tapa igual
+                return None
+            check = plate_check(reported, read.text, read.conf, self._t.ocr_min_conf)
+            if check in (PlateCheck.MATCH, PlateCheck.FUZZY):
+                exempt.append(box)
+        return exempt
+
     # --- cierre -------------------------------------------------------------------------
 
     def _finish(
-        self, payload: EvidenceUploaded, codes: Codes, scores: Scores, durations: dict[str, float]
+        self,
+        payload: EvidenceUploaded,
+        codes: Codes,
+        scores: Scores,
+        durations: dict[str, float],
+        redacted: tuple[RedactedRef, ...] = (),
     ) -> ValidationResult:
         verdict = aggregate(codes)
         versions = self._models.versions()
@@ -408,6 +501,7 @@ class ValidateEvidence:
             reason_codes=tuple(codes),
             scores=scores,
             model_versions=versions,
+            redacted=redacted,
         )
 
 

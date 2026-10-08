@@ -84,3 +84,15 @@ def test_settings_se_construye_con_kwargs() -> None:
         env="local",
     )
     assert settings.evidence_bucket == "b"
+
+
+def test_el_arranque_falla_con_redaction_required_false_fuera_de_local(
+    base_env: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vvi_ia.main import EXIT_BAD_CONFIG, main
+
+    base_env.setenv("REDACTION_REQUIRED", "false")
+    base_env.setenv("ENV", "dev")
+
+    assert main() == EXIT_BAD_CONFIG
+    assert "REDACTION_REQUIRED=false solo se acepta con ENV=local" in capsys.readouterr().out
