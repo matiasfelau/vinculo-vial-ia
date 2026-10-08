@@ -6,10 +6,12 @@ from tests.fakes import (
     CONTEXT,
     GENERAL,
     PLATE,
+    REDACTION,
     REPORTED_PLATE,
     THRESHOLDS,
     FakeDecryptor,
     FakeModels,
+    FakeWriter,
     Scenario,
     build_scenario,
     car_box,
@@ -19,6 +21,7 @@ from tests.fakes import (
     rect,
     vec,
 )
+from vvi_ia.adapters.imaging import JpegRenderer
 from vvi_ia.adapters.models.null import (
     NullCarSegmenter,
     NullCurbSegmenter,
@@ -56,10 +59,13 @@ def _run(scenario: Scenario, models: FakeModels | Models | None = None) -> Valid
     resolved = models.as_models() if isinstance(models, FakeModels) else models
     use_case = ValidateEvidence(
         store=scenario.store,
+        writer=FakeWriter(),
         decryptor=scenario.decryptor,
         decoder=scenario.decoder,
+        renderer=JpegRenderer(),
         models=resolved or happy_models().as_models(),
         thresholds=THRESHOLDS,
+        redaction=REDACTION,
     )
     return use_case.execute(scenario.payload)
 
@@ -89,7 +95,7 @@ def test_caso_feliz_es_green(alert_type: AlertType) -> None:
 
     assert result.verdict == Verdict.GREEN
     assert result.reason_codes == ()
-    assert result.redacted == ()
+    assert len(result.redacted) == 3
     assert result.scores.burst_similarity is not None
     assert result.scores.ocr_confidence == pytest.approx(0.95)
     assert result.scores.context_confidence is not None

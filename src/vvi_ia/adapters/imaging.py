@@ -112,3 +112,13 @@ def encode_jpeg(pixels: Pixels, quality: int = JPEG_QUALITY) -> bytes:
     if not ok:
         raise ImageDecodeError("no se pudo codificar el JPEG")
     return bytes(buffer.tobytes())
+
+
+class JpegRenderer:
+    """Implementa `RedactionRenderer`: relleno sobre la imagen original, luego resize y JPEG sin EXIF.
+
+    El relleno va primero porque las cajas están en coordenadas de la foto original.
+    """
+
+    def render(self, pixels: Pixels, boxes: Sequence[Box], max_side: int) -> bytes:
+        return encode_jpeg(resize_max_side(fill_boxes(pixels, boxes), max_side))

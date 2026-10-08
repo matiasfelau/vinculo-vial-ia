@@ -14,7 +14,7 @@ from vvi_ia.adapters.breaker import CircuitBreaker, CircuitState
 from vvi_ia.adapters.broker import EventPublisher, EvidenceConsumer, EvidenceMessageHandler
 from vvi_ia.adapters.health import DOWN, UP, HealthServer
 from vvi_ia.adapters.hpke import HpkeDecryptor
-from vvi_ia.adapters.imaging import CvImageDecoder
+from vvi_ia.adapters.imaging import CvImageDecoder, JpegRenderer
 from vvi_ia.adapters.models.null import (
     NullCarSegmenter,
     NullCurbSegmenter,
@@ -28,7 +28,12 @@ from vvi_ia.adapters.storage_s3 import S3EvidenceStore, build_client
 from vvi_ia.config import Settings, load_settings
 from vvi_ia.domain.model import ValidationResult
 from vvi_ia.logging_setup import configure_logging
-from vvi_ia.service.validate_evidence import Models, Thresholds, ValidateEvidence
+from vvi_ia.service.validate_evidence import (
+    Models,
+    RedactionSettings,
+    Thresholds,
+    ValidateEvidence,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,15 @@ def build_thresholds(settings: Settings) -> Thresholds:
     )
 
 
+def build_redaction(settings: Settings) -> RedactionSettings:
+    return RedactionSettings(
+        required=settings.redaction_required,
+        face_min_conf=settings.face_min_conf,
+        plate_min_conf=settings.plate_redact_min_conf,
+        max_side_px=settings.redact_max_side_px,
+    )
+
+
 async def run(settings: Settings) -> None:
     """Levanta el servicio y espera SIGINT/SIGTERM para apagar en orden."""
     stop = asyncio.Event()
@@ -81,10 +95,13 @@ async def run(settings: Settings) -> None:
     )
     use_case = ValidateEvidence(
         store=store,
+        writer=store,
         decryptor=HpkeDecryptor(settings.ia_hpke_private_key.get_secret_value()),
         decoder=CvImageDecoder(),
+        renderer=JpegRenderer(),
         models=build_models(),
         thresholds=build_thresholds(settings),
+        redaction=build_redaction(settings),
     )
 
     async def run_blocking(operation: Callable[[], ValidationResult]) -> ValidationResult:
