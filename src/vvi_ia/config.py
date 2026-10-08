@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     input_queue: str = "ia.alert-evidence-uploaded.q"
     max_retries: int = Field(default=5, ge=0)
     workers: int = Field(default=2, ge=1)
+    publish_confirm_timeout_ms: int = Field(default=5000, ge=1)
 
     # S3
     s3_region: str = Field(min_length=1)
