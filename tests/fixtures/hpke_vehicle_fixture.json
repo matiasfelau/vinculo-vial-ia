@@ -1,0 +1,11 @@
+{
+  "alert_id": "11111111-2222-4333-8444-555555555555",
+  "empty_info_enc_b64": "+PNO+C7LWuCNcopoiIPF8/YKLnSk0nO69Zlo/nwqB2CkBVf4fioFWYpGtFcf9XGEePuhk+6b",
+  "generado_con": "Encryptor de vinculo-vial-vehicle (internal/crypto/hpke, circl v1.6.5)",
+  "nota": "Clave descartable generada solo para este fixture; no corresponde a ningun entorno.",
+  "pat_enc_ia_b64": "3T9z9at+nnaIn0o1b64iKUQ+/bd+YvimmiHkXrsmRAxkEfSIS0wEwCFnogP/gZHh+KxbA4qu",
+  "pat_plaintext": "TST123",
+  "photo_enc_b64": "03oAk3VNGVg3jl/dQVaacwj5KhtWHrp2SNsm3gIXLnEX/+lSH/993JYA05cgGiw482Pyg8kXG5NKLWwBL5G7CiJeazixrSQ4nOzUBstNc4A5lGZ/7viIw1hYoOfWGQtFCwEobGNk9G012vmFD5aux2Ja7loEa+vUUroNqtxq8EyLGr/GcCrz8rGpMCOtpczH",
+  "photo_plain_b64": "lv78ntvLf4Nu361dv7uF2D7TFmg8lg5o+qSX3c2FC4O0lCuJckdu2mrsRv7oeXOBANiN5pd+FOBDLDCkCbYhRcvtoPo+BC78BPMkzvQWWG0l23Cb5hXG6p9hWUw5DGWi",
+  "private_key_b64": "LwuaJWJFQERX32/E8gTquJ3GEzY5ba8m11Y2hTKmq3w="
+}
