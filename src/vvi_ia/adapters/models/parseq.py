@@ -135,14 +135,24 @@ class ParseqPlateReader:
         self._input_size = input_size  # (alto, ancho) del modelo
         self.version = version
 
+    def _decode(self, crop: Pixels) -> tuple[str, list[float]]:
+        tensor = preprocess(crop, *self._input_size)
+        (logits,) = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
+        return decode_greedy(logits)
+
     def read(self, crop: Pixels) -> tuple[str, float] | None:
         try:
-            tensor = preprocess(crop, *self._input_size)
-            (logits,) = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
-            text, probs = decode_greedy(logits)
-            return extract_plate(text, probs)
+            return extract_plate(*self._decode(crop))
         except Exception as exc:
             # Solo el tipo de error: el mensaje podría arrastrar la patente o la imagen.
+            logger.warning("falló la inferencia del OCR", extra={"error": type(exc).__name__})
+            return None
+
+    def raw_text(self, crop: Pixels) -> str | None:
+        """Texto leído antes de extraer la patente. Es solo para diagnóstico en `tools/eval`."""
+        try:
+            return self._decode(crop)[0]
+        except Exception as exc:
             logger.warning("falló la inferencia del OCR", extra={"error": type(exc).__name__})
             return None
 
