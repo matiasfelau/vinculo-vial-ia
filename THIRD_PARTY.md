@@ -30,6 +30,10 @@ Notas:
 - **DINOv2:** pesos `facebook/dinov2-small` publicados por Meta en Hugging Face
   (<https://huggingface.co/facebook/dinov2-small>), convertidos a ONNX sin modificar con
   [tools/export/dinov2.py](tools/export/dinov2.py).
+- **RF-DETR-Seg (`segmenter`):** pesos de RF-DETR-Seg Small entrenados con COCO que publica
+  Roboflow (`https://storage.googleapis.com/rfdetr/rf-detr-seg-s-ft.pth`), convertidos a ONNX sin
+  modificar con [tools/export/rfdetr_seg.py](tools/export/rfdetr_seg.py). Solo se aceptan los
+  tamaños Small y Medium.
 - **PARSeq:** antes de un uso comercial hay que confirmar con los autores la licencia de los pesos.
 - **`damage`:** los pesos entrenados con CarDD no se publican ni se redistribuyen.
 

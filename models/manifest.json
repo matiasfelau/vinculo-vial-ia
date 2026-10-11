@@ -2,6 +2,22 @@
   "schema_version": 1,
   "models": [
     {
+      "name": "rfdetr_seg_coco",
+      "version": "rf-detr-seg-small@coco",
+      "ports": ["segmenter"],
+      "file": "rfdetr_seg_coco.onnx",
+      "sha256": "202b2050c1776e7cc5b08e0632b7fee1b5fc52cb6fcc4bbcd56d36973351a335",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "https://storage.googleapis.com/rfdetr/rf-detr-seg-s-ft.pth (pesos de Roboflow entrenados con COCO, MD5 0a2a3006381d0c42853907e700eadd08), exportado a ONNX con tools/export/rfdetr_seg.py",
+      "commercial": "yes",
+      "notes": "RF-DETR-Seg Small sin reentrenar. Entrada fija 1x3x384x384, FP32, opset 17. Salidas dets, labels (91 columnas, indexadas por id de COCO: car = 3) y masks. Nunca XL ni 2XL (PML 1.0)."
+    },
+    {
       "name": "dinov2_vits14",
       "version": "facebook/dinov2-small@ed25f3a31f01",
       "ports": ["embedder"],
