@@ -129,22 +129,22 @@ def test_carga_normaliza_etiquetas_y_convierte_cajas(tmp_path: Path) -> None:
         },
     )
 
-    samples, discarded = ocr.load_samples(root, ["train"])
+    loaded = ocr.load_samples(root, ["train"])
 
-    assert [s.label for s in samples] == ["AB123CD", "XY999ZW"]
-    first = samples[0]
+    assert [s.label for s in loaded.samples] == ["AB123CD", "XY999ZW"]
+    first = loaded.samples[0]
     assert (first.split, first.file) == ("train", "a.jpg")
     assert (first.box.x1, first.box.y1, first.box.x2, first.box.y2) == (10, 20, 110, 60)
-    assert discarded == Counter({"marcador de posición": 1})
+    assert loaded.discarded == Counter({"marcador de posición": 1})
 
 
 def test_carga_descarta_etiquetas_vacias(tmp_path: Path) -> None:
     root = make_dataset(tmp_path, {"train": [("a.jpg", [("---", (0, 0, 50, 30), 1)])]})
 
-    samples, discarded = ocr.load_samples(root, ["train"])
+    loaded = ocr.load_samples(root, ["train"])
 
-    assert samples == []
-    assert discarded == Counter({"etiqueta vacía": 1})
+    assert loaded.samples == []
+    assert loaded.discarded == Counter({"etiqueta vacía": 1})
 
 
 def test_carga_solo_los_splits_pedidos(tmp_path: Path) -> None:
@@ -156,7 +156,7 @@ def test_carga_solo_los_splits_pedidos(tmp_path: Path) -> None:
         },
     )
 
-    samples, _ = ocr.load_samples(root, ["valid"])
+    samples = ocr.load_samples(root, ["valid"]).samples
 
     assert [(s.split, s.label) for s in samples] == [("valid", "EF456GH")]
 
@@ -174,7 +174,7 @@ def test_lee_cada_recorte_con_el_lector_y_reusa_la_foto(tmp_path: Path) -> None:
         tmp_path,
         {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1), ("EF456GH", (100, 50, 60, 40), 2)])]},
     )
-    samples, _ = ocr.load_samples(root, ["train"])
+    samples = ocr.load_samples(root, ["train"]).samples
     reader = FakeReader({1: ("AB123CD", 0.9), 2: ("EF456GH", 0.8)})
 
     items, discarded = ocr.read_samples(samples, root, reader)
@@ -189,7 +189,7 @@ def test_lee_cada_recorte_con_el_lector_y_reusa_la_foto(tmp_path: Path) -> None:
 
 def test_si_el_lector_falla_la_lectura_queda_vacia_y_marcada(tmp_path: Path) -> None:
     root = make_dataset(tmp_path, {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1)])]})
-    samples, _ = ocr.load_samples(root, ["train"])
+    samples = ocr.load_samples(root, ["train"]).samples
 
     ((result, _),), _ = ocr.read_samples(samples, root, FakeReader({1: None}))
 
@@ -208,7 +208,7 @@ def test_descarta_cajas_vacias_y_fotos_ilegibles(tmp_path: Path) -> None:
         },
     )
     (root / "train" / "b.jpg").write_bytes(b"no es un jpeg")
-    samples, _ = ocr.load_samples(root, ["train"])
+    samples = ocr.load_samples(root, ["train"]).samples
     reader = FakeReader({})
 
     items, discarded = ocr.read_samples(samples, root, reader)
@@ -402,9 +402,12 @@ def test_reescribir_la_auditoria_borra_los_recortes_viejos(tmp_path: Path) -> No
 # --- línea de comandos ---------------------------------------------------------------------
 
 
-def run_main(tmp_path: Path, extra: list[str] | None = None) -> tuple[int, Path]:
-    dataset = make_dataset(
-        tmp_path / "dataset",
+def run_main(
+    tmp_path: Path, extra: list[str] | None = None, overrides: str | None = None
+) -> tuple[int, Path]:
+    root = tmp_path / "data"
+    make_dataset(
+        root / ocr.DATASET_DIR,
         {
             "train": [
                 ("a.jpg", [("AB123CD", (0, 0, 60, 40), 1), ("XY999ZW", (100, 50, 60, 40), 2)]),
@@ -412,10 +415,13 @@ def run_main(tmp_path: Path, extra: list[str] | None = None) -> tuple[int, Path]
             ]
         },
     )
+    if overrides is not None:
+        (root / ocr.OVERRIDES_PATH).parent.mkdir(parents=True)
+        (root / ocr.OVERRIDES_PATH).write_text(overrides, encoding="utf-8")
     manifest, models_dir = write_env(tmp_path / "env", tiny_parseq("AB123CD"))
     out = tmp_path / "out"
     args = [
-        "--data-dir", str(dataset), "--out-dir", str(out), "--models-dir", str(models_dir),
+        "--data-dir", str(root), "--out-dir", str(out), "--models-dir", str(models_dir),
         "--manifest", str(manifest), "--match-samples", "5", *(extra or []),
     ]  # fmt: skip
     return ocr.main(args), out
@@ -485,3 +491,314 @@ def test_min_conf_fuera_de_rango(tmp_path: Path) -> None:
                 "2",
             ]
         )
+
+
+# --- correcciones de etiquetas -----------------------------------------------------------------
+
+
+def write_overrides(path: Path, rows: list[str], header: str = "archivo,etiqueta,motivo") -> Path:
+    path.write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+    return path
+
+
+def test_sin_archivo_de_correcciones_no_hay_correcciones(tmp_path: Path) -> None:
+    assert ocr.load_overrides(tmp_path / "no-existe.csv") == {}
+
+
+def test_carga_las_correcciones_y_normaliza_la_etiqueta(tmp_path: Path) -> None:
+    path = write_overrides(
+        tmp_path / "o.csv", ["a.jpg,hsc 691,etiqueta incorrecta", "b.jpg,excluir,patente ilegible"]
+    )
+
+    assert ocr.load_overrides(path) == {"a.jpg": "HSC691", "b.jpg": ocr.EXCLUDE}
+
+
+@pytest.mark.parametrize(
+    ("rows", "header", "message"),
+    [
+        (["a.jpg,AB123CD,x", "a.jpg,EF456GH,x"], "archivo,etiqueta,motivo", "repetido"),
+        ([",AB123CD,x"], "archivo,etiqueta,motivo", "faltan"),
+        (["a.jpg,,x"], "archivo,etiqueta,motivo", "faltan"),
+        (["a.jpg,---,x"], "archivo,etiqueta,motivo", "faltan"),
+        (["a.jpg,AB123CD"], "archivo,etiqueta", "columnas"),
+    ],
+)
+def test_correcciones_invalidas(tmp_path: Path, rows: list[str], header: str, message: str) -> None:
+    path = write_overrides(tmp_path / "o.csv", rows, header)
+
+    with pytest.raises(ocr.OverridesError, match=message):
+        ocr.load_overrides(path)
+
+
+def test_una_correccion_cambia_la_etiqueta_sin_tocar_el_dataset(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path, {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1)])]})
+    before = (root / "train" / ocr.ANNOTATIONS).read_bytes()
+
+    loaded = ocr.load_samples(root, ["train"], {"a.jpg": "EF456GH"})
+
+    assert [(s.label, s.corrected) for s in loaded.samples] == [("EF456GH", True)]
+    assert (root / "train" / ocr.ANNOTATIONS).read_bytes() == before
+
+
+def test_una_foto_excluida_se_cuenta_como_ilegible_y_no_como_descartada(tmp_path: Path) -> None:
+    root = make_dataset(
+        tmp_path,
+        {
+            "train": [
+                ("a.jpg", [("AB123CD", (0, 0, 60, 40), 1), ("EF456GH", (100, 50, 60, 40), 2)]),
+                ("b.jpg", [("IJ789KL", (0, 0, 60, 40), 1)]),
+            ]
+        },
+    )
+
+    loaded = ocr.load_samples(root, ["train"], {"a.jpg": ocr.EXCLUDE})
+
+    assert loaded.unreadable == 2  # una corrección vale para todas las cajas de la foto
+    assert [s.file for s in loaded.samples] == ["b.jpg"]
+    assert not loaded.discarded
+
+
+def test_una_correccion_a_un_marcador_de_posicion_se_descarta(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path, {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1)])]})
+
+    loaded = ocr.load_samples(root, ["train"], {"a.jpg": "AA000AA"})
+
+    assert loaded.discarded == Counter({"marcador de posición": 1})
+
+
+def test_una_correccion_a_una_foto_que_no_existe_es_un_error(tmp_path: Path) -> None:
+    root = make_dataset(tmp_path, {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1)])]})
+
+    with pytest.raises(ocr.OverridesError, match="no están en el dataset: b.jpg"):
+        ocr.load_samples(root, ["train"], {"b.jpg": "EF456GH"})
+
+
+def test_main_aplica_las_correcciones_y_las_informa_aparte(tmp_path: Path) -> None:
+    (tmp_path / "env").mkdir()
+    overrides = "archivo,etiqueta,motivo\na.jpg,EXCLUIR,patente ilegible\n"
+
+    code, out = run_main(tmp_path, overrides=overrides)
+
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert code == 0
+    assert report["ilegibles"] == 2  # las dos cajas de a.jpg
+    assert report["total"]["lecturas"] == 0
+    assert report["total"]["fallas_del_modelo"] == 0  # no es una falla del modelo
+    assert report["cajas_del_dataset"] == 3
+
+
+def test_main_corrige_una_etiqueta_y_lo_marca_en_la_auditoria(tmp_path: Path) -> None:
+    (tmp_path / "env").mkdir()
+    overrides = "archivo,etiqueta,motivo\na.jpg,AB123CD,etiqueta incorrecta\n"
+
+    code, out = run_main(tmp_path, overrides=overrides)
+
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert code == 0 and report["etiquetas_corregidas"] == 2
+    rows = list(csv.DictReader((out / "audit.csv").open(encoding="utf-8")))
+    assert {row["etiqueta_corregida"] for row in rows} == {"si"}
+
+
+def test_main_con_correcciones_invalidas_no_empieza(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "env").mkdir()
+
+    code, _ = run_main(tmp_path, overrides="archivo,etiqueta,motivo\nfantasma.jpg,AB123CD,x\n")
+
+    assert code == 1
+    assert "No se pudo empezar" in capsys.readouterr().err
+
+
+# --- causas ----------------------------------------------------------------------------------
+
+
+def plate_image(text: str = "AB123CD", height: int = 100, width: int = 330) -> Any:
+    """Texto negro sobre blanco: una "patente" sintética."""
+    img = np.full((height, width, 3), 255, np.uint8)
+    cv2.putText(
+        img, text, (8, int(height * 0.72)), cv2.FONT_HERSHEY_DUPLEX, height / 42, (0, 0, 0), 3, cv2.LINE_AA
+    )
+    return img
+
+
+def rotated(img: Any, degrees: float) -> Any:
+    height, width = img.shape[:2]
+    matrix = cv2.getRotationMatrix2D((width / 2, height / 2), degrees, 1.0)
+    return cv2.warpAffine(img, matrix, (width, height), borderValue=(255, 255, 255))
+
+
+def sample_of(label: str, box: tuple[float, float, float, float] = (20, 20, 120, 60), size=(640, 480)) -> Any:
+    return ocr.Sample("train", "f.jpg", Box(*box), label, size)
+
+
+def reading_of(label: str, text: str, conf: float = 0.5, raw: str | None = None, **sample_kwargs: Any) -> Any:
+    return ocr.Reading(
+        sample_of(label, **sample_kwargs), text, conf, failed=False, raw=text if raw is None else raw
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "text"),
+    [
+        ("AB123CD", "A8123CD"),  # B/8
+        ("AE015TG", "AEG15TG"),  # 0 leído G
+        ("AE622RW", "AE622RM"),  # W leída M
+        ("AG101OA", "AG1010A"),  # O/0
+        ("AB123CD", "ABI23CD"),  # I/1
+        ("ABC123", "ABC1Z3"),  # Z/2
+    ],
+)
+def test_confusiones_de_caracteres_parecidos(label: str, text: str) -> None:
+    assert ocr.only_confusions(label, text)
+
+
+@pytest.mark.parametrize(
+    ("label", "text"),
+    [("AB123CD", "AB123CD"), ("AB123CD", "AB123C"), ("AB123CD", "AE123CD"), ("AB123CD", "ZZ999ZZ")],
+)
+def test_no_son_solo_confusiones(label: str, text: str) -> None:
+    assert not ocr.only_confusions(label, text)
+
+
+@pytest.mark.parametrize("raw", ["REPUBLICAAE622RW", "ARGENTINA AE622RW", "mercosur", "AE622RWARGEN"])
+def test_detecta_fragmentos_de_la_franja(raw: str) -> None:
+    assert ocr.has_stripe(raw)
+
+
+@pytest.mark.parametrize("raw", ["AE622RW", "ABC123", "", "AB 123 CD"])
+def test_sin_franja(raw: str) -> None:
+    assert not ocr.has_stripe(raw)
+
+
+def test_la_inclinacion_del_texto() -> None:
+    assert abs(ocr.text_tilt(plate_image())) < 3
+    assert abs(abs(ocr.text_tilt(rotated(plate_image(), 20))) - 20) < 4
+    assert abs(abs(ocr.text_tilt(rotated(plate_image(), -15))) - 15) < 4
+
+
+def test_sin_texto_claro_no_hay_inclinacion() -> None:
+    assert ocr.text_tilt(np.full((100, 300, 3), 255, np.uint8)) is None
+    noise = np.random.default_rng(0).integers(0, 256, (100, 300, 3), dtype=np.uint8)
+    assert ocr.text_tilt(noise) is None
+
+
+def test_la_nitidez_baja_con_el_desenfoque() -> None:
+    sharp = plate_image()
+
+    assert ocr.sharpness(cv2.GaussianBlur(sharp, (0, 0), 6)) < ocr.MIN_SHARPNESS < ocr.sharpness(sharp)
+
+
+def test_una_lectura_con_solo_una_confusion() -> None:
+    result = ocr.diagnose(reading_of("AB123CD", "A8123CD"), plate_image())
+
+    assert result.cause == ocr.CONFUSION and result.factors == (ocr.CONFUSION,)
+
+
+def test_una_moto_gana_a_las_demas_causas_pero_los_factores_se_conservan() -> None:
+    small = plate_image(height=30, width=90)
+
+    result = ocr.diagnose(reading_of("123ABC", "123"), small)
+
+    assert result.cause == ocr.TWO_LINES
+    assert {ocr.TWO_LINES, ocr.BLUR, ocr.CUT} <= set(result.factors)
+
+
+def test_baja_resolucion() -> None:
+    result = ocr.diagnose(reading_of("AB123CD", "AB129CD"), plate_image(height=30, width=90))
+
+    assert result.cause == ocr.BLUR
+
+
+def test_placa_inclinada() -> None:
+    result = ocr.diagnose(reading_of("AB123CD", "AB129CD"), rotated(plate_image(), 20))
+
+    assert result.cause == ocr.ANGLE
+
+
+def test_lee_la_franja() -> None:
+    result = ocr.diagnose(reading_of("AB123CD", "AB129CD", raw="REPUBLICAARGENTINAAB129CD"), plate_image())
+
+    assert result.cause == ocr.STRIPE
+
+
+def test_recorte_cortado_por_el_borde_de_la_foto() -> None:
+    result = ocr.diagnose(
+        reading_of("AB123CD", "AB123", box=(600, 20, 40, 60), size=(640, 480)), plate_image()
+    )
+
+    assert result.cause == ocr.CUT
+
+
+def test_un_solo_caracter_de_menos_no_es_un_recorte_cortado() -> None:
+    result = ocr.diagnose(reading_of("UUN013", "UN013"), plate_image())
+
+    assert ocr.CUT not in result.factors and result.cause == ocr.OTHER_CAUSE
+
+
+def test_etiqueta_dudosa_solo_con_lectura_muy_segura_de_una_patente_valida() -> None:
+    sure = ocr.diagnose(reading_of("AB123CD", "ZZ999ZZ", conf=0.97), plate_image())
+    unsure = ocr.diagnose(reading_of("AB123CD", "ZZ999ZZ", conf=0.6), plate_image())
+
+    assert sure.cause == ocr.DOUBTFUL_LABEL
+    assert unsure.cause == ocr.OTHER_CAUSE
+
+
+def test_reflejo() -> None:
+    glare = np.full((100, 300, 3), 255, np.uint8)
+
+    assert ocr.GLARE in ocr.diagnose(reading_of("AB123CD", "ZZ999ZZ"), glare).factors
+
+
+def test_el_reporte_de_causas_cuenta_la_causa_principal_y_los_factores() -> None:
+    diagnoses = [
+        ocr.Diagnosis(ocr.BLUR, (ocr.BLUR, ocr.CONFUSION)),
+        ocr.Diagnosis(ocr.CONFUSION, (ocr.CONFUSION,)),
+        ocr.Diagnosis(ocr.OTHER_CAUSE, ()),
+    ]
+
+    report = ocr.causes_report(diagnoses)
+
+    assert report["lecturas_sin_coincidencia_exacta"] == 3
+    assert report["causa_principal"][ocr.BLUR] == 1 and report["causa_principal"][ocr.OTHER_CAUSE] == 1
+    assert set(report["causa_principal"]) == set(ocr.CAUSES)
+    assert report["factores_presentes"][ocr.CONFUSION] == 2
+    assert ocr.OTHER_CAUSE not in report["factores_presentes"]
+
+
+def test_el_reporte_de_causas_no_contiene_patentes() -> None:
+    reads = [reading_of("AB123CD", "ZZ999ZZ", 0.97)]
+    diagnoses = [ocr.diagnose(reads[0], plate_image())]
+
+    text = json.dumps(ocr.build_report(reads, 0.6, "parseq@abc", Counter(), 1, 0, diagnoses))
+
+    assert "AB123CD" not in text and "ZZ999ZZ" not in text
+
+
+def test_read_samples_guarda_el_texto_crudo_si_el_lector_lo_ofrece(tmp_path: Path) -> None:
+    class RawReader(FakeReader):
+        def raw_text(self, crop: Any) -> str:
+            return "REPUBLICAAB123CD"
+
+    root = make_dataset(tmp_path, {"train": [("a.jpg", [("AB123CD", (0, 0, 60, 40), 1)])]})
+    samples = ocr.load_samples(root, ["train"]).samples
+
+    ((with_raw, _),), _ = ocr.read_samples(samples, root, RawReader({1: ("AB123CD", 0.9)}))
+    ((without_raw, _),), _ = ocr.read_samples(samples, root, FakeReader({1: ("AB123CD", 0.9)}))
+
+    assert with_raw.raw == "REPUBLICAAB123CD"
+    assert without_raw.raw == "AB123CD"  # sin raw_text, el texto crudo es el texto leído
+
+
+def test_main_escribe_la_causa_en_la_auditoria_y_en_el_reporte(tmp_path: Path) -> None:
+    (tmp_path / "env").mkdir()
+
+    code, out = run_main(tmp_path)
+
+    assert code == 0
+    report = json.loads((out / "report.json").read_text(encoding="utf-8"))
+    assert report["causas"]["lecturas_sin_coincidencia_exacta"] == 1
+    rows = list(csv.DictReader((out / "audit.csv").open(encoding="utf-8")))
+    wrong = [row for row in rows if row["exacta"] == "no"]
+    assert [row["causa"] for row in wrong] == [ocr.BLUR]  # los recortes sintéticos son diminutos
+    assert ocr.DOUBTFUL_LABEL in wrong[0]["factores"]

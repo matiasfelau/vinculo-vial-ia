@@ -22,32 +22,67 @@ Mide qué tan bien lee `parseq` las patentes del dataset "patentes" de Roboflow
 
 ### 1. Conseguir el dataset
 
+`EVAL_DATA_DIR` es la carpeta raíz de todas las evaluaciones (por ejemplo `D:\vv-eval`). Cada una tiene
+su subcarpeta. Para el OCR:
+
+```text
+D:\vv-eval\                      <- EVAL_DATA_DIR
+  ocr-roboflow\                  <- el export COCO, tal como lo bajó Roboflow
+    train\  valid\  test\
+  ocr\
+    label_overrides.csv          <- correcciones de etiquetas (opcional, ver más abajo)
+```
+
 1. Abrí <https://universe.roboflow.com/patentes-obs9r/patentes-n81go>.
 2. **Download Dataset** → formato **COCO** → **Download zip to computer**.
-3. Descomprimilo en una carpeta fuera del repo, por ejemplo `D:\vv-eval\ocr-roboflow`. Tienen que
-   quedar las carpetas `train`, `valid` y `test`, cada una con su `_annotations.coco.json`.
+3. Descomprimilo en `ocr-roboflow`, fuera del repo. Tienen que quedar las carpetas `train`, `valid`
+   y `test`, cada una con su `_annotations.coco.json`. El export **no se modifica nunca**.
 
 ### 2. Correrlo
 
 Elegí dónde se guardan los resultados (otra carpeta fuera del repo) y avisale a la terminal:
 
 ```powershell
-$env:EVAL_DATA_DIR = "D:\vv-eval\ocr-roboflow"
+$env:EVAL_DATA_DIR = "D:\vv-eval"
 $env:EVAL_OUT = "D:\vv-eval\out\ocr"
 $env:MODELS_DIR = "models\weights"
 uv run --frozen --extra dev --extra tools python tools/eval/ocr.py
 ```
 
 Tarda unos segundos. Las variables se pierden al cerrar la terminal. También se pueden pasar como
-`--data-dir`, `--out-dir` y `--models-dir`.
+`--data-dir`, `--out-dir` y `--models-dir`; `--dataset-dir` y `--overrides` cambian dónde están el
+dataset y el archivo de correcciones.
 
 ### 3. Qué hace el script
 
 1. Lee las cajas de las patentes del COCO. La etiqueta de cada caja es el **nombre de su clase**, sin
    espacios y en mayúsculas.
-2. Descarta los **marcadores de posición**: etiquetas cuyos dígitos son todos ceros, como `AA000AA`.
-3. Recorta cada caja de la foto igual que el servicio y se la pasa al OCR.
-4. Compara la lectura con la etiqueta usando la misma función que el servicio (`plate_check`).
+2. Aplica las **correcciones de etiquetas** (ver abajo).
+3. Descarta los **marcadores de posición**: etiquetas cuyos dígitos son todos ceros, como `AA000AA`.
+4. Recorta cada caja de la foto igual que el servicio y se la pasa al OCR.
+5. Compara la lectura con la etiqueta usando la misma función que el servicio (`plate_check`).
+6. A cada lectura sin coincidencia exacta le asigna una **causa** (ver abajo).
+
+### Correcciones de etiquetas
+
+Si una etiqueta del dataset está mal, o la patente no se puede leer ni a ojo, no se edita el export:
+se anota en `EVAL_DATA_DIR\ocr\label_overrides.csv`, que tiene tres columnas:
+
+```csv
+archivo,etiqueta,motivo
+foto_1.jpg,AB123CD,etiqueta incorrecta en el dataset
+foto_2.jpg,EXCLUIR,patente ilegible
+```
+
+- `archivo` es el nombre de la foto, tal como aparece en el export.
+- `etiqueta` es el texto correcto de la patente o la palabra `EXCLUIR`.
+- Vale para **todas las cajas de esa foto**.
+- Las fotos excluidas se informan aparte como `ilegibles`: **no son una falla del modelo** y no
+  cuentan en ninguna métrica.
+- Si nombrás una foto que no existe, el script se detiene: casi seguro es un error de tipeo.
+- Las lecturas con etiqueta corregida llevan `etiqueta_corregida = si` en la auditoría.
+
+Este archivo contiene nombres de fotos del dataset: queda fuera del repo.
 
 ### 4. Cómo leer el resultado
 
@@ -55,11 +90,15 @@ La consola muestra algo así (los números dependen del dataset):
 
 ```text
 Modelo parseq@7ff186b1f743 · 137 cajas · descartadas {'marcador de posición': 3}
-Lecturas: 134 · fallas del modelo: 0
-Coincidencia exacta: 104 (77.6 %)
-Distribución con OCR_MIN_CONF=0.6: {'PLATE_MATCH': 105, 'PLATE_FUZZY': 12, 'PLATE_MISMATCH': 3, 'PLATE_UNREADABLE': 14}
-Propuesta (sin 4 lecturas de otros formatos): OCR_MIN_CONF=0.78 (74.6 % de lecturas aceptadas)
+Ilegibles (excluidas): 1 · etiquetas corregidas: 1
+Lecturas: 133 · fallas del modelo: 0
+Coincidencia exacta: 105 (78.9 %)
+Distribución con OCR_MIN_CONF=0.6: {'PLATE_MATCH': 106, 'PLATE_FUZZY': 10, 'PLATE_MISMATCH': 3, 'PLATE_UNREADABLE': 14}
+Propuesta (sin 4 lecturas de otros formatos): OCR_MIN_CONF=0.78 (75.2 % de lecturas aceptadas)
 ```
+
+Debajo de eso imprime el **barrido de umbrales** (cuántas lecturas se aceptan con cada
+`OCR_MIN_CONF` y cuántas de ellas son `MATCH`, `FUZZY` o `MISMATCH`) y la causa de los errores.
 
 | Resultado | Qué significa en el servicio |
 |---|---|
@@ -73,7 +112,33 @@ Propuesta (sin 4 lecturas de otros formatos): OCR_MIN_CONF=0.78 (74.6 % de lectu
 En `EVAL_OUT` queda además `report.json`, con las mismas cifras desglosadas por split, por formato de
 patente (Mercosur, anterior, otro) y un barrido de umbrales.
 
-### 5. Auditar a ojo
+### 5. Causas de los errores
+
+A cada lectura sin coincidencia exacta se le asigna **una causa principal**, la primera de esta lista que
+se cumple, y se anotan **todos los factores** presentes (un recorte puede estar a la vez inclinado y
+borroso). En `report.json`, `causas` tiene las cifras; los recortes solo están en `audit.html`.
+
+| Causa | Cómo se detecta |
+|---|---|
+| `dos líneas (moto)` | La etiqueta no tiene formato Mercosur ni el anterior (en este dataset son motos). Fuera de alcance. |
+| `lee la franja` | El texto que leyó el modelo, antes de quedarse con la patente, contiene fragmentos de `REPUBLICA`, `ARGENTINA` o `MERCOSUR`. |
+| `recorte cortado` | Faltan 2 o más caracteres al principio o al final, o la caja toca el borde de la foto y falta alguno. |
+| `ángulo` | Los caracteres forman una línea inclinada 10° o más. |
+| `desenfoque o baja resolución` | El recorte mide menos de 100×45 px, o es poco nítido. |
+| `reflejo` | Recorte claro y casi sin contraste (lavado por un reflejo o sobreexposición). |
+| `etiqueta dudosa` | El modelo leyó con confianza 0,90 o más una patente válida que difiere en 2 o más caracteres de la etiqueta. |
+| `confusión de caracteres` | Misma longitud y cada diferencia es entre caracteres parecidos (O/0, I/1, B/8, W/M, 0/G...). |
+| `otras` | Ninguna de las anteriores: hay que mirarlas a ojo (suciedad, desgaste, algo tapando la patente...). |
+
+Son reglas automáticas y aproximadas. Sirven para ver **dónde** están los errores, no para
+diagnosticar una foto en particular: para eso está la auditoría. Dos aclaraciones:
+
+- `confusión de caracteres` incluye pares que el servicio **no** corrige hoy (como `0` leído `G`);
+  `plate_check` solo corrige las confusiones entre letra y dígito según la posición.
+- `etiqueta dudosa` no prueba que la etiqueta esté mal: un modelo también puede equivocarse con mucha
+  confianza. Por eso la corrección de una etiqueta la decide una persona, mirando el recorte.
+
+### 6. Auditar a ojo
 
 Abrí `audit.html` en el navegador. Muestra cada recorte con su etiqueta, la lectura, la confianza y el
 resultado. Incluye **todo lo que no fue un acierto exacto** y una muestra al azar de aciertos
@@ -83,7 +148,7 @@ resultado. Incluye **todo lo que no fue un acierto exacto** y una muestra al aza
 - detectar **etiquetas mal cargadas** en el dataset: si el modelo lee bien y la etiqueta está mal, el
   error es del dataset, no del modelo.
 
-### 6. El umbral `OCR_MIN_CONF`
+### 7. El umbral `OCR_MIN_CONF`
 
 El servicio acepta una lectura solo si su confianza es mayor o igual a `OCR_MIN_CONF`. Si es más baja,
 la patente queda como ilegible (amarillo). El riesgo está en el otro lado: una lectura equivocada con
@@ -117,6 +182,8 @@ Tomala como orientativa:
   o `MODELS_DIR` en esta terminal.
 - **"no puede estar dentro del repositorio"**: usá una carpeta fuera del repo.
 - **"falta train/_annotations.coco.json"**: el zip quedó dentro de otra carpeta; subí `train`, `valid` y
-  `test` un nivel.
+  `test` un nivel, o indicá la carpeta con `--dataset-dir`.
+- **"las correcciones nombran fotos que no están en el dataset"**: un nombre de `label_overrides.csv`
+  está mal escrito. El script te dice cuál.
 - **"No se pudo empezar: ... sha256 ..."**: el archivo de `MODELS_DIR` no es el del manifest; ver
   [tools/export/README.md](../export/README.md).

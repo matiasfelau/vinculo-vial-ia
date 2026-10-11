@@ -90,7 +90,9 @@ No van al servicio. Se usan para preetiquetar o como referencia en las evaluacio
 - **Atribución:** dataset "patentes", publicado en Roboflow Universe por el workspace
   `patentes-obs9r`.
 - **Cambios respecto del original:** las clases se unificaron, las imágenes se recortaron por
-  caja y las etiquetas se normalizaron (mayúsculas, solo letras y dígitos).
+  caja y las etiquetas se normalizaron (mayúsculas, solo letras y dígitos). Además, se
+  corrigieron etiquetas y se excluyeron fotos ilegibles mediante un archivo de correcciones
+  (`label_overrides.csv`) que se guarda fuera del repositorio; el export original no se modificó.
 
 ### Dataset propio de rebajes
 
