@@ -27,6 +27,9 @@ Notas:
 
 - **RF-DETR:** solo se usan los tamaños con licencia Apache 2.0. Los tamaños XL y 2XL se
   distribuyen con la licencia PML 1.0 y no se usan en ninguna parte del proyecto.
+- **DINOv2:** pesos `facebook/dinov2-small` publicados por Meta en Hugging Face
+  (<https://huggingface.co/facebook/dinov2-small>), convertidos a ONNX sin modificar con
+  [tools/export/dinov2.py](tools/export/dinov2.py).
 - **PARSeq:** antes de un uso comercial hay que confirmar con los autores la licencia de los pesos.
 - **`damage`:** los pesos entrenados con CarDD no se publican ni se redistribuyen.
 
