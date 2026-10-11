@@ -1,0 +1,21 @@
+# Nada de pesos, datasets ni secretos en el contexto de build
+.git
+.venv
+.env
+.env.*
+!.env.example
+models/*
+!models/manifest.json
+docs
+tests
+tools
+**/__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+*.onnx
+*.pt
+*.pth
+*.safetensors
+CLAUDE.md
+.clauderules

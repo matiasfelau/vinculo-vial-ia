@@ -22,6 +22,17 @@ _CONFIG_KEYS = {
     "WORKERS",
     "HEALTH_PORT",
     "MAX_RETRIES",
+    "EVIDENCE_MAX_PART_BYTES",
+    "MODEL_DETECTOR",
+    "MODEL_FACE",
+    "MODEL_SEGMENTER",
+    "MODEL_CURB",
+    "MODEL_EMBEDDER",
+    "MODEL_OCR",
+    "MODEL_DAMAGE",
+    "MODELS_DIR",
+    "MODELS_MANIFEST",
+    "ONNX_INTRA_OP_THREADS",
 }
 
 
@@ -40,3 +51,13 @@ def base_env(clean_env: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for key, value in BASE_ENV.items():
         clean_env.setenv(key, value)
     return clean_env
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Los tests marcados `models` usan pesos reales: se omiten si no hay MODELS_DIR."""
+    if os.environ.get("MODELS_DIR"):
+        return
+    skip = pytest.mark.skip(reason="MODELS_DIR no definido")
+    for item in items:
+        if item.get_closest_marker("models") is not None:
+            item.add_marker(skip)

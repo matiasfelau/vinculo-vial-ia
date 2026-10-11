@@ -16,7 +16,8 @@ class HealthServer:
     """Expone /health (liveness), /ready y /health/deps.
 
     `ready` indica si el consumidor está activo; `deps` devuelve el estado `up`/`down`
-    de cada dependencia (broker, circuit breaker de S3).
+    de cada dependencia (broker, circuit breaker de S3); `models` son las versiones cargadas
+    por puerto, que `/health` informa.
     """
 
     def __init__(
@@ -24,10 +25,12 @@ class HealthServer:
         port: int,
         ready: Callable[[], bool],
         deps: Callable[[], Mapping[str, str]],
+        models: Mapping[str, str],
     ) -> None:
         self._port = port
         self._ready = ready
         self._deps = deps
+        self._models = dict(models)
         self._runner: web.AppRunner | None = None
 
     def build_app(self) -> web.Application:
@@ -53,7 +56,7 @@ class HealthServer:
             self._runner = None
 
     async def _health(self, _request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
+        return web.json_response({"status": "ok", "models": self._models})
 
     async def _readiness(self, _request: web.Request) -> web.Response:
         if self._ready():

@@ -6,6 +6,11 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      # Dentro del contenedor los pesos siempre están en /models; MODELS_DIR del .env es la ruta del host.
+      MODELS_DIR: /models
+    volumes:
+      - ${MODELS_DIR:-./models/weights}:/models:ro
     read_only: true
     restart: unless-stopped
     networks:

@@ -2,9 +2,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from vvi_ia.adapters.health import DOWN, UP, HealthServer
 
+MODELS = {"detector": "null", "ocr": "parseq@0123456789ab"}
+
 
 async def _client(ready: bool, deps: dict[str, str]) -> TestClient:  # type: ignore[type-arg]
-    server = HealthServer(port=0, ready=lambda: ready, deps=lambda: deps)
+    server = HealthServer(port=0, ready=lambda: ready, deps=lambda: deps, models=MODELS)
     client = TestClient(TestServer(server.build_app()))
     await client.start_server()
     return client
@@ -15,7 +17,7 @@ async def test_health_siempre_ok() -> None:
     try:
         resp = await client.get("/health")
         assert resp.status == 200
-        assert await resp.json() == {"status": "ok"}
+        assert await resp.json() == {"status": "ok", "models": MODELS}
     finally:
         await client.close()
 
