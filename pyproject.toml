@@ -8,6 +8,7 @@ dependencies = [
     "aiohttp>=3.10,<4",
     "boto3>=1.35,<2",
     "numpy>=2.0,<3",
+    "onnxruntime>=1.20,<2",
     "opencv-python-headless>=4.10,<5",
     "pydantic>=2.8,<3",
     "pydantic-settings>=2.4,<3",
@@ -19,6 +20,7 @@ dependencies = [
 dev = [
     "boto3-stubs[s3]>=1.35,<2",
     "mypy>=1.11,<2",
+    "onnx>=1.17,<2",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<2",
     "ruff>=0.6,<1",
@@ -36,6 +38,9 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "models: integración con pesos reales; requiere MODELS_DIR y se omite si no está definido",
+]
 
 [tool.ruff]
 line-length = 110

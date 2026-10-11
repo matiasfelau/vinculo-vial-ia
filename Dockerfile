@@ -17,12 +17,17 @@ FROM python:3.12.12-slim-bookworm
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    ORT_DISABLE_TELEMETRY=1
 
 RUN groupadd --system --gid 10001 app \
     && useradd --system --uid 10001 --gid app --no-create-home --shell /usr/sbin/nologin app
 
 COPY --from=builder /opt/venv /opt/venv
+
+# Solo el manifest: los pesos nunca entran en la imagen, se montan en /models de solo lectura.
+WORKDIR /app
+COPY models/manifest.json ./models/manifest.json
 
 USER app
 

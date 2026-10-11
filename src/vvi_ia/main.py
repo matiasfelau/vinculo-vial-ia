@@ -15,15 +15,7 @@ from vvi_ia.adapters.broker import EventPublisher, EvidenceConsumer, EvidenceMes
 from vvi_ia.adapters.health import DOWN, UP, HealthServer
 from vvi_ia.adapters.hpke import HpkeDecryptor
 from vvi_ia.adapters.imaging import CvImageDecoder, JpegRenderer
-from vvi_ia.adapters.models.null import (
-    NullCarSegmenter,
-    NullCurbSegmenter,
-    NullDamageDetector,
-    NullEmbedder,
-    NullFaceDetector,
-    NullPlateReader,
-    NullVehicleDetector,
-)
+from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.adapters.storage_s3 import S3EvidenceStore, build_client
 from vvi_ia.config import Settings, load_settings
 from vvi_ia.domain.model import ValidationResult
@@ -38,19 +30,17 @@ from vvi_ia.service.validate_evidence import (
 logger = logging.getLogger(__name__)
 
 EXIT_BAD_CONFIG = 2
+EXIT_BAD_MODELS = 3
 MS_PER_SECOND = 1000.0
 
 
-def build_models() -> Models:
-    """Modelos de inferencia. US-08 no incorpora ninguno: todos los puertos devuelven `None`."""
-    return Models(
-        vehicle=NullVehicleDetector(),
-        cars=NullCarSegmenter(),
-        curb=NullCurbSegmenter(),
-        embedder=NullEmbedder(),
-        plate=NullPlateReader(),
-        damage=NullDamageDetector(),
-        face=NullFaceDetector(),
+def load_models(settings: Settings) -> Models:
+    """Modelos de inferencia según `MODEL_*`. Verifica el sha256 de cada modelo seleccionado."""
+    return build_models(
+        selection=settings.model_selection(),
+        manifest_path=settings.models_manifest,
+        models_dir=settings.models_dir,
+        intra_op_threads=settings.onnx_intra_op_threads,
     )
 
 
@@ -74,7 +64,7 @@ def build_redaction(settings: Settings) -> RedactionSettings:
     )
 
 
-async def run(settings: Settings) -> None:
+async def run(settings: Settings, models: Models) -> None:
     """Levanta el servicio y espera SIGINT/SIGTERM para apagar en orden."""
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -102,7 +92,7 @@ async def run(settings: Settings) -> None:
         decryptor=HpkeDecryptor(settings.ia_hpke_private_key.get_secret_value()),
         decoder=CvImageDecoder(),
         renderer=JpegRenderer(),
-        models=build_models(),
+        models=models,
         thresholds=build_thresholds(settings),
         redaction=build_redaction(settings),
     )
@@ -136,6 +126,7 @@ async def run(settings: Settings) -> None:
             "rabbitmq": UP if consumer.connected else DOWN,
             "s3": DOWN if breaker.state == CircuitState.OPEN else UP,
         },
+        models=models.versions(),
     )
     await health.start()
     try:
@@ -163,7 +154,13 @@ def main() -> int:
                 extra={"field": ".".join(str(p) for p in error["loc"]), "reason": error["msg"]},
             )
         return EXIT_BAD_CONFIG
-    asyncio.run(run(settings))
+    try:
+        models = load_models(settings)
+    except ModelSetupError as exc:
+        logger.error("modelos inválidos: el servicio no arranca", extra={"reason": str(exc)})
+        return EXIT_BAD_MODELS
+    logger.info("modelos seleccionados", extra={"model_versions": models.versions()})
+    asyncio.run(run(settings, models))
     return 0
 
 

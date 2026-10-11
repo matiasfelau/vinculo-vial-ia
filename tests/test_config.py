@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -107,3 +109,86 @@ def test_evidence_max_part_bytes_por_defecto_es_1_mib_y_es_configurable(base_env
     base_env.setenv("EVIDENCE_MAX_PART_BYTES", "0")
     with pytest.raises(ValidationError):
         load_settings()
+
+
+# --- selección de modelos ------------------------------------------------------------------
+
+
+def test_por_defecto_todos_los_modelos_son_null(base_env: pytest.MonkeyPatch) -> None:
+    settings = load_settings()
+
+    assert set(settings.model_selection()) == {
+        "detector",
+        "face",
+        "segmenter",
+        "curb",
+        "embedder",
+        "ocr",
+        "damage",
+    }
+    assert set(settings.model_selection().values()) == {"null"}
+    assert settings.models_dir is None
+
+
+def test_un_modelo_seleccionado_exige_models_dir(base_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    base_env.setenv("MODEL_OCR", "parseq")
+    with pytest.raises(ValidationError):
+        load_settings()
+
+    base_env.setenv("MODELS_DIR", str(tmp_path))
+    assert load_settings().model_selection()["ocr"] == "parseq"
+
+
+@pytest.mark.parametrize("value", ["", "Con Espacios", "../otro", "MAYUS"])
+def test_nombre_de_modelo_invalido(base_env: pytest.MonkeyPatch, value: str) -> None:
+    base_env.setenv("MODEL_FACE", value)
+
+    with pytest.raises(ValidationError):
+        load_settings()
+
+
+def test_el_arranque_falla_si_un_modelo_seleccionado_no_se_puede_verificar(
+    base_env: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from vvi_ia.main import EXIT_BAD_MODELS, main
+
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "manifest.json").write_text(
+        '{"schema_version": 1, "models": []}', encoding="utf-8"
+    )
+    base_env.setenv("MODEL_EMBEDDER", "dinov2_vits14")
+    base_env.setenv("MODELS_DIR", str(tmp_path))
+
+    assert main() == EXIT_BAD_MODELS
+    assert "modelos inválidos" in capsys.readouterr().out
+
+
+def test_con_null_load_models_no_necesita_manifest(base_env: pytest.MonkeyPatch) -> None:
+    from vvi_ia.main import load_models
+
+    assert set(load_models(load_settings()).versions().values()) == {"null"}
+
+
+# --- la imagen no lleva herramientas de entrenamiento ---------------------------------------
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TRAINING_ONLY = ("torch", "torchvision", "transformers", "rfdetr", "fiftyone", "sam3", "timm")
+
+
+def test_las_dependencias_base_no_incluyen_frameworks_de_entrenamiento() -> None:
+    import tomllib
+
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    base = [dep.split(">")[0].split("=")[0].split("[")[0].strip().lower() for dep in project["dependencies"]]
+
+    assert "onnxruntime" in base
+    assert not set(base) & set(TRAINING_ONLY)
+
+
+def test_la_imagen_no_instala_extras_ni_copia_pesos() -> None:
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "--extra" not in dockerfile
+    assert "--all-extras" not in dockerfile
+    assert "COPY models/manifest.json" in dockerfile
+    assert "COPY models " not in dockerfile and "COPY . " not in dockerfile

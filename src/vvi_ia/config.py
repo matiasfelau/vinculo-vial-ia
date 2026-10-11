@@ -2,19 +2,24 @@
 
 import base64
 import binascii
+from pathlib import Path
 from typing import Self
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 HPKE_KEY_BYTES = 32
+NULL_MODEL = "null"
+MODEL_NAME_PATTERN = r"^[a-z0-9][a-z0-9_]*$"
 LOCAL_ENV = "local"
 
 
 class Settings(BaseSettings):
     """Variables de entorno del servicio. Las obligatorias no tienen valor por defecto."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", case_sensitive=False, protected_namespaces=()
+    )
 
     # Broker
     rabbitmq_url: SecretStr
@@ -53,6 +58,18 @@ class Settings(BaseSettings):
     ramp_scale_fallback: float = Field(default=0.45, gt=0.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
 
+    # Modelos: `null` (default) o el nombre de un modelo de models/manifest.json
+    model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_face: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_segmenter: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_curb: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_embedder: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_ocr: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    model_damage: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    models_dir: Path | None = None
+    models_manifest: Path = Path("models/manifest.json")
+    onnx_intra_op_threads: int = Field(default=0, ge=0)
+
     health_port: int = Field(default=8080, ge=1, le=65535)
 
     @field_validator("ia_hpke_private_key")
@@ -72,7 +89,21 @@ class Settings(BaseSettings):
             raise ValueError("REID_T_LOW debe ser menor que REID_T_HIGH")
         if not self.redaction_required and self.env != LOCAL_ENV:
             raise ValueError(f"REDACTION_REQUIRED=false solo se acepta con ENV={LOCAL_ENV}")
+        if self.models_dir is None and any(name != NULL_MODEL for name in self.model_selection().values()):
+            raise ValueError("MODELS_DIR es obligatorio cuando algún MODEL_* no es null")
         return self
+
+    def model_selection(self) -> dict[str, str]:
+        """Selección `{puerto: nombre}` tal como la espera el registro de modelos."""
+        return {
+            "detector": self.model_detector,
+            "face": self.model_face,
+            "segmenter": self.model_segmenter,
+            "curb": self.model_curb,
+            "embedder": self.model_embedder,
+            "ocr": self.model_ocr,
+            "damage": self.model_damage,
+        }
 
 
 def load_settings() -> Settings:
