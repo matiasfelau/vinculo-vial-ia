@@ -35,6 +35,10 @@ Notas:
   modificar con [tools/export/rfdetr_seg.py](tools/export/rfdetr_seg.py). Solo se aceptan los
   tamaños Small y Medium.
 - **PARSeq:** antes de un uso comercial hay que confirmar con los autores la licencia de los pesos.
+  Se usan los pesos de la release v1.0.0 de <https://github.com/baudm/parseq> (`parseq-bb5792a6.pt`),
+  convertidos a ONNX sin reentrenar con [tools/export/parseq.py](tools/export/parseq.py), que carga el
+  código del commit `1902db043c02`. Lee una sola línea de texto: las patentes de dos líneas (motos)
+  están fuera de alcance.
 - **`damage`:** los pesos entrenados con CarDD no se publican ni se redistribuyen.
 
 ## Modelos que solo viven en `tools/`

@@ -171,3 +171,63 @@ tienen otra licencia (PML 1.0): el script ni siquiera los ofrece.
 - **Falla la descarga de los pesos**: necesita internet solo esta vez. Si la red bloquea
   `storage.googleapis.com`, bajá `rf-detr-seg-s-ft.pth` desde otra red y copialo como
   `rf-detr-seg-small.pt` en `~\.roboflow\models`.
+
+## PARSeq (puerto `ocr`)
+
+Es el modelo que lee el texto de la foto de una patente. Se usa preentrenado, sin reentrenar. El
+código es Apache 2.0, pero **el repositorio no declara una licencia para los pesos**: por eso figura
+como `escalable` y hay que confirmar la licencia con los autores antes de un uso comercial.
+
+Limitación: lee una sola línea de texto. Las patentes de dos líneas (motos) están fuera de alcance.
+
+1. Con las dependencias y `MODELS_DIR` ya listas (ver "Antes de empezar"), corré:
+
+   ```powershell
+   uv run --frozen --extra dev --extra tools python tools/export/parseq.py
+   ```
+
+   La primera vez baja de GitHub el código de PARSeq (en un commit fijo, a `~\.cache\torch\hub`) y
+   los pesos (unos 91 MB, con verificación de hash). Tarda un par de minutos. Exporta siempre en
+   CPU: no hace falta GPU.
+
+2. Las últimas líneas tienen que parecerse a estas:
+
+   ```text
+   Diferencia máxima entre ONNX (CPU) y el forward original de PARSeq: 9.54e-06
+   Listo: models\weights\parseq.onnx (96.7 MB)
+   sha256: 7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991
+   ```
+
+   La primera línea es el control de calidad: el script compara los logits del ONNX con los del
+   modelo original y también que lean los mismos caracteres. Si la diferencia supera 0,001 no
+   guarda el archivo.
+
+3. Compará el `sha256` con el de `parseq` en `models/manifest.json`. Si no coincide, mismo criterio
+   que con DINOv2.
+
+4. Probá el modelo real: `uv run --frozen --extra dev --extra tools pytest -m models`. Esas pruebas
+   dibujan texto con formato de patente en una imagen sintética; no usan fotos reales.
+
+5. Para usarlo, en tu `.env`:
+
+   ```dotenv
+   MODEL_OCR=parseq
+   MODELS_DIR=./models/weights
+   ```
+
+   `OCR_MIN_CONF` (0,60 por defecto) es la confianza mínima para aceptar una lectura. El servicio
+   la compara con el mínimo de las probabilidades de los caracteres leídos; el valor definitivo se
+   propone con la evaluación del OCR.
+
+### Qué hace el adaptador con el texto leído
+
+Si el texto contiene una patente argentina (Mercosur `AB123CD` o anterior `ABC123`), devuelve solo
+esa parte y su confianza sale de sus propios caracteres. Tolera las confusiones típicas del OCR (O/0,
+I/1, B/8, Z/2, S/5, G/6) dentro de la patente. Si no hay ninguna, devuelve el texto tal cual y la
+confianza mínima de todo el texto.
+
+### Problemas frecuentes (PARSeq)
+
+- **Falla la descarga**: necesita internet solo esta vez, hacia `github.com` y `objects.githubusercontent.com`.
+- **"Ya existe ... Usá --force"**: ya lo exportaste; si el sha256 coincide con el manifest, no hace
+  falta repetirlo.

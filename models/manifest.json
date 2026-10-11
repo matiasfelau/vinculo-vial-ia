@@ -2,6 +2,22 @@
   "schema_version": 1,
   "models": [
     {
+      "name": "parseq",
+      "version": "parseq-bb5792a6@1902db043c02",
+      "ports": ["ocr"],
+      "file": "parseq.onnx",
+      "sha256": "7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991",
+      "license": "Apache-2.0 (código); los pesos no declaran licencia",
+      "paper": {
+        "title": "Scene Text Recognition with Permuted Autoregressive Sequence Models",
+        "venue": "ECCV",
+        "year": 2022
+      },
+      "source": "https://github.com/baudm/parseq (commit 1902db043c029a7e03a3818c616c06600af574be), pesos de la release v1.0.0 (parseq-bb5792a6.pt), exportado a ONNX con tools/export/parseq.py",
+      "commercial": "escalable",
+      "notes": "PARSeq base preentrenado, sin reentrenar. Antes de un uso comercial hay que confirmar con los autores la licencia de los pesos. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
+    },
+    {
       "name": "rfdetr_seg_coco",
       "version": "rf-detr-seg-small@coco",
       "ports": ["segmenter"],
