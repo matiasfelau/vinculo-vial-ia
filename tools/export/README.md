@@ -1,4 +1,4 @@
-# Exportar modelos a ONNX
+﻿# Exportar modelos a ONNX
 
 El servicio no usa PyTorch: corre los modelos con ONNX Runtime en CPU. "Exportar" es convertir un
 modelo de PyTorch a un archivo `.onnx` que el servicio pueda cargar. Se hace una sola vez por
@@ -118,3 +118,56 @@ uv run --frozen --extra dev --extra tools python tools/export/dinov2.py
 
 Después descargá `models/weights/dinov2_vits14.onnx` a tu máquina. En este paso no interviene
 ninguna foto ni dataset: solo los pesos públicos del modelo.
+
+## RF-DETR-Seg con COCO (puerto `segmenter`)
+
+Es el modelo que marca, píxel por píxel, dónde está cada auto de la foto. Se usa tal como lo
+publica Roboflow, entrenado con COCO (licencia Apache 2.0): no hay nada que entrenar. Se exporta el
+tamaño **Small**; el Medium también funciona pero tarda más en CPU. Nunca se usan XL ni 2XL, que
+tienen otra licencia (PML 1.0): el script ni siquiera los ofrece.
+
+1. Con las dependencias y `MODELS_DIR` ya listas (ver "Antes de empezar"), corré:
+
+   ```powershell
+   uv run --frozen --extra dev --extra tools python tools/export/rfdetr_seg.py
+   ```
+
+   La primera vez baja unos 129 MB de pesos a `~\.roboflow\models` (carpeta de la librería, fuera
+   del repo, con verificación de MD5) y tarda un par de minutos. No necesita GPU, aunque acepta
+   `--device cuda`. Con `--size medium` exporta el tamaño Medium.
+
+2. Las últimas líneas tienen que parecerse a estas:
+
+   ```text
+   Diferencia máxima ONNX (CPU) vs PyTorch (cpu) en ('dets', 'labels', 'masks'): [0.0002, 0.0004, 0.0085]
+   Listo: models\weights\rfdetr_seg_coco.onnx (123.4 MB)
+   sha256: 202b2050c1776e7cc5b08e0632b7fee1b5fc52cb6fcc4bbcd56d36973351a335
+   ```
+
+   Las diferencias son el control de calidad: si alguna supera 0,05 el script no guarda el
+   archivo. Pesa 123 MB.
+
+3. Compará el `sha256` con el de `rfdetr_seg_coco` en `models/manifest.json`. Si no coincide, mismo
+   criterio que con DINOv2: copiá el archivo desde la máquina donde se registró, o reemplazá el
+   valor en el manifest y commiteá ese cambio.
+
+4. Probá el modelo real: `uv run --frozen --extra dev --extra tools pytest -m models`.
+
+5. Para usarlo, en tu `.env`:
+
+   ```dotenv
+   MODEL_SEGMENTER=rfdetr_seg_coco
+   SEGMENTER_MIN_CONF=0.50
+   MODELS_DIR=./models/weights
+   ```
+
+   `SEGMENTER_MIN_CONF` es la confianza mínima para aceptar un auto. Más alta, menos falsos autos
+   pero más autos perdidos.
+
+### Problemas frecuentes (RF-DETR-Seg)
+
+- **"Ya existe ... Usá --force"**: ya lo exportaste; si el sha256 coincide con el manifest, no hace
+  falta repetirlo.
+- **Falla la descarga de los pesos**: necesita internet solo esta vez. Si la red bloquea
+  `storage.googleapis.com`, bajá `rf-detr-seg-s-ft.pth` desde otra red y copialo como
+  `rf-detr-seg-small.pt` en `~\.roboflow\models`.

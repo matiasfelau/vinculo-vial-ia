@@ -41,7 +41,13 @@ def load_models(settings: Settings) -> Models:
         manifest_path=settings.models_manifest,
         models_dir=settings.models_dir,
         intra_op_threads=settings.onnx_intra_op_threads,
+        params=adapter_params(settings),
     )
+
+
+def adapter_params(settings: Settings) -> dict[str, float]:
+    """Parámetros que cada adaptador de modelo lee de su configuración."""
+    return {"segmenter_min_conf": settings.segmenter_min_conf}
 
 
 def build_thresholds(settings: Settings) -> Thresholds:
