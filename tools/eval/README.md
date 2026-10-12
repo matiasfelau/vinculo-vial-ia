@@ -187,3 +187,92 @@ Tomala como orientativa:
   está mal escrito. El script te dice cuál.
 - **"No se pudo empezar: ... sha256 ..."**: el archivo de `MODELS_DIR` no es el del manifest; ver
   [tools/export/README.md](../export/README.md).
+
+## Re-identificación de autos (`reid.py`)
+
+El servicio decide si las dos fotos de una alerta (la general y la de la patente) muestran **el mismo
+auto** comparando sus *embeddings*: un embedding es una lista de números que describe cómo se ve el auto,
+y dos fotos del mismo auto deberían dar listas parecidas. La **similitud** (coseno) va de -1 a 1 y se
+compara con dos umbrales:
+
+- por debajo de `REID_T_LOW`: autos distintos → alerta roja de fraude (`BURST_MISMATCH`);
+- desde `REID_T_HIGH`: el mismo auto;
+- entre los dos: no se sabe → alerta amarilla (`BURST_UNCERTAIN`).
+
+Este script mide las similitudes reales con **tus fotos** y propone los dos umbrales. Los valores de
+fábrica (0,50 y 0,70) son una estimación sin datos.
+
+> Estado: el script está escrito y probado con datos sintéticos. Todavía no se corrió con fotos reales.
+
+### 1. Armar el dataset
+
+Fotos de autos con rostros y patentes de terceros: **fuera del repo**. En `EVAL_DATA_DIR` (por ejemplo
+`D:\vv-eval`):
+
+```text
+D:\vv-eval\reid\
+  fotos.csv
+  fotos\          <- las fotos
+```
+
+`fotos.csv` tiene dos columnas. `auto` es un nombre cualquiera, el mismo para todas las fotos del mismo
+auto físico:
+
+```csv
+archivo,auto
+a1.jpg,auto-1
+a2.jpg,auto-1
+b1.jpg,auto-2
+b2.jpg,auto-2
+```
+
+Conviene que cada auto tenga **al menos 2 fotos** (de ángulos y luces distintos, como llegarán en las
+alertas) y que haya **varios autos del mismo modelo y color**: son las comparaciones difíciles. Cuantos
+más autos, mejor se estima la cola de la distribución de los autos distintos.
+
+### 2. Correrlo
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"
+$env:EVAL_OUT = "D:\vv-eval\out\reid"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/reid.py
+```
+
+Hace falta tener exportados `rfdetr_seg_coco` y `dinov2_vits14` (ver
+[tools/export/README.md](../export/README.md)). Para cada foto corre lo mismo que el servicio: segmenta los
+autos, se queda con el más grande y calcula su embedding. Las fotos sin auto o ilegibles se descartan y se
+cuentan.
+
+### 3. Cómo leer el resultado
+
+Muestra, para los pares del **mismo auto** y para los de **autos distintos**, la media, el desvío y los
+percentiles de la similitud, un histograma de texto y el **AUC**: la probabilidad de que un par del mismo
+auto se parezca más que uno de autos distintos. 1,0 es separación perfecta; 0,5, azar.
+
+Después propone los umbrales con dos límites de error, que se pueden cambiar:
+
+| Opción | Qué limita | Por defecto |
+|---|---|---|
+| `--max-false-fraud` | Pares del **mismo auto** que quedarían por debajo de `REID_T_LOW`: una alerta roja de fraude sobre un reporte honesto. | 1 % |
+| `--max-false-accept` | Pares de **autos distintos** que llegarían a `REID_T_HIGH`: un fraude que pasa por el mismo auto. | 1 % |
+
+Los límites se cumplen siempre. Lo que cambia con la calidad de los datos es el ancho de la banda
+`REID_T_LOW`–`REID_T_HIGH`: si las distribuciones se separan, la banda cae en el hueco y casi ningún par
+queda en amarillo; si se solapan, la banda se ensancha y más pares van a revisión. El reporte dice si se
+separan, cuánto queda en cada categoría con los umbrales propuestos y con los actuales.
+
+`reid_report.json` tiene las mismas cifras y el histograma; no tiene nombres de fotos.
+
+### 4. Aplicar la propuesta
+
+Poné `REID_T_LOW` y `REID_T_HIGH` en el `.env` del servicio. Con pocos autos, los percentiles extremos se
+apoyan en muy pocos pares: tomá la propuesta como orientativa y mirá el histograma.
+
+### Problemas frecuentes (re-ID)
+
+- **"necesita las columnas archivo, auto"** o **"fila N"**: el CSV tiene un error; el mensaje dice la fila.
+- **"Sin propuesta: hacen falta pares iguales y pares distintos"**: hay que tener algún auto con 2 o más
+  fotos y al menos 2 autos.
+- **Muchas fotos descartadas por "sin auto"**: el segmentador no encontró un auto; probá bajar
+  `--segmenter-min-conf`.
