@@ -128,6 +128,8 @@ class _Run:
     cars: dict[tuple[EvidenceRole, int], list[CarInstance] | None] = field(default_factory=dict)
     reads: dict[tuple[EvidenceRole, int, Box], PlateRead | None] = field(default_factory=dict)
     reference_embeddings: list[Vector] = field(default_factory=list)
+    embeddings: dict[tuple[EvidenceRole, int, int], Vector | None] = field(default_factory=dict)
+    general_embedding: Vector | None = None
 
     def detect(self, image: EvidenceImage) -> list[Box] | None:
         key = (image.role, image.index)
@@ -140,6 +142,13 @@ class _Run:
         if key not in self.cars:
             self.cars[key] = self.models.cars.cars(image.pixels)
         return self.cars[key]
+
+    def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
+        """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
+        key = (image.role, image.index, car_index)
+        if key not in self.embeddings:
+            self.embeddings[key] = self.models.embedder.embed(image.pixels, car.mask)
+        return self.embeddings[key]
 
     def read_plate(self, image: EvidenceImage) -> PlateRead | None:
         """Lee la caja de patente de mayor confianza, con recorte ajustado y sin padding."""
@@ -238,6 +247,9 @@ class ValidateEvidence:
                 return self._finish(payload, codes, Scores(), durations)
         with _timed(durations, "burst"):
             similarity = self._burst(run, general, plate_img, codes)
+            self._reid_others(
+                run, general, by_role[EvidenceRole.DETAIL] + by_role[EvidenceRole.CONTEXT], codes
+            )
         with _timed(durations, "plate"):
             ocr_conf = self._plate(run, plate_img, reported, codes)
         with _timed(durations, "context"):
@@ -309,8 +321,9 @@ class ValidateEvidence:
         if not plate_cars:
             _add_all(codes, self._burst_by_ocr(run, general, plate_img))
             return None
-        emb_general = self._models.embedder.embed(general.pixels, largest_car(general_cars).mask)
-        emb_plate = self._models.embedder.embed(plate_img.pixels, largest_car(plate_cars).mask)
+        emb_general = run.embed(general, 0, largest_car(general_cars))
+        emb_plate = run.embed(plate_img, 0, largest_car(plate_cars))
+        run.general_embedding = emb_general
         if emb_general is None or emb_plate is None:
             _add(codes, ReasonCode.BURST_UNCERTAIN)
             return None
@@ -321,6 +334,39 @@ class ValidateEvidence:
         elif result.outcome == ReidOutcome.DIFFERENT:
             _add(codes, ReasonCode.BURST_MISMATCH)
         return result.similarity
+
+    def _reid_others(
+        self, run: _Run, general: EvidenceImage, others: Sequence[EvidenceImage], codes: Codes
+    ) -> None:
+        """E1c: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
+
+        De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
+        segmenta ningún auto (un primer plano de la carrocería) no se puede comparar y no suma ningún código.
+        """
+        if run.general_embedding is None:
+            return
+        for image in others:
+            cars = run.segment_cars(image)
+            if cars is None:
+                _add(codes, ReasonCode.BURST_UNCERTAIN)
+                continue
+            candidates = [run.embed(image, index, car) for index, car in enumerate(cars)]
+            if any(candidate is None for candidate in candidates):
+                _add(codes, ReasonCode.BURST_UNCERTAIN)
+                continue
+            match = best_match([c for c in candidates if c is not None], [run.general_embedding])
+            if match is None:
+                continue
+            outcome = same_vehicle(
+                run.general_embedding,
+                [c for c in candidates if c is not None][match[0]],
+                self._t.reid_t_low,
+                self._t.reid_t_high,
+            ).outcome
+            if outcome == ReidOutcome.DIFFERENT:
+                _add(codes, ReasonCode.BURST_MISMATCH)
+            elif outcome == ReidOutcome.UNCERTAIN:
+                _add(codes, ReasonCode.BURST_UNCERTAIN)
 
     def _burst_by_ocr(self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage) -> Codes:
         """PLATE sin auto detectable: se cruzan las lecturas de patente de ambas fotos."""
@@ -405,7 +451,7 @@ class ValidateEvidence:
     ) -> tuple[CarInstance | None, float | None]:
         """Auto objetivo: la instancia con mayor coseno contra el embedding de PLATE o GENERAL."""
         if run.reference_embeddings:
-            embeddings = [self._models.embedder.embed(context.pixels, car.mask) for car in cars]
+            embeddings = [run.embed(context, index, car) for index, car in enumerate(cars)]
             if all(embedding is not None for embedding in embeddings):
                 match = best_match([e for e in embeddings if e is not None], run.reference_embeddings)
                 if match is None:

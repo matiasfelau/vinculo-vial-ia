@@ -210,6 +210,7 @@ def happy_models() -> FakeModels:
                 GENERAL: [CarInstance(rect(10, 90, 10, 90))],
                 PLATE: [CarInstance(rect(10, 90, 10, 90))],
                 CONTEXT: [CarInstance(rect(40, 80, 30, 70)), CarInstance(rect(20, 40, 0, 20))],
+                **{detail_marker(i): [] for i in range(3)},  # en un primer plano no se segmenta ningún auto
             }
         ),
         curb=FakeCurbSegmenter({CONTEXT: (curb, cut)}),
