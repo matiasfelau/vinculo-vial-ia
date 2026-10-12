@@ -1,4 +1,4 @@
-"""Rebajes: validación de fotos.csv, reparto por calle y armado del dataset, con datos sintéticos.
+"""Rebajes: validación de fotos.csv, reparto por escena y armado del dataset, con datos sintéticos.
 
 No hay fotos reales: las imágenes son arreglos lisos y las anotaciones, polígonos inventados.
 """
@@ -6,7 +6,6 @@ No hay fotos reales: las imágenes son arreglos lisos y las anotaciones, polígo
 import importlib.util
 import json
 import sys
-from datetime import date
 from pathlib import Path
 from types import ModuleType
 
@@ -38,31 +37,25 @@ HEADER = ",".join(photos_mod.COLUMNS)
 
 def row(
     archivo: str = "a.jpg",
-    fecha: str = "2026-09-28",
-    barrio: str = "Centro",
-    calle: str = "Mitre",
+    escena: str = "",
     tipo: str = "positivo_claro",
     rebaje: str = "garage",
     parecido: str = "",
     iluminacion: str = "dia",
     clima: str = "seco",
     oclusion: str = "ninguna",
-    dispositivo: str = "celular",
     notas: str = "",
 ) -> str:
     return ",".join(
         [
             archivo,
-            fecha,
-            barrio,
-            calle,
+            escena,
             tipo,
             rebaje,
             parecido,
             iluminacion,
             clima,
             oclusion,
-            dispositivo,
             notas,
         ]
     )
@@ -89,11 +82,7 @@ def test_carga_fotos_validas_y_excluye_las_descartadas(tmp_path: Path) -> None:
     photos = photos_mod.load_photos(path)
 
     assert [p.file for p in photos] == ["a.jpg", "c.jpg"]
-    assert (
-        photos[0].date == date(2026, 9, 28)
-        and photos[0].kind == "positivo_claro"
-        and photos[0].lighting == "dia"
-    )
+    assert photos[0].kind == "positivo_claro" and photos[0].lighting == "dia" and photos[0].scene == ""
 
 
 @pytest.mark.parametrize(
@@ -118,7 +107,7 @@ def test_un_valor_desconocido_se_rechaza_con_su_numero_de_fila(
 def test_se_listan_todos_los_problemas_y_no_solo_el_primero(tmp_path: Path) -> None:
     path = write_csv(
         tmp_path / "fotos.csv",
-        [row("a.jpg", clima="x"), row("b.jpg"), row("c.jpg", fecha="28/09/2026", oclusion="y")],
+        [row("a.jpg", clima="x"), row("b.jpg"), row("c.jpg", rebaje="z", oclusion="y")],
     )
 
     with pytest.raises(photos_mod.PhotosError) as error:
@@ -126,7 +115,9 @@ def test_se_listan_todos_los_problemas_y_no_solo_el_primero(tmp_path: Path) -> N
 
     assert len(error.value.problems) == 2
     assert error.value.problems[0].startswith("fila 2:") and error.value.problems[1].startswith("fila 4:")
-    assert "fecha inválida" in error.value.problems[1] and "oclusion desconocido" in error.value.problems[1]
+    assert (
+        "rebaje desconocido" in error.value.problems[1] and "oclusion desconocido" in error.value.problems[1]
+    )
 
 
 def test_parecido_solo_con_negativo_parecido(tmp_path: Path) -> None:
@@ -152,12 +143,55 @@ def test_el_parecido_de_una_descartada_tambien_se_valida(tmp_path: Path) -> None
         photos_mod.load_photos(path)
 
 
-@pytest.mark.parametrize("campo", ["barrio", "calle", "dispositivo", "archivo"])
-def test_los_textos_obligatorios(tmp_path: Path, campo: str) -> None:
-    path = write_csv(tmp_path / "fotos.csv", [row(**{campo: ""})])
+def test_el_archivo_es_obligatorio_y_la_escena_opcional(tmp_path: Path) -> None:
+    with pytest.raises(photos_mod.PhotosError, match="falta archivo"):
+        photos_mod.load_photos(write_csv(tmp_path / "a.csv", [row("")]))
 
-    with pytest.raises(photos_mod.PhotosError, match=f"falta {campo}"):
+    photos = photos_mod.load_photos(write_csv(tmp_path / "b.csv", [row("a.jpg"), row("b.jpg", escena="e01")]))
+
+    assert [p.scene for p in photos] == ["", "e01"]
+
+
+def test_las_columnas_son_las_nuevas_y_en_ese_orden() -> None:
+    assert photos_mod.COLUMNS == (
+        "archivo",
+        "escena",
+        "tipo",
+        "rebaje",
+        "parecido",
+        "iluminacion",
+        "clima",
+        "oclusion",
+        "notas",
+    )
+
+
+def test_un_csv_con_las_columnas_viejas_se_rechaza(tmp_path: Path) -> None:
+    old = "archivo,fecha,barrio,calle,tipo,rebaje,parecido,iluminacion,clima,oclusion,dispositivo,notas"
+
+    with pytest.raises(photos_mod.PhotosError, match="faltan: escena"):
+        photos_mod.load_photos(write_csv(tmp_path / "fotos.csv", [], header=old))
+
+
+def test_una_escena_comparte_rebaje_iluminacion_y_clima(tmp_path: Path) -> None:
+    path = write_csv(
+        tmp_path / "fotos.csv",
+        [
+            row("a.jpg", escena="e01"),
+            row("b.jpg", escena="E01"),  # mayúsculas: es la misma escena
+            row("c.jpg", escena="e01", rebaje="accesibilidad", iluminacion="noche"),
+            row("d.jpg", escena="e01", tipo="descartada", clima="lluvia"),  # las descartadas no cuentan
+            row("e.jpg", escena="e02", rebaje="accesibilidad"),
+        ],
+    )
+
+    with pytest.raises(photos_mod.PhotosError) as error:
         photos_mod.load_photos(path)
+
+    assert len(error.value.problems) == 1
+    problem = error.value.problems[0]
+    assert problem.startswith("fila 4:") and "la escena 'e01' tiene rebaje 'accesibilidad'" in problem
+    assert "fila 2" in problem and "iluminacion 'noche'" in problem
 
 
 def test_foto_repetida(tmp_path: Path) -> None:
@@ -193,51 +227,15 @@ def test_filtra_por_tipo(tmp_path: Path) -> None:
     assert [p.file for p in photos_mod.load_photos(path, keep={"positivo_marginal"})] == ["b.jpg"]
 
 
-def test_la_calle_se_identifica_con_el_barrio_sin_distinguir_mayusculas() -> None:
-    a = photos_mod.CurbPhoto(
-        "a",
-        date(2026, 1, 1),
-        "Centro",
-        "Mitre",
-        "positivo_claro",
-        "garage",
-        "",
-        "dia",
-        "seco",
-        "ninguna",
-        "c",
-        "",
-    )
-    b = photos_mod.CurbPhoto(
-        "b",
-        date(2026, 1, 1),
-        "centro",
-        "MITRE",
-        "positivo_claro",
-        "garage",
-        "",
-        "dia",
-        "seco",
-        "ninguna",
-        "c",
-        "",
-    )
-    c = photos_mod.CurbPhoto(
-        "c",
-        date(2026, 1, 1),
-        "Norte",
-        "Mitre",
-        "positivo_claro",
-        "garage",
-        "",
-        "dia",
-        "seco",
-        "ninguna",
-        "c",
-        "",
-    )
+def test_el_grupo_es_la_escena_sin_distinguir_mayusculas_o_la_foto_misma() -> None:
+    def photo(file: str, scene: str) -> object:
+        return photos_mod.CurbPhoto(file, scene, "positivo_claro", "garage", "", "dia", "seco", "ninguna", "")
+
+    a, b, c = photo("a", "E01"), photo("b", "e01"), photo("c", "e02")
+    solo, other_solo = photo("x", ""), photo("y", "")
 
     assert a.group == b.group != c.group
+    assert solo.group != other_solo.group and solo.group != a.group
 
 
 # --- reparto -------------------------------------------------------------------------------------
@@ -252,30 +250,56 @@ KINDS = [
 ]
 
 
-def make_photos(streets: int = 30, per_street: int = 4) -> list:
+def make_photos(scenes: int = 30, per_scene: int = 4) -> list:
+    """`scenes` escenas de `per_scene` fotos cada una."""
     out = []
-    for street in range(streets):
-        for index in range(per_street):
-            kind = KINDS[(street + index) % len(KINDS)]
+    for scene in range(scenes):
+        for index in range(per_scene):
+            kind = KINDS[(scene + index) % len(KINDS)]
             out.append(
                 photos_mod.CurbPhoto(
-                    f"c{street:02d}_{index}.jpg", date(2026, 9, 1), f"barrio{street % 3}", f"calle{street}",
-                    kind, "garage", "boca_tormenta" if kind == "negativo_parecido" else "",
-                    "dia", "seco", "ninguna", "celular", "",
+                    f"c{scene:02d}_{index}.jpg", f"e{scene:02d}", kind, "garage",
+                    "boca_tormenta" if kind == "negativo_parecido" else "",
+                    "dia", "seco", "ninguna", "",
                 )
             )  # fmt: skip
     return out
 
 
+def single_photos(count: int = 60) -> list:
+    """Fotos sin escena."""
+    return [
+        photos_mod.CurbPhoto(
+            f"u{index:03d}.jpg", "", KINDS[index % len(KINDS)], "garage",
+            "boca_tormenta" if KINDS[index % len(KINDS)] == "negativo_parecido" else "",
+            "dia", "seco", "ninguna", "",
+        )
+        for index in range(count)
+    ]  # fmt: skip
+
+
 @pytest.mark.parametrize("seed", [0, 1, 7])
-def test_ninguna_calle_esta_en_dos_conjuntos(seed: int) -> None:
+def test_ninguna_escena_esta_en_dos_conjuntos(seed: int) -> None:
     assignment = splits_mod.assign(make_photos(), seed)
 
-    streets = {name: {p.group for p in photos} for name, photos in assignment.splits.items()}
-    assert not (streets["train"] & streets["valid"]) and not (streets["train"] & streets["test"])
-    assert not (streets["valid"] & streets["test"])
+    groups = {name: {p.group for p in photos} for name, photos in assignment.splits.items()}
+    assert not (groups["train"] & groups["valid"]) and not (groups["train"] & groups["test"])
+    assert not (groups["valid"] & groups["test"])
     assert sum(len(v) for v in assignment.splits.values()) == 120
     assert {p.file for v in assignment.splits.values() for p in v} == {p.file for p in make_photos()}
+
+
+def test_las_fotos_de_una_escena_van_juntas_y_las_sueltas_se_reparten_solas() -> None:
+    photos = [*make_photos(scenes=12, per_scene=5), *single_photos(60)]
+
+    assignment = splits_mod.assign(photos, 0)
+
+    where = {p.file: name for name, v in assignment.splits.items() for p in v}
+    for scene in range(12):
+        assert len({where[f"c{scene:02d}_{i}.jpg"] for i in range(5)}) == 1
+    assert len({where[f"u{i:03d}.jpg"] for i in range(60)}) == 3  # sin escena: cada foto va por su cuenta
+    sizes = {name: len(v) for name, v in assignment.splits.items()}
+    assert 0.5 <= sizes["train"] / 120 <= 0.7 and sizes["valid"] > 0 and sizes["test"] > 0
 
 
 def test_las_proporciones_son_aproximadamente_60_20_20() -> None:
@@ -307,9 +331,9 @@ def test_el_reparto_es_reproducible_y_cambia_con_la_semilla() -> None:
     assert names(first) != names(other)
 
 
-def test_con_menos_de_tres_calles_no_se_puede_repartir() -> None:
-    with pytest.raises(splits_mod.SplitError, match="al menos 3 calles"):
-        splits_mod.assign(make_photos(streets=2), 0)
+def test_con_menos_de_tres_grupos_no_se_puede_repartir() -> None:
+    with pytest.raises(splits_mod.SplitError, match="al menos 3 grupos"):
+        splits_mod.assign(make_photos(scenes=2), 0)
 
 
 def test_el_test_se_guarda_la_primera_vez_y_no_se_pisa(tmp_path: Path) -> None:
@@ -330,40 +354,38 @@ def test_con_el_test_guardado_las_fotos_nuevas_no_lo_cambian(tmp_path: Path) -> 
     first = splits_mod.assign(make_photos(), 0)
     splits_mod.save_test(tmp_path, first, 0)
     fixed = splits_mod.load_fixed_test(tmp_path)
-    more = make_photos(streets=40)  # llegan 10 calles nuevas
+    more = [*make_photos(scenes=40), *single_photos(5)]  # llegan 10 escenas y 5 fotos sueltas
 
     second = splits_mod.assign(more, 9, fixed)
 
     assert [p.file for p in second.splits["test"]] == [p.file for p in first.splits["test"]]
-    new_streets = {p.group for p in more} - {p.group for p in make_photos()}
-    assert new_streets and not (new_streets & {p.group for p in second.splits["test"]})
+    new_groups = {p.group for p in more} - {p.group for p in make_photos()}
+    assert len(new_groups) == 15 and not (new_groups & {p.group for p in second.splits["test"]})
     train_valid = {p.group for p in second.splits["train"]} & {p.group for p in second.splits["valid"]}
     assert not train_valid and not second.left_out
 
 
-def test_una_foto_nueva_de_una_calle_del_test_queda_afuera_de_todo(tmp_path: Path) -> None:
+def test_una_foto_nueva_de_una_escena_del_test_queda_afuera_de_todo(tmp_path: Path) -> None:
     first = splits_mod.assign(make_photos(), 0)
     splits_mod.save_test(tmp_path, first, 0)
-    test_street = first.splits["test"][0]
+    test_scene = first.splits["test"][0].scene
     extra = photos_mod.CurbPhoto(
-        "nueva.jpg",
-        date(2026, 10, 1),
-        test_street.neighborhood,
-        test_street.street,
-        "positivo_claro",
-        "garage",
-        "",
-        "dia",
-        "seco",
-        "ninguna",
-        "c",
-        "",
+        "nueva.jpg", test_scene, "positivo_claro", "garage", "", "dia", "seco", "ninguna", ""
     )
 
     second = splits_mod.assign([*make_photos(), extra], 0, splits_mod.load_fixed_test(tmp_path))
 
     assert [p.file for p in second.left_out] == ["nueva.jpg"]
     assert "nueva.jpg" not in {p.file for v in second.splits.values() for p in v}
+
+
+def test_el_test_guardado_nombra_los_grupos(tmp_path: Path) -> None:
+    splits_mod.save_test(tmp_path, splits_mod.assign([*make_photos(10), *single_photos(30)], 0), 0)
+
+    saved = json.loads((tmp_path / "test.json").read_text(encoding="utf-8"))
+
+    assert set(saved) == {"semilla", "grupos", "archivos"}
+    assert all(g.startswith(("escena:", "foto:")) for g in saved["grupos"])
 
 
 def test_el_resumen_y_las_asignaciones(tmp_path: Path) -> None:
@@ -383,7 +405,7 @@ def test_el_resumen_y_las_asignaciones(tmp_path: Path) -> None:
 
 def make_curb(
     tmp_path: Path,
-    streets: int = 6,
+    scenes: int = 6,
     reverse_ids: bool = False,
     rle: bool = False,
     skip_in_export: str | None = None,
@@ -394,16 +416,15 @@ def make_curb(
     (curb / "cvat-export" / "annotations").mkdir(parents=True)
     rows, images, annotations = [], [], []
     ids = {"curb": 2, "curb_cut": 1} if reverse_ids else {"curb": 1, "curb_cut": 2}
-    for street in range(streets):
+    for scene in range(scenes):
         for index in range(3):
-            name = f"s{street}_{index}.jpg"
-            kind = KINDS[(street + index) % len(KINDS)]
-            cv2.imwrite(str(curb / "raw" / name), np.full((40, 60, 3), 30 * (street + 1), np.uint8))
+            name = f"s{scene}_{index}.jpg"
+            kind = KINDS[(scene + index) % len(KINDS)]
+            cv2.imwrite(str(curb / "raw" / name), np.full((40, 60, 3), 30 * (scene + 1), np.uint8))
             rows.append(
                 row(
                     name,
-                    calle=f"calle{street}",
-                    barrio=f"b{street % 2}",
+                    escena=f"e{scene}",
                     tipo=kind,
                     rebaje="garage",
                     parecido="boca_tormenta" if kind == "negativo_parecido" else "",

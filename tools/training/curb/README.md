@@ -18,7 +18,7 @@ D:\vv-eval\curb\          <- EVAL_DATA_DIR\curb
   fotos.csv               qué es cada foto (ver abajo)
   prelabel\               el preetiquetado con SAM 3
   cvat-export\            lo que exportás de CVAT, corregido a mano
-  splits\                 qué calle fue a cada conjunto (test.json no cambia nunca)
+  splits\                 qué escena o foto fue a cada conjunto (test.json no cambia nunca)
   dataset\                el dataset armado para entrenar
   runs\                   los resultados de cada entrenamiento
 ```
@@ -30,15 +30,13 @@ Una fila por foto de `raw\`. Columnas, en este orden:
 | Columna | Valores |
 |---|---|
 | `archivo` | Nombre del archivo en `raw\`. |
-| `fecha` | `AAAA-MM-DD`. |
-| `barrio`, `calle` | Texto. **La calle importa**: se usa para que fotos de la misma calle no queden en conjuntos distintos. |
+| `escena` | Opcional. Fotos con el mismo valor (por ejemplo `e01`) son **del mismo auto en el mismo rebaje y momento** y quedan siempre en el mismo conjunto. Vacío = foto única. |
 | `tipo` | `positivo_claro`, `positivo_marginal`, `negativo_auto_junto_rebaje`, `negativo_auto_sin_rebaje`, `negativo_rebaje_sin_auto`, `negativo_parecido` o `descartada`. |
 | `rebaje` | `garage`, `accesibilidad` o `ninguno`. |
 | `parecido` | Solo con `tipo = negativo_parecido` (y ahí es obligatorio): `cordon_pintado`, `cordon_roto`, `boca_tormenta`, `porton_sin_rebaje`, `desnivel_obra` u `otro`. |
 | `iluminacion` | `dia`, `atardecer` o `noche`. |
 | `clima` | `seco`, `mojado` o `lluvia`. |
-| `oclusion` | `ninguna`, `parcial` o `fuerte`. |
-| `dispositivo` | El celular o la cámara, texto libre. |
+| `oclusion` | `ninguna`, `parcial` o `fuerte` (definición abajo). |
 | `notas` | Texto libre, opcional. |
 
 Qué es cada `tipo`:
@@ -51,6 +49,20 @@ Qué es cada `tipo`:
 - `negativo_parecido`: algo que parece un rebaje y no lo es: un cordón pintado, una boca de tormenta, etc.
   (`NO_DRIVEWAY`, o `NO_CAR` si no hay auto).
 - `descartada`: una foto que no sirve (movida, tapada...). Se excluye de todo.
+
+Qué es cada `oclusion`. La **zona** es el rebaje, el cordón a sus lados y el borde inferior del auto:
+
+- `ninguna`: nada se interpone en la zona.
+- `parcial`: algo tapa **menos de la mitad** de la zona y el encuentro entre el auto y el rebaje sigue visible.
+- `fuerte`: tapa **la mitad o más**, o justo el encuentro entre el auto y el rebaje.
+
+Una rueda tapada por un objeto es oclusión; una rueda fuera de cuadro o escondida por el ángulo de la foto no lo es.
+
+**La `escena`.** Si sacás varias fotos del mismo auto en el mismo rebaje y momento (otro ángulo, un paso
+más cerca), ponelas con la misma `escena`: se parecen tanto que, si una entrenara y otra evaluara, la prueba
+daría mejor de lo que el modelo vale. Una escena comparte `rebaje`, `iluminacion` y `clima`: si no coinciden, el
+script lo rechaza porque casi seguro es un error de tipeo. Las fotos de otro auto o de otro momento, aunque
+sean del mismo rebaje, van en otra escena (o sin escena).
 
 El script **rechaza cualquier valor que no esté en estas listas**, indicando el número de fila (la fila 2 es la
 primera de datos). Mejor un error acá que un dataset con etiquetas mal escritas.
@@ -69,18 +81,19 @@ uv run --frozen --extra dev --extra tools python tools/training/curb/prepare.py
 
 Valida el CSV, une las anotaciones de CVAT con la clase de cada foto y reparte las fotos así:
 
-- **Por calle**: ninguna calle queda en dos conjuntos. Dos fotos de la misma calle se parecen tanto que, si
-  una entrenara y la otra evaluara, la prueba daría mejor de lo que el modelo vale.
-- Aproximadamente **60 % entrenamiento, 20 % validación y 20 % prueba**, y **estratificado por tipo**: cada
-  conjunto tiene proporciones parecidas de cada tipo de foto.
+- **Por escena**: ninguna escena queda en dos conjuntos. Una foto sin escena se reparte sola.
+- **Al azar con semilla fija** (`--seed`, 0 por defecto, así que repetir el comando da lo mismo),
+  aproximadamente **60 % entrenamiento, 20 % validación y 20 % prueba**, y **estratificado por tipo**: cada
+  conjunto tiene proporciones parecidas de cada tipo de foto. Reparte grupos enteros, así que con escenas
+  grandes las proporciones se corren un poco: el script muestra lo que logró.
 - **El test se guarda la primera vez en `splits\test.json` y no cambia nunca más**, así podés comparar modelos
-  entrenados en momentos distintos con exactamente las mismas fotos. Al sumar fotos nuevas, las calles nuevas
-  van solo a entrenamiento y validación. Si llega una foto nueva de una calle que ya está en el test, queda
-  **afuera de todo** (y el script te lo avisa): moverla ensuciaría el test.
+  entrenados en momentos distintos con exactamente las mismas fotos. Al sumar fotos nuevas, las escenas nuevas
+  y las fotos sin escena van solo a entrenamiento y validación. Si llega una foto nueva de una escena que ya
+  está en el test, queda **afuera de todo** (y el script te lo avisa): moverla ensuciaría el test.
 
 Te avisa también si una foto de un tipo que muestra un rebaje no tiene ningún `curb_cut` anotado (suele ser un
 olvido al etiquetar) y cuántas anotaciones descartó (por ejemplo las que están como máscara en vez de polígono).
-Con menos de 3 calles distintas no se puede repartir.
+Con menos de 3 grupos distintos (escenas o fotos sin escena) no se puede repartir.
 
 Si tu CVAT exporta en otra carpeta: `--export RUTA` (la carpeta o el `.json`). `--seed N` cambia el reparto de
 train y valid; el test guardado no cambia.
@@ -145,5 +158,7 @@ Ver [tools/eval/README.md](../../eval/README.md) para leer los resultados.
   exportar de nuevo.
 - **"la exportación no tiene las clases curb_cut"**: en CVAT, las etiquetas tienen que llamarse exactamente
   `curb` y `curb_cut`.
-- **"hacen falta al menos 3 calles distintas"**: el reparto por calle necesita variedad.
+- **"hacen falta al menos 3 grupos distintos"**: el reparto necesita variedad de escenas o fotos.
+- **"la escena ... tiene rebaje ..."**: dos fotos de la misma escena no coinciden en `rebaje`, `iluminacion` o
+  `clima`. O es un error de tipeo, o no son de la misma escena.
 - **`CUDA out of memory`**: `--batch-size 1 --grad-accum 16`. No cambies a un modelo más chico.

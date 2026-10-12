@@ -2,26 +2,25 @@
 
 Cada fila describe una foto de `raw/`. Se rechaza cualquier valor desconocido indicando el número de fila
 (la fila 2 es la primera de datos: la 1 es el encabezado). Las fotos de tipo `descartada` se excluyen.
+
+`escena` es opcional: las fotos con el mismo valor son del mismo auto en el mismo rebaje y momento, y el
+reparto las deja siempre en el mismo conjunto. Vacía, la foto es única.
 """
 
 import csv
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 
 COLUMNS = (
     "archivo",
-    "fecha",
-    "barrio",
-    "calle",
+    "escena",
     "tipo",
     "rebaje",
     "parecido",
     "iluminacion",
     "clima",
     "oclusion",
-    "dispositivo",
     "notas",
 )
 DISCARDED = "descartada"
@@ -55,7 +54,8 @@ ALLOWED: Mapping[str, tuple[str, ...]] = {
     "clima": ("seco", "mojado", "lluvia"),
     "oclusion": ("ninguna", "parcial", "fuerte"),
 }
-REQUIRED_TEXT = ("archivo", "barrio", "calle", "dispositivo")
+REQUIRED_TEXT = ("archivo",)
+SCENE_SHARED = ("rebaje", "iluminacion", "clima")  # no cambia dentro de una escena
 
 
 class PhotosError(ValueError):
@@ -71,22 +71,19 @@ class CurbPhoto:
     """Una foto válida del dataset de rebajes."""
 
     file: str
-    date: date
-    neighborhood: str
-    street: str
+    scene: str
     kind: str
     ramp: str
     similar: str
     lighting: str
     weather: str
     occlusion: str
-    device: str
     notes: str
 
     @property
     def group(self) -> str:
-        """La calle, con el barrio: dos calles con el mismo nombre en barrios distintos no son la misma."""
-        return f"{self.neighborhood.casefold()}|{self.street.casefold()}"
+        """Lo que no se separa al repartir: la escena, o la foto misma si no tiene escena."""
+        return f"escena:{self.scene.casefold()}" if self.scene else f"foto:{self.file}"
 
 
 def load_photos(
@@ -111,17 +108,13 @@ def load_photos(
         problems: list[str] = []
         photos: list[CurbPhoto] = []
         seen: dict[str, int] = {}
+        scenes: dict[str, tuple[int, dict[str, str]]] = {}
         for row_number, row in enumerate(reader, start=2):
             row_problems: list[str] = []
             values = {column: (row.get(column) or "").strip() for column in COLUMNS}
             for column in REQUIRED_TEXT:
                 if not values[column]:
                     row_problems.append(f"falta {column}")
-            parsed_date: date | None = None
-            try:
-                parsed_date = date.fromisoformat(values["fecha"])
-            except ValueError:
-                row_problems.append(f"fecha inválida {values['fecha']!r} (usá AAAA-MM-DD)")
             for column, allowed in ALLOWED.items():
                 value = values[column]
                 if column == "parecido":
@@ -134,6 +127,15 @@ def load_photos(
                 elif value not in allowed:
                     row_problems.append(f"{column} desconocido {value!r}")
             file = values["archivo"]
+            if (scene := values["escena"].casefold()) and values["tipo"] != DISCARDED:
+                first = scenes.setdefault(scene, (row_number, values))
+                for column in SCENE_SHARED:
+                    if first[1][column] != values[column]:
+                        row_problems.append(
+                            f"la escena {values['escena']!r} tiene {column} {values[column]!r}, pero la "
+                            f"fila {first[0]} tiene {first[1][column]!r} (una escena comparte "
+                            f"{', '.join(SCENE_SHARED)})"
+                        )
             if file in seen:
                 row_problems.append(f"la foto está repetida (ya figura en la fila {seen[file]})")
             elif file:
@@ -143,20 +145,16 @@ def load_photos(
             if row_problems:
                 problems.append(f"fila {row_number}: " + "; ".join(row_problems))
                 continue
-            assert parsed_date is not None
             photos.append(
                 CurbPhoto(
                     file=file,
-                    date=parsed_date,
-                    neighborhood=values["barrio"],
-                    street=values["calle"],
+                    scene=values["escena"],
                     kind=values["tipo"],
                     ramp=values["rebaje"],
                     similar=values["parecido"],
                     lighting=values["iluminacion"],
                     weather=values["clima"],
                     occlusion=values["oclusion"],
-                    device=values["dispositivo"],
                     notes=values["notas"],
                 )
             )

@@ -2,13 +2,14 @@
 
 Reglas:
 
-- **Ninguna calle en dos conjuntos.** Fotos de la misma calle se parecen demasiado: si una quedara en
-  entrenamiento y otra en prueba, el resultado de la prueba sería optimista.
-- Aproximadamente 60 / 20 / 20 y **estratificado por tipo**: cada conjunto tiene una proporción parecida de
-  cada tipo de foto.
+- **Ninguna escena en dos conjuntos.** Las fotos con la misma `escena` (el mismo auto en el mismo rebaje y
+  momento) se parecen demasiado: si una quedara en entrenamiento y otra en prueba, el resultado de la prueba
+  sería optimista. Una foto sin escena es un grupo de una sola foto.
+- Al azar con semilla fija, aproximadamente 60 / 20 / 20 y **estratificado por tipo**: cada conjunto tiene una
+  proporción parecida de cada tipo de foto.
 - **El test se guarda en un archivo la primera vez y después no cambia**, para poder comparar modelos
-  entrenados en momentos distintos con las mismas fotos. Las calles nuevas van solo a train y valid; si
-  aparece una foto nueva de una calle del test, queda afuera de todo (no se puede mover sin ensuciar el test).
+  entrenados en momentos distintos con las mismas fotos. Los grupos nuevos van solo a train y valid; si
+  aparece una foto nueva de una escena del test, queda afuera de todo (moverla ensuciaría el test).
 """
 
 import json
@@ -36,21 +37,21 @@ class Assignment:
     """Resultado del reparto."""
 
     splits: Mapping[str, list[CurbPhoto]]
-    left_out: list[CurbPhoto]  # fotos nuevas de calles que ya están en el test
+    left_out: list[CurbPhoto]  # fotos nuevas de escenas que ya están en el test
 
     def summary(self) -> dict[str, Any]:
-        """Cifras por conjunto: fotos, calles y fotos de cada tipo."""
+        """Cifras por conjunto: fotos, grupos (escenas o fotos únicas) y fotos de cada tipo."""
         return {
             name: {
                 "fotos": len(photos),
-                "calles": len({p.group for p in photos}),
+                "grupos": len({p.group for p in photos}),
                 "tipos": dict(sorted(Counter(p.kind for p in photos).items())),
             }
             for name, photos in self.splits.items()
         } | {"fuera_del_test": len(self.left_out)}
 
 
-def _by_street(photos: Sequence[CurbPhoto]) -> dict[str, list[CurbPhoto]]:
+def _by_group(photos: Sequence[CurbPhoto]) -> dict[str, list[CurbPhoto]]:
     groups: dict[str, list[CurbPhoto]] = defaultdict(list)
     for photo in photos:
         groups[photo.group].append(photo)
@@ -60,10 +61,10 @@ def _by_street(photos: Sequence[CurbPhoto]) -> dict[str, list[CurbPhoto]]:
 def _distribute(
     groups: Mapping[str, Sequence[CurbPhoto]], fractions: Mapping[str, float], seed: int
 ) -> dict[str, list[str]]:
-    """Reparte calles entre conjuntos acercándose a las fracciones y a la proporción de cada tipo.
+    """Reparte grupos entre conjuntos acercándose a las fracciones y a la proporción de cada tipo.
 
-    Va de las calles más grandes a las más chicas y le da cada una al conjunto al que más le falta de los
-    tipos que esa calle trae (ante un empate, desempata un orden estable con la semilla).
+    Va de los grupos más grandes a los más chicos (entre los del mismo tamaño, en un orden al azar fijado por
+    la semilla) y le da cada uno al conjunto al que más le falta de los tipos que ese grupo trae.
     """
     totals: Counter[str] = Counter(p.kind for photos in groups.values() for p in photos)
     wanted = {
@@ -94,23 +95,24 @@ def assign(
     photos: Sequence[CurbPhoto], seed: int = 0, fixed_test: Mapping[str, Any] | None = None
 ) -> Assignment:
     """Reparte las fotos. Con `fixed_test` (el contenido de `test.json`) respeta ese test."""
-    groups = _by_street(photos)
+    groups = _by_group(photos)
     left_out: list[CurbPhoto] = []
     if fixed_test is None:
         if len(groups) < MIN_GROUPS:
             raise SplitError(
-                f"hacen falta al menos {MIN_GROUPS} calles distintas para repartir (hay {len(groups)})"
+                f"hacen falta al menos {MIN_GROUPS} grupos distintos (escenas o fotos sin escena) para "
+                f"repartir (hay {len(groups)})"
             )
         chosen = _distribute(groups, TARGETS, seed)
     else:
-        test_streets = set(fixed_test["calles"])
+        test_groups = set(fixed_test["grupos"])
         test_files = set(fixed_test["archivos"])
-        rest = {key: items for key, items in groups.items() if key not in test_streets}
+        rest = {key: items for key, items in groups.items() if key not in test_groups}
         if len(rest) < 2:
-            raise SplitError("fuera del test quedan menos de 2 calles: no se puede separar train de valid")
+            raise SplitError("fuera del test quedan menos de 2 grupos: no se puede separar train de valid")
         train_share = TARGETS["train"] / (TARGETS["train"] + TARGETS["valid"])
         chosen = _distribute(rest, {"train": train_share, "valid": 1 - train_share}, seed)
-        chosen["test"] = [key for key in groups if key in test_streets]
+        chosen["test"] = [key for key in groups if key in test_groups]
         for key in chosen["test"]:
             left_out.extend(p for p in groups[key] if p.file not in test_files)
     ordered = ("train", "valid", "test")
@@ -134,8 +136,8 @@ def load_fixed_test(splits_dir: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not {"calles", "archivos"} <= set(data):
-        raise SplitError(f"{TEST_FILE} no tiene el formato esperado: {{calles, archivos}}")
+    if not {"grupos", "archivos"} <= set(data):
+        raise SplitError(f"{TEST_FILE} no tiene el formato esperado: {{grupos, archivos}}")
     return data  # type: ignore[no-any-return]
 
 
@@ -150,7 +152,7 @@ def save_test(splits_dir: Path, assignment: Assignment, seed: int) -> None:
         json.dumps(
             {
                 "semilla": seed,
-                "calles": sorted({p.group for p in test}),
+                "grupos": sorted({p.group for p in test}),
                 "archivos": sorted(p.file for p in test),
             },
             indent=2,

@@ -323,7 +323,7 @@ def make_dataset(root: Path, rows: list[tuple[str, str]]) -> None:
                 }
             )
         parecido = "boca_tormenta" if kind == "negativo_parecido" else ""
-        lines.append(f"{name},2026-09-28,b,calle{index},{kind},garage,{parecido},dia,seco,ninguna,celular,")
+        lines.append(f"{name},e{index},{kind},garage,{parecido},dia,seco,ninguna,")
     coco = {
         "images": images,
         "annotations": annotations,
@@ -331,9 +331,7 @@ def make_dataset(root: Path, rows: list[tuple[str, str]]) -> None:
     }
     (test / "_annotations.coco.json").write_text(json.dumps(coco), encoding="utf-8")
     (curb / "fotos.csv").write_text(
-        "archivo,fecha,barrio,calle,tipo,rebaje,parecido,iluminacion,clima,oclusion,dispositivo,notas\n"
-        + "\n".join(lines)
-        + "\n",
+        "archivo,escena,tipo,rebaje,parecido,iluminacion,clima,oclusion,notas\n" + "\n".join(lines) + "\n",
         encoding="utf-8",
     )
 
