@@ -18,6 +18,7 @@ from tests.fakes import (
     FakeWriter,
     Scenario,
     build_scenario,
+    car_box,
     detail_marker,
     happy_models,
     plate_box,
@@ -42,6 +43,7 @@ from vvi_ia.domain.model import (
     ValidationResult,
     Verdict,
 )
+from vvi_ia.domain.verdict import is_fraud
 from vvi_ia.service.ports import TransientError
 from vvi_ia.service.validate_evidence import Models, RedactionSettings, ValidateEvidence
 
@@ -219,32 +221,44 @@ def _nothing_uploaded(result: ValidationResult, writer: FakeWriter) -> None:
     assert writer.puts == []
 
 
+def _unavailable(result: ValidationResult, writer: FakeWriter) -> None:
+    """Fail-closed: RED por REDACTION_UNAVAILABLE (sin fraude) y ninguna foto subida."""
+    assert result.verdict == Verdict.RED
+    assert ReasonCode.REDACTION_UNAVAILABLE in result.reason_codes
+    assert not is_fraud(result.reason_codes)
+    _nothing_uploaded(result, writer)
+
+
 def test_sin_detector_de_rostros_no_se_genera_ninguna_version() -> None:
     models = happy_models()
     models.face.by_marker[GENERAL] = None
 
     result, writer = _run(build_scenario(), models)
 
-    assert result.verdict == Verdict.GREEN
-    _nothing_uploaded(result, writer)
+    assert result.reason_codes == (ReasonCode.REDACTION_UNAVAILABLE,)  # la cascada sola daba GREEN
+    _unavailable(result, writer)
 
 
 def test_sin_detector_de_vehiculos_en_una_foto_no_se_redacta_ninguna() -> None:
     models = happy_models()
-    models.vehicle.by_marker[detail_marker(0)] = None
+    models.vehicle.by_marker[detail_marker(0)] = None  # el detector (patentes) falla en una sola foto
 
     result, writer = _run(build_scenario(), models)
 
-    _nothing_uploaded(result, writer)
+    _unavailable(result, writer)
 
 
-def test_sin_lector_de_patentes_no_se_genera_ninguna_version() -> None:
-    models = happy_models()
-    models.plate.by_marker[GENERAL] = None  # hay una caja de patente en GENERAL y no se puede leer
+def test_una_patente_que_el_ocr_no_lee_se_tapa_y_la_redaccion_sigue_disponible() -> None:
+    scenario = build_scenario()
+    models = _models_with_two_plates_and_a_face()
+    models.plate.override = lambda crop: None  # hay cajas de patente en las fotos y el OCR no las lee
 
-    result, writer = _run(build_scenario(), models)
+    result, writer = _run(scenario, models)
 
-    _nothing_uploaded(result, writer)
+    assert len(result.redacted) == 3 and len(writer.puts) == 3
+    assert ReasonCode.REDACTION_UNAVAILABLE not in result.reason_codes
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 40, 15) < DARK  # la patente que no se pudo leer se tapa, aunque sea la reportada
 
 
 def test_si_falla_una_sola_foto_tampoco_se_sube_ninguna_de_las_otras() -> None:
@@ -253,7 +267,41 @@ def test_si_falla_una_sola_foto_tampoco_se_sube_ninguna_de_las_otras() -> None:
 
     result, writer = _run(build_scenario(), models)
 
-    _nothing_uploaded(result, writer)
+    _unavailable(result, writer)
+
+
+def test_sin_rostros_ni_patentes_cuenta_como_redactada() -> None:
+    models = happy_models()
+    for marker in (GENERAL, PLATE, CONTEXT, *map(detail_marker, range(3))):
+        models.face.by_marker[marker] = []  # ninguna cara
+    models.vehicle.by_marker[GENERAL] = [car_box()]  # ni patentes
+    models.vehicle.by_marker[PLATE] = [car_box()]
+
+    result, writer = _run(build_scenario(), models)
+
+    assert len(result.redacted) == 3 and len(writer.puts) == 3
+    assert ReasonCode.REDACTION_UNAVAILABLE not in result.reason_codes
+
+
+def test_si_falla_la_reescritura_de_una_foto_no_se_sube_ninguna() -> None:
+    class FailsOnSecond:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def render(self, pixels: Pixels, boxes: object, max_side: int) -> bytes:
+            self.calls += 1
+            if self.calls == 2:
+                raise ValueError("detalle interno con datos de la imagen")
+            return b"jpeg"
+
+    scenario = build_scenario()
+    writer = FakeWriter()
+    use_case, _ = _build(scenario, happy_models(), writer)
+    use_case._renderer = FailsOnSecond()  # type: ignore[assignment]
+
+    result = use_case.execute(scenario.payload)
+
+    _unavailable(result, writer)
 
 
 def test_con_todos_los_modelos_en_none_no_hay_version_redactada() -> None:
@@ -269,8 +317,14 @@ def test_con_todos_los_modelos_en_none_no_hay_version_redactada() -> None:
 
     result, writer = _run(build_scenario(), null_models)
 
-    assert result.verdict == Verdict.YELLOW
-    _nothing_uploaded(result, writer)
+    assert result.verdict == Verdict.RED  # la cascada daba YELLOW; sin redacción no se aprueba
+    assert set(result.reason_codes) == {
+        ReasonCode.BURST_UNCERTAIN,
+        ReasonCode.PLATE_UNREADABLE,
+        ReasonCode.CONTEXT_UNCERTAIN,
+        ReasonCode.REDACTION_UNAVAILABLE,
+    }
+    _unavailable(result, writer)
 
 
 def test_un_veredicto_red_no_genera_version_redactada() -> None:

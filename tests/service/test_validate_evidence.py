@@ -103,11 +103,16 @@ def test_caso_feliz_es_green(alert_type: AlertType) -> None:
 
 
 @pytest.mark.parametrize("alert_type", [CRASHED, GARAGE])
-def test_todo_none_da_yellow_sin_redaccion(alert_type: AlertType) -> None:
+def test_todo_none_da_red_por_redaccion_no_disponible(alert_type: AlertType) -> None:
     result = _run(build_scenario(alert_type), _null_models())
 
-    assert result.verdict == Verdict.YELLOW
-    assert _codes(result) == {R.BURST_UNCERTAIN, R.PLATE_UNREADABLE, R.CONTEXT_UNCERTAIN}
+    assert result.verdict == Verdict.RED  # sin modelos de redacción no hay veredicto aprobable
+    assert _codes(result) == {
+        R.BURST_UNCERTAIN,
+        R.PLATE_UNREADABLE,
+        R.CONTEXT_UNCERTAIN,
+        R.REDACTION_UNAVAILABLE,
+    }
     assert result.redacted == ()
     assert set(result.model_versions) == {
         "detector",
@@ -121,11 +126,14 @@ def test_todo_none_da_yellow_sin_redaccion(alert_type: AlertType) -> None:
     assert set(result.model_versions.values()) == {"null"}
 
 
-def test_un_none_nunca_produce_red() -> None:
+def test_un_none_nunca_produce_fraude() -> None:
     models = happy_models()
     models.vehicle.by_marker[GENERAL] = None
 
-    assert _run(build_scenario(), models).verdict != Verdict.RED
+    result = _run(build_scenario(), models)
+
+    assert not is_fraud(result.reason_codes)
+    assert result.verdict == Verdict.RED and R.REDACTION_UNAVAILABLE in result.reason_codes
 
 
 def test_las_versiones_de_modelo_viajan_en_el_resultado() -> None:

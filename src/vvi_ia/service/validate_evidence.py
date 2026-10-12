@@ -246,7 +246,11 @@ class ValidateEvidence:
         redacted: tuple[RedactedRef, ...] = ()
         if aggregate(codes) != Verdict.RED:
             with _timed(durations, "redaction"):
-                redacted = self._redact(run, payload, images, reported)
+                available = self._redact(run, payload, images, reported)
+            if available is None:  # fail-closed: sin redacción de TODAS las fotos no hay veredicto aprobable
+                _add(codes, ReasonCode.REDACTION_UNAVAILABLE)
+            else:
+                redacted = available
         return self._finish(payload, codes, scores, durations, redacted)
 
     # --- carga y descifrado -------------------------------------------------------------
@@ -417,30 +421,43 @@ class ValidateEvidence:
 
     def _redact(
         self, run: _Run, payload: EvidenceUploaded, images: Sequence[EvidenceImage], reported: str
-    ) -> tuple[RedactedRef, ...]:
-        """Genera y sube las versiones redactadas. Fail-closed: sin modelos no se sube nada.
+    ) -> tuple[RedactedRef, ...] | None:
+        """Genera y sube las versiones redactadas de TODAS las fotos, o `None` si no se puede.
 
-        Con `REDACTION_REQUIRED=false` (solo `ENV=local`) se sube la imagen re-encodeada sin tapar.
+        Fail-closed: si algún modelo de rostros o de patentes no responde (`None`) o falla la reescritura de
+        alguna foto, no se sube ninguna (nunca quedan redactadas parciales). Una foto sin rostros ni patentes
+        (`[]`) cuenta como redactada. Un error al subir a S3 no es un veredicto: se propaga para reintento.
+        Con `REDACTION_REQUIRED=false` (solo `ENV=local`) la foto re-encodeada sin tapar cuenta como lista.
         """
         plans: dict[tuple[EvidenceRole, int], list[Box]] | None
         if self._redaction.required:
             plans = self._plan_all(run, images, reported)
             if plans is None:
-                return ()
+                return None
         else:
             logger.warning(
                 "redacción desactivada: se sube la evidencia sin redactar",
                 extra={"alert_id": payload.alert_id},
             )
             plans = {(image.role, image.index): [] for image in images}
-        refs: list[RedactedRef] = []
+        rendered: list[tuple[RedactedRef, bytes]] = []
         for image in images:
-            boxes = plans[(image.role, image.index)]
-            body = self._renderer.render(image.pixels, boxes, self._redaction.max_side_px)
+            try:
+                body = self._renderer.render(
+                    image.pixels, plans[(image.role, image.index)], self._redaction.max_side_px
+                )
+            except Exception as exc:  # noqa: BLE001 - cualquier falla de la reescritura deja la foto sin redactar
+                # Solo el tipo de error: el mensaje podría arrastrar contenido de la imagen.
+                logger.warning(
+                    "falló la reescritura de la foto",
+                    extra={"alert_id": payload.alert_id, "error": type(exc).__name__},
+                )
+                return None
             key = f"alerts/{payload.alert_id}/redacted/{image.role.value.lower()}-{image.index}.jpg"
-            self._writer.put(key, body, JPEG_CONTENT_TYPE)
-            refs.append(RedactedRef(role=image.role, index=image.index, key=key))
-        return tuple(refs)
+            rendered.append((RedactedRef(role=image.role, index=image.index, key=key), body))
+        for ref, body in rendered:  # recién con todas listas se sube: los errores de S3 se propagan
+            self._writer.put(ref.key, body, JPEG_CONTENT_TYPE)
+        return tuple(ref for ref, _ in rendered)
 
     def _plan_all(
         self, run: _Run, images: Sequence[EvidenceImage], reported: str
@@ -452,7 +469,7 @@ class ValidateEvidence:
             faces = self._models.face.detect(image.pixels)
             detections = run.detect(image)
             exempt = self._matching_plates(run, image, detections, reported)
-            if faces is None or detections is None or exempt is None:
+            if faces is None or detections is None:
                 return None
             plan = plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
             if plan is None:
@@ -462,17 +479,15 @@ class ValidateEvidence:
 
     def _matching_plates(
         self, run: _Run, image: EvidenceImage, detections: Sequence[Box] | None, reported: str
-    ) -> list[Box] | None:
-        """Patentes que coinciden con la reportada (no se tapan). `None` si el OCR no tiene modelo."""
+    ) -> list[Box]:
+        """Patentes que coinciden con la reportada (no se tapan); las que el OCR no lee se tapan."""
         exempt: list[Box] = []
         for box in detections or ():
             if box.label != BoxLabel.PLATE or box.conf < self._redaction.plate_min_conf:
                 continue
             read = run.read_box(image, box)
             if read is None:
-                if crop_box(image, box) is None:
-                    continue  # caja degenerada: no hay nada que leer y se tapa igual
-                return None
+                continue  # sin lectura (o caja degenerada) no se puede saber si coincide: se tapa
             check = plate_check(reported, read.text, read.conf, self._t.ocr_min_conf)
             if check in (PlateCheck.MATCH, PlateCheck.FUZZY):
                 exempt.append(box)
