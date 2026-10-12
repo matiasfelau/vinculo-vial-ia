@@ -1,4 +1,4 @@
-# Evaluar modelos
+﻿# Evaluar modelos
 
 Evaluar un modelo es probarlo con ejemplos cuya respuesta correcta ya conocemos y contar cuántas
 veces acierta. Sirve para decidir si un modelo está listo para activarse y para fijar los umbrales
@@ -306,3 +306,64 @@ Por cada clase muestra:
 Para tapar rostros y patentes manda el **recall**: una caja de más tapa de más, una de menos deja un
 rostro a la vista. La precisión importa menos. La salida completa queda en `detector_report.json`, solo
 con cifras. `--detector-min-conf`, `--plate-min-conf` y `--face-min-conf` cambian los umbrales.
+
+## Detectores de rostros (`face.py`)
+
+El servicio tapa los rostros de las fotos con un relleno opaco antes de guardarlas. Si un rostro no se
+detecta, **queda a la vista**: por eso lo que importa es el **recall** (qué fracción de las caras se encuentra),
+más que la precisión. Este script compara cuatro detectores sobre tus fotos con las caras anotadas.
+
+> Estado: el script está escrito y probado con datos sintéticos. Todavía no se corrió con fotos ni con pesos
+> reales.
+
+| Detector | Licencia de los pesos (`commercial`) | ¿Puede entrar al servicio? |
+|---|---|---|
+| RF-DETR (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | **Sí: es el elegido.** |
+| SCRFD | `escalable` (InsightFace vende licencias comerciales) | Solo si **gana la comparación y se confirma** esa licencia. |
+| RetinaFace-R50 (biubug6) | `no` (WIDER FACE, CC BY-NC-ND) | No: solo referencia. |
+| YuNet | `no` (WIDER FACE, CC BY-NC-ND) | No: solo referencia. |
+
+Los que no son RF-DETR **no se bajan ni se incluyen en el repo**: los cargás vos desde un ONNX tuyo.
+
+### 1. Armar las fotos
+
+Fotos propias con las caras anotadas, **fuera del repo** (tienen rostros de terceros). Se anotan en CVAT con una
+sola etiqueta de tipo *Rectangle* (el nombre no importa: todas se tratan como rostros) y se exportan en
+formato "COCO 1.0". En `EVAL_DATA_DIR\face\` tienen que quedar las fotos y el `_annotations.coco.json`.
+(WIDER FACE sirve **solo como referencia académica**.)
+
+### 2. Conseguir los modelos de referencia
+
+- **YuNet**: el archivo `face_detection_yunet_2023mar.onnx` del repositorio `opencv_zoo`.
+- **SCRFD**: un ONNX de 6 o 9 salidas, por ejemplo `scrfd_10g_bnkps.onnx` del paquete de InsightFace.
+- **RetinaFace-R50**: exportalo con `convert_to_onnx.py` del repositorio de biubug6 (`--network resnet50
+  --long_side 640`), con la entrada cuadrada fija.
+- **RF-DETR**: `rfdetr_openimages` ya exportado en `MODELS_DIR` (ver
+  [tools/training/detector/README.md](../training/detector/README.md)).
+
+### 3. Correrlo
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"
+$env:EVAL_OUT = "D:\vv-eval\out\face"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/face.py --rfdetr-model rfdetr_openimages --retinaface-model D:\modelos\retinaface_r50.onnx --scrfd-model D:\modelos\scrfd_10g_bnkps.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx
+```
+
+Pasá solo los que tengas. `--size` es el lado de la entrada de SCRFD y RetinaFace (640 por defecto).
+
+### 4. Cómo leer el resultado
+
+Por detector muestra el **recall con IoU 0,5 o más** a distintos topes de falsos positivos por foto (0,1, 0,5 y
+1,0: qué tanto se encuentra si solo se tolera esa cantidad de cajas de más), el **recall en caras chicas**
+(un lado menor a 32 px), el **AP50** (calidad sin depender del umbral) y cuánto tarda en CPU. Todos los
+detectores se comparan en el mismo punto de falsos positivos, porque cada uno tiene su propia escala de
+confianza. `face_report.json` tiene además la curva completa.
+
+El criterio de [docs/modelos.md](../../docs/modelos.md): **se queda RF-DETR si su recall queda cerca del de
+RetinaFace-R50** (hasta 3 puntos menos). Si SCRFD lo supera por más que eso, el reporte lo marca y recuerda que
+SCRFD solo puede entrar con la licencia comercial confirmada.
+
+La decodificación de SCRFD y RetinaFace sigue el código de sus repositorios originales y está probada con
+tensores sintéticos; con los pesos reales, si algún detector da resultados absurdos (cero detecciones, cajas
+corridas), el primer sospechoso es que el ONNX exportado no coincide con el que el script espera.
