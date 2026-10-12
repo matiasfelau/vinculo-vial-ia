@@ -390,3 +390,65 @@ encuentra al menos una caja con confianza suficiente. Por eso, además de la tab
 recall de las clases más frecuentes (abolladuras y rayones) y cuántos falsos positivos por foto hay.
 
 CarDD no se redistribuye: el dataset, la salida y los pesos entrenados quedan en tu máquina, fuera del repo.
+
+## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
+
+Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
+del dataset propio (`EVAL_DATA_DIR\curb\dataset\test`, que arma `tools/training/curb/prepare.py` y no cambia).
+Las máscaras de auto salen de `rfdetr_seg_coco` y la decisión de la misma función del servicio
+(`driveway_check`), con `RAMP_MARGIN` y `RAMP_SCALE_FALLBACK`.
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"
+$env:EVAL_OUT = "D:\vv-eval\out\curb"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/curb.py
+```
+
+Hace falta `rfdetr_seg_coco` y el modelo de rebajes entrenado (`rfdetr_seg_curb`, ver
+[tools/training/curb/README.md](../training/curb/README.md)). Para correrlo sin SAM 3, que necesita el acceso de
+Hugging Face y la GPU: `--no-sam3`. Con `--detector rfdetr_openimages` mide la rueda del auto; sin eso se usa
+la escala de respaldo (`RAMP_SCALE_FALLBACK`).
+
+### Los tres sistemas
+
+| Sistema | Qué es |
+|---|---|
+| `sam3` | SAM 3 sin entrenar, con prompts de texto. Es la referencia: "¿hace falta entrenar?" |
+| `entrenado` | El RF-DETR-Seg entrenado con tus fotos. |
+| `oraculo` | Las máscaras que anotaste vos a mano. **No es un modelo**: sirve para separar errores (ver abajo). |
+
+La comparación sin entrenar contra entrenado es un resultado para la tesis.
+
+### Qué decisión se espera de cada tipo de foto
+
+| Tipo | Decisión esperada |
+|---|---|
+| `positivo_claro` | `BLOCKING` |
+| `positivo_marginal` | `BLOCKING` o `BLOCKING_MARGINAL` |
+| `negativo_auto_junto_rebaje` | `NOT_BLOCKING` |
+| `negativo_auto_sin_rebaje` | `NO_DRIVEWAY` |
+| `negativo_parecido` | `NO_DRIVEWAY` (o `NO_CAR` si no hay auto) |
+| `negativo_rebaje_sin_auto` | `NO_CAR`, y además el modelo tiene que **detectar la máscara de `curb_cut`** |
+
+Donde hay varios autos se evalúa el más grande (el servicio elige al del reporte por su apariencia, pero acá hay
+una sola foto).
+
+### Cómo leer el resultado
+
+Por cada sistema muestra los aciertos, la **precisión** y el **recall de `BLOCKING`**, el **porcentaje de
+`BLOCKING_MARGINAL`** y los resultados por tipo (`curb_report.json`). Las fallas se dibujan en
+`EVAL_OUT\failures\<sistema>\`, con lo anotado en verde y lo predicho en naranja.
+
+Cada falla se clasifica:
+
+- **`mascara_mala`**: la máscara del sistema no se parece a la anotada (IoU menor a 0,5) en el cordón o en el
+  rebaje. El problema es el modelo: hace falta mejor modelo, más fotos o mejores prompts.
+- **`decision_mala_con_mascara_buena`**: las dos máscaras están bien y aun así la decisión es otra. El problema
+  es el criterio, no el modelo: **se ajusta `RAMP_MARGIN`, no se reentrena**.
+
+Para eso el reporte incluye un **barrido de `RAMP_MARGIN` con las máscaras anotadas** (las del oráculo) y el
+valor que más decisiones acierta; si hay empate, el más cercano al actual. Es la forma de saber cuánto ayuda el
+margen sin que cuente el error del modelo.
+
+Con pocas fotos de prueba, una sola foto mueve los porcentajes: mirá siempre las cantidades.
