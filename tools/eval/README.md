@@ -566,6 +566,42 @@ a 1600 px); `plate` hace lo mismo. Las fotos de 4000 × 3000 son reescalados de 
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
 También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.
 
+## Presencia de auto en todas las fotos (`presence.py`)
+
+Mide qué regla decide bien que en una foto hay un auto (o, en PLATE y DETAIL, una parte). Corre el detector, el
+segmentador y el detector de daños reales sobre cuatro conjuntos, fuera del repo:
+
+- **general**: 417 fotos de autos enteros de Open Images (`damage_fp.py select`);
+- **plate**: 137 recortes de patentes del dataset de Roboflow, con un 50 % de margen;
+- **detail**: 374 fotos de prueba de CarDD (primeros planos de la carrocería);
+- **negativas**: 489 fotos de Open Images sin `Car`, `Vehicle registration plate` ni `Wheel` anotados.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:v-eval\cardd"; $env:EVAL_DATA_DIR = "D:v-eval"; $env:EVAL_OUT = "D:v-eval\out\presence"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/presence.py
+```
+
+Muestra, por conjunto, cuántas fotos pasan como auto con cada regla y, por cada **área mínima** (fracción de la
+foto que ocupa el hallazgo), las negativas que pasan (regla A: tienen que ser 0) y las válidas rechazadas
+(regla C). Las reglas: `solo_car` (caja `car`), `R1` (car, wheel o plate), `R2` (R1 o un auto segmentado) y `R3`
+(R2 o una caja de daño).
+
+Resultado (umbrales de confianza 0,40 para el detector y 0,50 para el segmentador):
+
+| Regla | Área mínima | Negativas que pasan (de 489) | general rechazadas (de 417) | plate rechazadas (de 137) | detail rechazadas (de 374) |
+|---|---|---|---|---|---|
+| `car` + segmentador | 0 | 8 | 2 | n/a | n/a |
+| `car` + segmentador | **5 %** | **0** | **2** | n/a | n/a |
+| R2 | 0 | 8 | n/a | 1 | 20 |
+| R2 | **5 %** | **0** | n/a | **1** | **21** |
+| R3 (con daño) | 5 % | 179 | n/a | 1 | 3 |
+
+Las 8 negativas que pasaban sin área mínima son retratos con un auto chico y sin anotar al fondo: con un 5 % de la
+foto dejan de pasar. **El detector de daños no sirve para esto** (con 0,70 dispara en 179 de las 489 fotos sin
+auto). Los primeros planos de la carrocería que no muestran ninguna parte reconocible (21 de 374) se rechazan:
+la regla A gana sobre la C.
+
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
 
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
