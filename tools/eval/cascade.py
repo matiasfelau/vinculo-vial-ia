@@ -25,11 +25,12 @@ import statistics
 import sys
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from detector import REPO_ROOT
 
@@ -44,7 +45,7 @@ from vvi_ia.service.validate_evidence import ValidateEvidence
 
 SELECTION = {
     "detector": "rfdetr_openimages",
-    "face": "rfdetr_openimages",
+    "face": "scrfd_10g",
     "segmenter": "rfdetr_seg_coco",
     "embedder": "dinov2_vits14",
     "ocr": "parseq",
@@ -103,6 +104,18 @@ class DurationCapture(logging.Handler):
             self.last = dict(durations)
 
 
+def resized_copy(path: Path, long_side: int, folder: Path) -> Path:
+    """Copia de la foto con el lado mayor en `long_side` px (en `folder`), para simular fotos de celular."""
+    target = folder / f"{path.parent.name}_{path.stem}_{long_side}.jpg"
+    if not target.is_file():
+        pixels = cv2.imdecode(np.fromfile(str(path), np.uint8), cv2.IMREAD_COLOR)
+        scale = long_side / max(pixels.shape[:2])
+        size = (round(pixels.shape[1] * scale), round(pixels.shape[0] * scale))
+        folder.mkdir(parents=True, exist_ok=True)
+        cv2.imencode(".jpg", cv2.resize(pixels, size, interpolation=cv2.INTER_CUBIC))[1].tofile(str(target))
+    return target
+
+
 def photos_in(folder: Path) -> list[Path]:
     return sorted(p for p in folder.rglob("*") if p.suffix.lower() in IMAGE_SUFFIXES)
 
@@ -148,12 +161,17 @@ def summarize(values: Sequence[float]) -> dict[str, float]:
 
 
 def readable_plates(
-    models: Any, pool: Sequence[Path], rng: random.Random, wanted: int
+    models: Any,
+    pool: Sequence[Path],
+    rng: random.Random,
+    wanted: int,
+    prepare: Callable[[Path], Path] = lambda path: path,
 ) -> list[tuple[Path, bytes]]:
     """Fotos de autos cuya patente lee el OCR, con la lectura como patente reportada (sin medir)."""
     decoder = CvImageDecoder()
     found: list[tuple[Path, bytes]] = []
-    for path in rng.sample(list(pool), len(pool)):
+    for original in rng.sample(list(pool), len(pool)):
+        path = prepare(original)
         pixels = decoder.decode(path.read_bytes())
         boxes = models.vehicle.detect(pixels) or ()
         plates = [b for b in boxes if b.label == BoxLabel.PLATE]
@@ -185,6 +203,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=0, help="hilos de ONNX Runtime (0: los que elija ORT)")
     parser.add_argument("--no-redaction", action="store_true", help="REDACTION_REQUIRED=false (solo local)")
+    parser.add_argument(
+        "--plate-tiling",
+        choices=("on", "off"),
+        default="on",
+        help="PLATE_TILING (por defecto on, como el servicio)",
+    )
+    parser.add_argument(
+        "--long-side",
+        type=int,
+        help="reescala las fotos a este lado mayor en px (p. ej. 4000 para fotos de celular de 4000 x 3000)",
+    )
     parser.add_argument("--curb-proxy", action="store_true", help="simular el costo del modelo de rebajes")
     parser.add_argument("--general-dir", type=Path, help="autos (por defecto <data-dir>/damage-fp/images)")
     parser.add_argument("--detail-dir", type=Path, help="daños (por defecto <data-dir>/cardd-detector/test)")
@@ -239,7 +268,9 @@ def main(argv: list[str] | None = None) -> int:
         if not pool or Path(folders[name]).resolve().is_relative_to(REPO_ROOT):
             print(f"No hay fotos de {name} en {folders[name]} (o está dentro del repo).", file=sys.stderr)
             return 1
-    settings = Settings.model_construct(redaction_required=not args.no_redaction)
+    settings = Settings.model_construct(
+        redaction_required=not args.no_redaction, plate_tiling=args.plate_tiling == "on"
+    )
     selection = dict(SELECTION)
     try:
         models = build_models(
@@ -265,7 +296,12 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("vvi_ia.service.validate_evidence").addHandler(capture)
     logging.getLogger("vvi_ia.service.validate_evidence").setLevel(logging.INFO)
     rng = random.Random(args.seed)  # noqa: S311 - muestreo de fotos, no criptografía
-    readable = readable_plates(models, pools["autos"], rng, args.alerts)
+    photo_folder = Path(args.out_dir) / "cascade-photos"
+
+    def prepare(path: Path) -> Path:
+        return resized_copy(path, args.long_side, photo_folder) if args.long_side else path
+
+    readable = readable_plates(models, pools["autos"], rng, args.alerts, prepare)
 
     def layouts(kind: str, details: int = 1) -> list[Layout]:
         out = []
@@ -273,9 +309,9 @@ def main(argv: list[str] | None = None) -> int:
             car, plate = rng.choice(readable)
             photos = {EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car]}
             if kind == "crashed":
-                photos[EvidenceRole.DETAIL] = [rng.choice(pools["daños"]) for _ in range(details)]
+                photos[EvidenceRole.DETAIL] = [prepare(rng.choice(pools["daños"])) for _ in range(details)]
             else:
-                photos[EvidenceRole.CONTEXT] = [rng.choice(pools["autos"])]
+                photos[EvidenceRole.CONTEXT] = [prepare(rng.choice(pools["autos"]))]
             out.append(Layout(photos, plate))
         return out
 
@@ -291,6 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         "modelos": models.versions(),
         "hilos_onnx": args.threads,
         "redaccion": not args.no_redaction,
+        "mosaico_patentes": args.plate_tiling == "on",
+        "lado_mayor_px": args.long_side,
         "curb": "simulado (costo de una pasada RF-DETR-Seg)" if args.curb_proxy else "null",
         "escenarios": {},
     }
@@ -303,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Modelos: {report['modelos']}")
     print(
         f"Hilos ONNX: {args.threads or 'por defecto'} · redacción: {report['redaccion']} · "
+        f"mosaico de patentes: {report['mosaico_patentes']} · lado mayor: {args.long_side or 'original'} · "
         f"curb: {report['curb']}"
     )
     header = "".join(f"{s:>10}" for s in STAGES)

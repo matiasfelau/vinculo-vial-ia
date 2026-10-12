@@ -444,9 +444,10 @@ Cómo leerlo:
 El criterio de [docs/modelos.md](../../docs/modelos.md) (que RF-DETR quede cerca de RetinaFace-R50) dio
 `rfdetr_queda: false` en WIDER (RF-DETR pierde 14 puntos a 0,1 falsos positivos) y `true` en Open Images.
 
-### 6. Configuración de redacción propuesta (provisoria)
+### 6. Configuración de redacción (provisoria)
 
-Con estos datos, y sin tocar `REDACTION_REQUIRED` (sigue en `false` solo en local):
+Con estos datos quedó como configuración de `.env.example` (y `PLATE_TILING=true` como default del código),
+**provisoria hasta validar con fotos propias**. `REDACTION_REQUIRED` no se tocó (sigue en `false` solo en local):
 
 ```dotenv
 MODEL_DETECTOR=rfdetr_openimages   # autos, ruedas y patentes
@@ -454,7 +455,7 @@ MODEL_FACE=scrfd_10g               # rostros: mejor recall, sobre todo en caras 
 FACE_MIN_CONF=0.30                 # con SCRFD son unos 0,8 falsos positivos por foto en Open Images
 PLATE_REDACT_MIN_CONF=0.20
 FACE_TILING=false                  # sin evidencia de mejora en fotos parecidas a las del servicio; cuesta 5 veces la latencia
-PLATE_TILING=false                 # +7 puntos de recall de patentes por ~1,1 s más por foto: decidir según la latencia aceptable
+PLATE_TILING=true                  # +7 puntos de recall de patentes; cuesta ~3,5 s más por alerta de 3 fotos (ver la tabla de la cascada)
 ```
 
 Con `MODEL_FACE=scrfd_10g` el detector de rostros ya no comparte la inferencia con el de patentes (RF-DETR
@@ -533,10 +534,33 @@ uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --curb-pr
 | `--alerts N` | Alertas por escenario (20 por defecto), más una de calentamiento que no cuenta. |
 | `--curb-proxy` | Mientras no haya modelo de rebajes, simula su costo corriendo el segmentador de autos (misma arquitectura). Sin esto `curb` es `null` y los escenarios de rebaje cortan antes. |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
+| `--plate-tiling on|off`\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
+| `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
 | `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
 
 Mide tres escenarios (CRASHED de 3 fotos, CRASHED de 5 y PARKED_ON_GARAGE de 3) y muestra la mediana, el p95 y el
 máximo de cada alerta, y la mediana de cada etapa (`load`, `vehicle`, `burst`, `plate`, `context`, `redaction`).
+
+### Resultados de referencia
+
+Medianas por alerta en un AMD Ryzen 5 3600 (6 núcleos), con los modelos de la configuración de redacción
+(`rfdetr_openimages` para autos y patentes, `scrfd_10g` para rostros, redacción activa, rebajes simulados),
+una alerta por vez. Con `PLATE_TILING=true` el servicio recorre cada foto también en tiles de 640 px, y
+achica a 1600 px las fotos más grandes antes de cortarlos.
+
+| Fotos | Mosaico de patentes | CRASHED de 3 fotos | CRASHED de 5 fotos | PARKED_ON_GARAGE de 3 fotos |
+|---|---|---|---|---|
+| ~1000 px (Open Images, CarDD) | no | 2,8 s (p95 3,0) | 4,2 s (p95 4,5) | 3,4 s (p95 3,9) |
+| ~1000 px | **sí** | 6,3 s (p95 6,5) | 10,3 s (p95 10,9) | 6,8 s (p95 7,2) |
+| 4000 × 3000 px | no | 3,2 s (p95 3,9) | 4,9 s (p95 5,5) | 4,2 s (p95 5,0) |
+| 4000 × 3000 px | **sí** | **10,8 s** (p95 11,6) | **16,8 s** (p95 17,8) | **11,3 s** (p95 14,0) |
+
+Con el mosaico de patentes la etapa `vehicle` (una detección por foto) pasa de unos 300 ms a 1,5 s con fotos de
+1000 px y a 3,1 s con fotos de 4000 × 3000 (10 inferencias por foto: la completa y 9 tiles sobre la foto achicada
+a 1600 px); `plate` hace lo mismo. Las fotos de 4000 × 3000 son reescalados de las de Open Images y CarDD
+(~1000 px), así que sirven para el costo y no para la calidad de la detección. Con 10 alertas por escenario
+(20 con las de ~1000 px) los p95 son orientativos. Carga y decodificación de una foto de 12 megapíxeles: unos
+50 ms cada una.
 
 **Lo que no mide:** la red (descarga y subida a S3) ni el descifrado HPKE, que acá son en memoria. Las fotos de
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
