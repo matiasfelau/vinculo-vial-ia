@@ -189,7 +189,7 @@ def test_seleccionado_por_entorno_carga_la_sesion_y_detecta(tmp_path: Path) -> N
     weights = tiny_damage()
     manifest, models_dir = write_env(tmp_path, weights)
 
-    models = build_models({"damage": MODEL_NAME}, manifest, models_dir)
+    models = build_models({"damage": MODEL_NAME}, manifest, models_dir, params={"damage_min_conf": 0.4})
 
     assert models.versions()["damage"] == f"{MODEL_NAME}@{hashlib.sha256(weights).hexdigest()[:12]}"
     boxes = models.damage.detect(photo(40, 80))
@@ -225,7 +225,7 @@ def test_un_archivo_que_no_es_el_detector_de_danos_no_deja_arrancar(tmp_path: Pa
 
 
 def test_el_umbral_de_danos_viaja_a_los_adaptadores(base_env: pytest.MonkeyPatch) -> None:
-    assert adapter_params(load_settings())["damage_min_conf"] == 0.4
+    assert adapter_params(load_settings())["damage_min_conf"] == 0.7
 
     base_env.setenv("DAMAGE_MIN_CONF", "0.55")
     assert adapter_params(load_settings())["damage_min_conf"] == 0.55
