@@ -37,7 +37,7 @@ from vvi_ia.service.validate_evidence import crop_box
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SPLITS = ("train", "valid", "test")
 ANNOTATIONS = "_annotations.coco.json"
-DEFAULT_MIN_CONF = 0.60
+DEFAULT_MIN_CONF = 0.78
 SWEEP = (0.0, 0.3, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99)
 PROPOSAL_FLOOR = 0.50
 PROPOSAL_MARGIN = 0.01
@@ -608,7 +608,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--min-conf",
         type=float,
         default=float(os.environ.get("OCR_MIN_CONF", DEFAULT_MIN_CONF)),
-        help="OCR_MIN_CONF con el que se arma la distribución (por defecto el del entorno o 0,60)",
+        help="OCR_MIN_CONF con el que se arma la distribución (por defecto el del entorno o 0,78)",
     )
     parser.add_argument(
         "--splits", nargs="+", choices=SPLITS, default=None, help="por defecto, los que existan en el dataset"

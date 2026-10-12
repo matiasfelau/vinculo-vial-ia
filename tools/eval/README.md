@@ -172,7 +172,7 @@ Tomala como orientativa:
 |---|---|
 | `--model NOMBRE` | Otro modelo del puerto `ocr` del manifest (por defecto `parseq`). |
 | `--splits train valid test` | Solo algunos splits (por defecto, los que existan). |
-| `--min-conf 0.7` | Umbral con el que se arma la distribución (por defecto `OCR_MIN_CONF` o 0,60). |
+| `--min-conf 0.7` | Umbral con el que se arma la distribución (por defecto `OCR_MIN_CONF` del entorno o 0,78). |
 | `--match-samples N` | Aciertos a incluir en la auditoría. |
 | `--seed N` | Semilla de esa muestra al azar. |
 
