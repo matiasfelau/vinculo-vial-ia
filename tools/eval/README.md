@@ -1,4 +1,4 @@
-﻿# Evaluar modelos
+# Evaluar modelos
 
 Evaluar un modelo es probarlo con ejemplos cuya respuesta correcta ya conocemos y contar cuántas
 veces acierta. Sirve para decidir si un modelo está listo para activarse y para fijar los umbrales
@@ -398,8 +398,8 @@ Las fotos de CarDD tienen todas algún daño, así que `damage.py` no dice qué 
 recall por foto de CarDD, para elegir `DAMAGE_MIN_CONF`:
 
 ```powershell
-$env:TRAIN_DATA_DIR = "D:v-eval\cardd"
-$env:EVAL_OUT = "D:v-eval\out\damage"
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\damage"
 $env:MODELS_DIR = "models\weights"
 uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py select   # copia las fotos con un auto grande
 uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py sheet    # hoja al azar para revisar a ojo
