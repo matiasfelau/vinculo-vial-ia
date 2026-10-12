@@ -1,4 +1,4 @@
-﻿# Evaluar modelos
+# Evaluar modelos
 
 Evaluar un modelo es probarlo con ejemplos cuya respuesta correcta ya conocemos y contar cuántas
 veces acierta. Sirve para decidir si un modelo está listo para activarse y para fijar los umbrales
@@ -390,6 +390,35 @@ encuentra al menos una caja con confianza suficiente. Por eso, además de la tab
 recall de las clases más frecuentes (abolladuras y rayones) y cuántos falsos positivos por foto hay.
 
 CarDD no se redistribuye: el dataset, la salida y los pesos entrenados quedan en tu máquina, fuera del repo.
+
+### Falsos positivos de daño (`damage_fp.py`)
+
+Las fotos de CarDD tienen todas algún daño, así que `damage.py` no dice qué pasa con un auto **sin** daño.
+`damage_fp.py` lo mide con fotos de autos del subset de Open Images (el de `detector`) y lo cruza con el
+recall por foto de CarDD, para elegir `DAMAGE_MIN_CONF`:
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\damage"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py select   # copia las fotos con un auto grande
+uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py sheet    # hoja al azar para revisar a ojo
+uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py run      # barrido de umbrales
+```
+
+1. `select` elige las fotos donde un auto ocupa al menos el 30 % del cuadro (`--min-car-fraction`) y las copia a
+   `<TRAIN_DATA_DIR>\damage-fp\images`.
+2. `sheet` arma `damage_fp_sheet.jpg` con fotos al azar. **Miralas**: si alguna tiene daño evidente (o no es un
+   auto), agregá su nombre, uno por línea, a `<TRAIN_DATA_DIR>\damage-fp\excluidas.txt`.
+3. `run` barre el umbral de 0,1 a 0,9. Por cada uno muestra qué fracción de las fotos sin daño tiene alguna caja
+   (**falso positivo por foto**) y qué fracción de las fotos con daño de CarDD la tiene (**recall por foto**), y
+   propone el umbral que más separa las dos (recall menos falsos positivos). También desglosa por clase y
+   prueba un umbral distinto por clase. `damage_fp_top.jpg` tiene las fotos sin daño con más confianza y
+   `damage_fp_flagged.jpg` un sorteo de las que superan `--review-conf`: miralas para ver si son falsos
+   positivos de verdad o daño que se pasó por alto al revisar.
+
+Es una propuesta: el default no cambia hasta que se apruebe. Las fotos de Open Images son de autos enteros, no de
+detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
 
