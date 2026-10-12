@@ -255,12 +255,8 @@ def tiny_rfdetr_seg(side: int = 32, outputs: Sequence[str] = OUTPUT_NAMES) -> by
         logits((CAR_CLASS_ID, ON)),
         mask_logits("left"),
     ]
-    initializers = [
-        numpy_helper.from_array(value, f"const_{index}") for index, value in enumerate(constants)
-    ]
-    nodes = [
-        helper.make_node("Identity", [f"const_{index}"], [name]) for index, name in enumerate(outputs)
-    ]
+    initializers = [numpy_helper.from_array(value, f"const_{index}") for index, value in enumerate(constants)]
+    nodes = [helper.make_node("Identity", [f"const_{index}"], [name]) for index, name in enumerate(outputs)]
     graph = helper.make_graph(
         nodes,
         "tiny_rfdetr_seg",
@@ -364,10 +360,10 @@ def test_una_salida_con_otro_nombre_no_deja_arrancar(tmp_path: Path) -> None:
 
 
 def test_el_umbral_por_defecto_es_0_5_y_se_pasa_a_los_adaptadores(base_env: pytest.MonkeyPatch) -> None:
-    assert adapter_params(load_settings()) == {"segmenter_min_conf": 0.5}
+    assert adapter_params(load_settings())["segmenter_min_conf"] == 0.5
 
     base_env.setenv("SEGMENTER_MIN_CONF", "0.8")
-    assert adapter_params(load_settings()) == {"segmenter_min_conf": 0.8}
+    assert adapter_params(load_settings())["segmenter_min_conf"] == 0.8
 
 
 @pytest.mark.parametrize("value", ["-0.1", "1.1", "mucho"])
