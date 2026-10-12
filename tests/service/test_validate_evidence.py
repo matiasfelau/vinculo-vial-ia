@@ -310,7 +310,7 @@ def test_dano_bajo_el_umbral_es_context_not_detected() -> None:
 
     result = _run(build_scenario(), models)
 
-    assert result.verdict == Verdict.YELLOW
+    assert result.verdict == Verdict.RED  # el problema ausente es RED, pero no es fraude
     assert _codes(result) == {R.CONTEXT_NOT_DETECTED}
 
 

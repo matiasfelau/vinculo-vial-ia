@@ -34,6 +34,18 @@ def test_los_codigos_se_reparten_en_red_y_yellow_sin_solaparse() -> None:
     assert not RED_CODES & YELLOW_CODES
 
 
+def test_el_mapeo_de_los_bloques_del_veredicto() -> None:
+    assert {R.NO_VEHICLE, R.PLATE_MISMATCH, R.BURST_MISMATCH} == FRAUD_CODES  # RED por fraude
+    assert {R.CONTEXT_NOT_DETECTED, R.EVIDENCE_UNREADABLE, R.REDACTION_UNAVAILABLE} == RED_CODES - FRAUD_CODES
+    assert YELLOW_CODES == {R.PLATE_FUZZY, R.PLATE_UNREADABLE, R.BURST_UNCERTAIN, R.CONTEXT_UNCERTAIN}
+
+
+@pytest.mark.parametrize("code", [R.CONTEXT_NOT_DETECTED, R.EVIDENCE_UNREADABLE, R.REDACTION_UNAVAILABLE])
+def test_los_rojos_que_no_son_fraude_no_penalizan(code: ReasonCode) -> None:
+    assert aggregate([code]) == Verdict.RED
+    assert not is_fraud([code])
+
+
 def test_fraude_son_exactamente_tres_codigos() -> None:
     assert FRAUD_CODES == {R.NO_VEHICLE, R.BURST_MISMATCH, R.PLATE_MISMATCH}
     assert FRAUD_CODES <= RED_CODES
