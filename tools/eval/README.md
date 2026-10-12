@@ -420,6 +420,35 @@ uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py run    
 Es una propuesta: el default no cambia hasta que se apruebe. Las fotos de Open Images son de autos enteros, no de
 detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 
+## Latencia de la cascada completa (`cascade.py`)
+
+Mide cuánto tarda **una alerta entera** en CPU con los modelos reales: el mismo caso de uso, los mismos
+adaptadores y el mismo ONNX que el servicio, de a una alerta por vez. Se arma con autos de Open Images (la
+foto GENERAL y la PLATE son la misma, con la patente que lee el OCR como patente reportada, para que la
+cascada llegue a todas las etapas en lugar de cortarse en un RED) y daños de CarDD.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\cascade"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py select   # una vez: junta las fotos de autos
+uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --curb-proxy
+```
+
+| Opción | Para qué |
+|---|---|
+| `--alerts N` | Alertas por escenario (20 por defecto), más una de calentamiento que no cuenta. |
+| `--curb-proxy` | Mientras no haya modelo de rebajes, simula su costo corriendo el segmentador de autos (misma arquitectura). Sin esto `curb` es `null` y los escenarios de rebaje cortan antes. |
+| `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
+| `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
+
+Mide tres escenarios (CRASHED de 3 fotos, CRASHED de 5 y PARKED_ON_GARAGE de 3) y muestra la mediana, el p95 y el
+máximo de cada alerta, y la mediana de cada etapa (`load`, `vehicle`, `burst`, `plate`, `context`, `redaction`).
+
+**Lo que no mide:** la red (descarga y subida a S3) ni el descifrado HPKE, que acá son en memoria. Las fotos de
+Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
+También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.
+
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
 
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
