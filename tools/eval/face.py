@@ -24,6 +24,7 @@ import os
 import statistics
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from math import ceil
 from pathlib import Path
@@ -34,8 +35,10 @@ import numpy as np
 from numpy.typing import NDArray
 
 from vvi_ia.adapters.imaging import CvImageDecoder
+from vvi_ia.adapters.models import scrfd_face
 from vvi_ia.adapters.models.onnx_session import OnnxSession
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
+from vvi_ia.adapters.models.tiling import DEFAULT_OVERLAP, DEFAULT_TILE_PX, detect_tiled
 from vvi_ia.domain.model import Box, Pixels
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +46,9 @@ FACE_FOLDER = "face"
 ANNOTATIONS = "_annotations.coco.json"
 IOU = 0.5
 SMALL_SIDE_PX = 32  # una cara con algún lado menor a esto, en la foto original, es chica
+MEDIUM_SIDE_PX = 96  # chica: menos de 32 px; mediana: de 32 a 96; grande: más de 96 (por su lado menor)
+SIZES = ("chicas", "medianas", "grandes")
+TILED_SUFFIX = "+mosaico"
 FLOOR = 0.02  # confianza mínima con la que se recogen las detecciones: de ahí se barren los umbrales
 THRESHOLDS = tuple(round(0.05 * step, 2) for step in range(1, 20))
 FP_TARGETS = (0.1, 0.5, 1.0)  # falsos positivos por foto con los que se compara el recall
@@ -60,6 +66,11 @@ CANDIDATE_INFO: Mapping[str, Mapping[str, Any]] = {
         "nombre": "SCRFD",
         "commercial": "escalable",
         "puede_entrar_al_servicio": "solo si gana y InsightFace confirma el uso comercial",
+    },
+    "servicio": {
+        "nombre": "Adaptador del servicio (puerto face)",
+        "commercial": "según el manifest",
+        "puede_entrar_al_servicio": True,
     },
     "retinaface_r50": {
         "nombre": "RetinaFace-R50 (biubug6)",
@@ -138,16 +149,13 @@ class YuNet:
 
 
 class Scrfd:
-    """SCRFD (InsightFace) sobre onnxruntime.
+    """SCRFD (InsightFace) sobre onnxruntime, con la misma decodificación que el adaptador del servicio.
 
-    Como en `insightface/model_zoo/scrfd.py`: la foto va achicada arriba a la izquierda de un lienzo cuadrado,
+    Ver `adapters/models/scrfd_face.py`: la foto va achicada arriba a la izquierda de un lienzo cuadrado,
     normalizada con `(x - 127,5) / 128` en orden RGB; los modelos de 6 o 9 salidas traen, por cada stride
     (8, 16 y 32), las confianzas, las distancias a los cuatro bordes y (los de 9) los puntos, con
     dos anclas por posición.
     """
-
-    STRIDES = (8, 16, 32)
-    ANCHORS = 2
 
     def __init__(self, model: Path, size: int = 640) -> None:
         self._session = OnnxSession(model.read_bytes(), 0)
@@ -159,38 +167,11 @@ class Scrfd:
     def decode(
         self, outputs: Sequence[NDArray[Any]], scale: float, threshold: float = FLOOR
     ) -> NDArray[np.float32]:
-        count = len(self.STRIDES)
-        scores_list, boxes_list = [], []
-        for index, stride in enumerate(self.STRIDES):
-            scores = np.asarray(outputs[index]).reshape(-1)
-            distances = np.asarray(outputs[index + count]).reshape(-1, 4) * stride
-            cells = self._size // stride
-            grid = np.stack(np.mgrid[:cells, :cells][::-1], axis=-1).astype(np.float32)
-            centers = np.stack([(grid * stride).reshape(-1, 2)] * self.ANCHORS, axis=1).reshape(-1, 2)
-            keep = np.where(scores >= threshold)[0]
-            boxes = np.stack(
-                [
-                    centers[:, 0] - distances[:, 0],
-                    centers[:, 1] - distances[:, 1],
-                    centers[:, 0] + distances[:, 2],
-                    centers[:, 1] + distances[:, 3],
-                ],
-                axis=-1,
-            )
-            scores_list.append(scores[keep])
-            boxes_list.append(boxes[keep])
-        if not scores_list or sum(len(s) for s in scores_list) == 0:
-            return np.empty((0, 5), np.float32)
-        dets = np.hstack([np.vstack(boxes_list) / scale, np.concatenate(scores_list)[:, None]]).astype(
-            np.float32
-        )
-        dets = dets[np.argsort(-dets[:, 4], kind="stable")]
-        return dets[nms(dets)]
+        return scrfd_face.decode(outputs, scale, self._size, threshold)
 
     def detect(self, img: Pixels) -> list[Box] | None:
-        canvas, scale = letterbox(img, self._size)
-        blob = ((canvas - 127.5) / 128.0).transpose(2, 0, 1)[None].astype(np.float32)  # el lienzo ya es RGB
-        outputs = self._session.run(None, {self._session.input_names[0]: np.ascontiguousarray(blob)})
+        tensor, scale = scrfd_face.preprocess(img, self._size)
+        outputs = self._session.run(None, {self._session.input_names[0]: tensor})
         return to_boxes(self.decode(outputs, scale), img.shape[1], img.shape[0])
 
 
@@ -256,6 +237,21 @@ class RetinaFace:
         return to_boxes(self.decode(by_axis[4], by_axis[2], scale), img.shape[1], img.shape[0])
 
 
+class Tiled:
+    """Un detector de rostros corrido también por mosaico: la foto completa más tiles, fusionados con NMS."""
+
+    def __init__(
+        self, inner: FaceDetector, tile: int = DEFAULT_TILE_PX, overlap: float = DEFAULT_OVERLAP
+    ) -> None:
+        self._inner = inner
+        self._tile = tile
+        self._overlap = overlap
+
+    def detect(self, img: Pixels) -> list[Box] | None:
+        boxes = detect_tiled(self._inner.detect, img, {"face"}, self._tile, self._overlap)
+        return None if boxes is None else sorted(boxes, key=lambda box: -box.conf)
+
+
 class AdapterFace:
     """RF-DETR a través del adaptador real del servicio (puerto `face`), con el umbral casi en cero."""
 
@@ -300,6 +296,12 @@ def rate(numerator: float, denominator: float) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
 
 
+def size_of(truth: Sequence[float]) -> str:
+    """`chicas`, `medianas` o `grandes` según el lado menor de la cara en la foto original."""
+    side = min(truth[2] - truth[0], truth[3] - truth[1])
+    return SIZES[0] if side < SMALL_SIDE_PX else SIZES[1] if side <= MEDIUM_SIDE_PX else SIZES[2]
+
+
 def is_small(truth: Sequence[float], small_px: float = SMALL_SIDE_PX) -> bool:
     return min(truth[2] - truth[0], truth[3] - truth[1]) < small_px
 
@@ -334,9 +336,11 @@ def operating_points(
     images = max(len(truths), 1)
     total = sum(len(v) for v in truths.values())
     small_total = sum(is_small(t, small_px) for v in truths.values() for t in v)
+    size_totals = Counter(size_of(t) for v in truths.values() for t in v)
     rows = []
     for threshold in THRESHOLDS:
         found = small_found = positives = false_positives = 0
+        size_found: Counter[str] = Counter()
         for image, faces in truths.items():
             kept = [b for b in predictions.get(image, []) if b.conf >= threshold]
             hits, used = match(faces, kept)
@@ -344,11 +348,13 @@ def operating_points(
             false_positives += len(hits) - sum(hits)
             found += len(used)
             small_found += sum(is_small(faces[i], small_px) for i in used)
+            size_found.update(size_of(faces[i]) for i in used)
         rows.append(
             {
                 "umbral": threshold,
                 "recall": rate(found, total),
                 "recall_chicas": rate(small_found, small_total),
+                "recall_por_tamano": {size: rate(size_found[size], size_totals[size]) for size in SIZES},
                 "precision": rate(positives, positives + false_positives),
                 "fp_por_foto": round(false_positives / images, 4),
             }
@@ -393,8 +399,10 @@ def evaluate(
     report = {}
     for name, predictions in candidates.items():
         points = operating_points(truths, predictions)
+        base = CANDIDATE_INFO[name.removesuffix(TILED_SUFFIX)]
         report[name] = {
-            **CANDIDATE_INFO[name],
+            **base,
+            **({"nombre": f"{base['nombre']} + mosaico"} if name.endswith(TILED_SUFFIX) else {}),
             "ap50": average_precision(truths, predictions),
             "puntos": points,
             "recall_a_fp": {str(t): recall_at(points, t) for t in FP_TARGETS},
@@ -432,12 +440,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--rfdetr-model", help="modelo del puerto face del manifest (p. ej. rfdetr_openimages)"
     )
+    parser.add_argument(
+        "--service-model",
+        help="modelo del puerto face del manifest corrido con el adaptador del servicio (p. ej. scrfd_10g)",
+    )
+    parser.add_argument(
+        "--service-tiling", action="store_true", help="suma el adaptador del servicio con FACE_TILING=true"
+    )
     parser.add_argument("--scrfd-model", type=Path, help="ONNX de SCRFD de 6 o 9 salidas")
     parser.add_argument(
         "--retinaface-model", type=Path, help="ONNX de RetinaFace-R50 (convert_to_onnx.py de biubug6)"
     )
     parser.add_argument("--yunet-model", type=Path, help="ONNX de YuNet (face_detection_yunet_*.onnx)")
     parser.add_argument("--size", type=int, default=640, help="lado de la entrada de SCRFD y RetinaFace")
+    parser.add_argument(
+        "--tiling",
+        nargs="+",
+        choices=tuple(CANDIDATE_INFO),
+        default=[],
+        help="detectores a correr también por mosaico (se suman como <nombre>+mosaico)",
+    )
+    parser.add_argument("--tile-px", type=int, default=DEFAULT_TILE_PX, help="lado de cada tile")
+    parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP, help="solape entre tiles (0 a 0,9)")
     args = parser.parse_args(argv)
     if args.out_dir is None:
         parser.error("indicá --out-dir o definí EVAL_OUT")
@@ -445,12 +469,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         if args.data_dir is None:
             parser.error("indicá --dataset-dir o --data-dir (EVAL_DATA_DIR)")
         args.dataset_dir = Path(args.data_dir) / FACE_FOLDER
-    if not any((args.rfdetr_model, args.scrfd_model, args.retinaface_model, args.yunet_model)):
+    if not any(
+        (args.rfdetr_model, args.service_model, args.scrfd_model, args.retinaface_model, args.yunet_model)
+    ):
         parser.error(
             "indicá al menos un detector: --rfdetr-model, --scrfd-model, --retinaface-model o --yunet-model"
         )
-    if args.rfdetr_model and args.models_dir is None:
-        parser.error("--rfdetr-model necesita --models-dir (MODELS_DIR)")
+    if (args.rfdetr_model or args.service_model) and args.models_dir is None:
+        parser.error("--rfdetr-model y --service-model necesitan --models-dir (MODELS_DIR)")
     return args
 
 
@@ -461,12 +487,30 @@ def build_candidates(args: argparse.Namespace) -> dict[str, FaceDetector]:
             {"face": args.rfdetr_model}, args.manifest, args.models_dir, params={"redaction_min_conf": FLOOR}
         )
         candidates["rfdetr"] = AdapterFace(models)
+    if args.service_model:
+        for suffix, tiling in (("", 0.0), *((TILED_SUFFIX, 1.0),) * args.service_tiling):
+            models = build_models(
+                {"face": args.service_model},
+                args.manifest,
+                args.models_dir,
+                params={
+                    "redaction_min_conf": FLOOR,
+                    "face_tiling": tiling,
+                    "tiling_tile_px": float(args.tile_px),
+                    "tiling_overlap": args.overlap,
+                },
+            )
+            candidates["servicio" + suffix] = AdapterFace(models)
     if args.scrfd_model:
         candidates["scrfd"] = Scrfd(args.scrfd_model, args.size)
     if args.retinaface_model:
         candidates["retinaface_r50"] = RetinaFace(args.retinaface_model, args.size)
     if args.yunet_model:
         candidates["yunet"] = YuNet(args.yunet_model)
+    for name in args.tiling:
+        if name not in candidates:
+            raise ValueError(f"--tiling pide {name}, pero no se pasó su modelo")
+        candidates[name + TILED_SUFFIX] = Tiled(candidates[name], args.tile_px, args.overlap)
     return candidates
 
 
@@ -505,7 +549,10 @@ def main(
         "candidatos": evaluate(truths, predictions),
     }
     for name in candidates:
-        report["candidatos"][name]["latencia_ms_mediana"] = round(statistics.median(times[name]))
+        ordered = sorted(times[name])
+        report["candidatos"][name]["latencia_ms_mediana"] = round(statistics.median(ordered))
+        report["candidatos"][name]["latencia_ms_p95"] = round(ordered[round(0.95 * (len(ordered) - 1))])
+    report["caras_por_tamano"] = dict(Counter(size_of(t) for v in truths.values() for t in v))
     report["criterio"] = verdict(report["candidatos"])
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     (Path(args.out_dir) / "face_report.json").write_text(
@@ -528,6 +575,25 @@ def main(
             f"{name:<16}{data['commercial']:<11}{data['ap50']!s:>7}{''.join(cells)}"
             f"{small['recall_chicas'] if small else '-':>16}{data['latencia_ms_mediana']:>7}"
         )
+    print(f"Caras por tamaño: {report['caras_por_tamano']}")
+    for target in FP_TARGETS:
+        print(
+            f"Recall por tamaño con a lo sumo {target} falsos positivos por foto (y falsos positivos reales):"
+        )
+        print(
+            f"  {'detector':<20}"
+            + "".join(f"{size:>10}" for size in SIZES)
+            + f"{'FP/foto':>9}{'ms med.':>9}{'ms p95':>8}"
+        )
+        for name, data in report["candidatos"].items():
+            point = data["recall_a_fp"][str(target)]
+            sizes = point["recall_por_tamano"] if point else {}
+            print(
+                f"  {name:<20}"
+                + "".join(f"{sizes.get(size, '-')!s:>10}" for size in SIZES)
+                + f"{point['fp_por_foto'] if point else '-':>9}"
+                + f"{data['latencia_ms_mediana']:>9}{data['latencia_ms_p95']:>8}"
+            )
     print(f"Criterio: {report['criterio']}")
     return 0
 

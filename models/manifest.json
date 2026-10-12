@@ -80,6 +80,22 @@
       "source": "https://huggingface.co/facebook/dinov2-small, exportado a ONNX con tools/export/dinov2.py",
       "commercial": "yes",
       "notes": "Pesos de Meta sin entrenar ni ajustar. Entrada fija 1x3x224x224, FP32, opset 17."
+    },
+    {
+      "name": "scrfd_10g",
+      "version": "scrfd-10g-bnkps@insightface-buffalo_l",
+      "ports": ["face"],
+      "file": "scrfd_10g.onnx",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "license": "InsightFace: pesos para investigación (datos WIDER FACE, CC BY-NC-ND); uso comercial con licencia de InsightFace",
+      "paper": {
+        "title": "Sample and Computation Redistribution for Efficient Face Detection",
+        "venue": "ICLR",
+        "year": 2022
+      },
+      "source": "det_10g.onnx del paquete buffalo_l de InsightFace (SCRFD-10G con puntos de la cara), copiado de https://huggingface.co/public-data/insightface; sin reentrenar ni modificar",
+      "commercial": "escalable",
+      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. El uso comercial requiere la licencia de InsightFace; el puerto face admite commercial = no por excepción de privacidad."
     }
   ]
 }

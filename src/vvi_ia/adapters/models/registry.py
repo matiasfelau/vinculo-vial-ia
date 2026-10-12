@@ -36,6 +36,9 @@ from vvi_ia.service.validate_evidence import Models
 logger = logging.getLogger(__name__)
 
 NULL = "null"
+# Único puerto que acepta un modelo con commercial=no: el que mejor protege la privacidad puede no tener
+# licencia comercial; en el resto, commercial=no solo vive en tools para comparar.
+NON_COMMERCIAL_PORTS = frozenset({"face"})
 
 # Puerto del manifest → campo de `Models`.
 PORT_FIELDS: Mapping[str, str] = {
@@ -151,8 +154,14 @@ def build_models(
         if entry is None:
             raise ModelSetupError(f"el modelo {name} (puerto {port}) no está en el manifest")
         if entry.commercial == Commercial.NO:
-            raise ModelSetupError(
-                f"el modelo {name} es commercial=no: no se puede seleccionar en el servicio"
+            if port not in NON_COMMERCIAL_PORTS:
+                raise ModelSetupError(
+                    f"el modelo {name} es commercial=no: no se puede seleccionar en el puerto {port} "
+                    f"(solo {', '.join(sorted(NON_COMMERCIAL_PORTS))} admite esa excepción)"
+                )
+            logger.warning(
+                "modelo sin licencia comercial en uso por excepción del puerto",
+                extra={"port": port, "model": name},
             )
         if port not in entry.ports:
             raise ModelSetupError(f"el modelo {name} no sirve al puerto {port}")

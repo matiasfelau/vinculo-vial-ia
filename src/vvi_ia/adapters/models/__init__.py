@@ -7,4 +7,5 @@ from vvi_ia.adapters.models import (  # noqa: F401
     rfdetr_detector,
     rfdetr_seg,
     rfdetr_seg_curb,
+    scrfd_face,
 )

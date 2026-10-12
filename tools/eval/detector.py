@@ -23,6 +23,7 @@ from pycocotools.cocoeval import COCOeval
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.adapters.models.rfdetr_detector import FACE, LABELS, MODEL_NAME
+from vvi_ia.adapters.models.tiling import DEFAULT_OVERLAP, DEFAULT_TILE_PX
 from vvi_ia.domain.model import Box, BoxLabel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -156,6 +157,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--detector-min-conf", type=float, default=DEFAULT_THRESHOLDS[BoxLabel.CAR])
     parser.add_argument("--plate-min-conf", type=float, default=DEFAULT_THRESHOLDS[BoxLabel.PLATE])
     parser.add_argument("--face-min-conf", type=float, default=DEFAULT_THRESHOLDS[FACE])
+    parser.add_argument(
+        "--face-tiling", action="store_true", help="rostros también por mosaico (FACE_TILING)"
+    )
+    parser.add_argument(
+        "--plate-tiling", action="store_true", help="patentes también por mosaico (PLATE_TILING)"
+    )
+    parser.add_argument("--tile-px", type=int, default=DEFAULT_TILE_PX, help="lado de cada tile")
+    parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP, help="solape entre tiles")
     args = parser.parse_args(argv)
     for flag, value in (("--out-dir", args.out_dir), ("--models-dir", args.models_dir)):
         if value is None:
@@ -183,7 +192,14 @@ def main(argv: list[str] | None = None) -> int:
             {"detector": args.model, "face": args.model},
             args.manifest,
             args.models_dir,
-            params={"detector_min_conf": FLOOR, "redaction_min_conf": FLOOR},
+            params={
+                "detector_min_conf": FLOOR,
+                "redaction_min_conf": FLOOR,
+                "face_tiling": float(args.face_tiling),
+                "plate_tiling": float(args.plate_tiling),
+                "tiling_tile_px": float(args.tile_px),
+                "tiling_overlap": args.overlap,
+            },
         )
     except ModelSetupError as exc:
         print(f"No se pudo empezar: {exc}", file=sys.stderr)
@@ -208,7 +224,11 @@ def main(argv: list[str] | None = None) -> int:
         "modelo": models.versions()["detector"],
         "split": args.split,
         "fotos": len(predictions),
+        "mosaico": {"rostros": args.face_tiling, "patentes": args.plate_tiling, "tile_px": args.tile_px}
+        if args.face_tiling or args.plate_tiling
+        else None,
         "latencia_ms_mediana": round(statistics.median(times)),
+        "latencia_ms_p95": round(sorted(times)[round(0.95 * (len(times) - 1))]),
         "clases": evaluate(coco_gt, predictions, thresholds),
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -217,7 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"Modelo {report['modelo']} · {report['split']} · {report['fotos']} fotos · "
-        f"{report['latencia_ms_mediana']} ms por foto (CPU)"
+        f"{report['latencia_ms_mediana']} ms por foto (CPU, p95 {report['latencia_ms_p95']}) · "
+        f"mosaico {report['mosaico'] or 'apagado'}"
     )
     print(
         f"{'clase':<8}{'reales':>8}{'umbral':>8}{'recall':>8}{'prec.':>8}{'FP':>6}{'chicas':>8}{'rec.ch.':>9}{'AP50':>8}"

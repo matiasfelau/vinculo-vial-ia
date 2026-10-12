@@ -52,6 +52,10 @@ def adapter_params(settings: Settings) -> dict[str, float]:
         "detector_min_conf": settings.detector_min_conf,
         "damage_min_conf": settings.damage_min_conf,
         "curb_min_conf": settings.curb_min_conf,
+        "face_tiling": float(settings.face_tiling),
+        "plate_tiling": float(settings.plate_tiling),
+        "tiling_tile_px": float(settings.tiling_tile_px),
+        "tiling_overlap": settings.tiling_overlap,
         # Rostros y patentes salen desde el umbral de redacción más bajo: el dominio decide cuáles tapar
         "redaction_min_conf": min(settings.face_min_conf, settings.plate_redact_min_conf),
     }
