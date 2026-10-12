@@ -18,6 +18,7 @@ from tests.fakes import (
     car_box,
     detail_marker,
     happy_models,
+    marker_of,
     plate_box,
     rect,
     vec,
@@ -357,6 +358,91 @@ def test_un_detalle_sin_modelo_y_otro_vacio_es_uncertain() -> None:
     assert _codes(_run(build_scenario(CRASHED, details=2), models)) == {R.CONTEXT_UNCERTAIN}
 
 
+# --- E1c: re-identificación de DETAIL y CONTEXT contra GENERAL -----------------------------------------
+
+
+def _detail_with_car(models: FakeModels, angle: float | None, index: int = 0) -> FakeModels:
+    marker = detail_marker(index)
+    models.cars.by_marker[marker] = [CarInstance(rect(10, 90, 10, 60))]
+    models.embedder.by_marker_area[(marker, 80 * 50)] = None if angle is None else vec(angle)
+    return models
+
+
+def test_un_detalle_con_el_mismo_auto_no_suma_codigos() -> None:
+    result = _run(build_scenario(), _detail_with_car(happy_models(), 5))
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+
+
+def test_un_detalle_de_otro_auto_es_burst_mismatch() -> None:
+    result = _run(build_scenario(), _detail_with_car(happy_models(), 85))
+
+    assert _codes(result) == {R.BURST_MISMATCH}
+    assert result.verdict == Verdict.RED and is_fraud(result.reason_codes)
+
+
+def test_un_detalle_con_similitud_intermedia_es_burst_uncertain() -> None:
+    result = _run(build_scenario(), _detail_with_car(happy_models(), 55))
+
+    assert _codes(result) == {R.BURST_UNCERTAIN} and result.verdict == Verdict.YELLOW
+
+
+def test_el_mismatch_se_detecta_en_cualquiera_de_los_detalles() -> None:
+    models = _detail_with_car(_detail_with_car(happy_models(), 5, 0), 85, 2)
+
+    assert _codes(_run(build_scenario(CRASHED, details=3), models)) == {R.BURST_MISMATCH}
+
+
+def test_un_detalle_sin_auto_segmentado_no_se_compara() -> None:
+    models = happy_models()  # en un primer plano no se segmenta ningún auto
+
+    assert _codes(_run(build_scenario(), models)) == set()
+
+
+def test_un_detalle_cuyo_segmentador_falla_es_burst_uncertain() -> None:
+    models = happy_models()
+    models.cars.by_marker[detail_marker(0)] = None
+
+    assert _codes(_run(build_scenario(), models)) == {R.BURST_UNCERTAIN}
+
+
+def test_un_detalle_sin_embedding_es_burst_uncertain() -> None:
+    assert _codes(_run(build_scenario(), _detail_with_car(happy_models(), None))) == {R.BURST_UNCERTAIN}
+
+
+def test_sin_embedding_de_general_no_se_comparan_los_detalles() -> None:
+    models = _detail_with_car(happy_models(), 85)
+    models.cars.by_marker[
+        GENERAL
+    ] = []  # sin auto en GENERAL: la ráfaga ya es dudosa y no hay con qué comparar
+
+    assert _codes(_run(build_scenario(), models)) == {R.BURST_UNCERTAIN}
+
+
+def test_el_contexto_de_otro_auto_es_burst_mismatch() -> None:
+    models = happy_models()
+    models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(85)
+    models.embedder.by_marker_area[(CONTEXT, 400)] = vec(80)
+
+    assert R.BURST_MISMATCH in _codes(_run(build_scenario(GARAGE), models))
+
+
+def test_el_embedding_del_contexto_se_calcula_una_sola_vez_por_auto() -> None:
+    models = happy_models()
+    calls: list[int] = []
+    original = models.embedder.embed
+
+    def counting(img: object, mask: object) -> object:
+        calls.append(marker_of(img))  # type: ignore[arg-type]
+        return original(img, mask)  # type: ignore[arg-type]
+
+    models.embedder.embed = counting  # type: ignore[method-assign]
+
+    _run(build_scenario(GARAGE), models)
+
+    assert calls.count(CONTEXT) == 2  # los dos autos del contexto, una vez cada uno
+
+
 # --- E3: contexto (PARKED_ON_GARAGE) ----------------------------------------------------
 
 
@@ -430,7 +516,13 @@ def test_contexto_sin_modelo_o_sin_autos_es_uncertain(missing: str) -> None:
     else:
         models.cars.by_marker[CONTEXT] = []
 
-    assert _codes(_run(build_scenario(GARAGE), models)) == {R.CONTEXT_UNCERTAIN}
+    codes = _codes(_run(build_scenario(GARAGE), models))
+
+    assert R.CONTEXT_UNCERTAIN in codes and not codes & {
+        R.NO_VEHICLE,
+        R.BURST_MISMATCH,
+        R.CONTEXT_NOT_DETECTED,
+    }
 
 
 def test_el_objetivo_es_el_auto_que_mas_se_parece_a_plate_o_general() -> None:
@@ -445,14 +537,18 @@ def test_el_objetivo_es_el_auto_que_mas_se_parece_a_plate_o_general() -> None:
     assert _codes(_run(build_scenario(GARAGE), models)) == {R.CONTEXT_NOT_DETECTED}
 
 
-def test_mejor_coseno_bajo_reid_t_low_es_context_uncertain() -> None:
+def test_mejor_coseno_bajo_reid_t_low_es_burst_mismatch_y_context_uncertain() -> None:
     models = happy_models()
     models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(85)
     models.embedder.by_marker_area[(CONTEXT, 400)] = vec(90)
 
     result = _run(build_scenario(GARAGE), models)
 
-    assert _codes(result) == {R.CONTEXT_UNCERTAIN}
+    assert _codes(result) == {
+        R.CONTEXT_UNCERTAIN,
+        R.BURST_MISMATCH,
+    }  # ningún auto del contexto es el reportado
+    assert result.verdict == Verdict.RED
 
 
 def test_sin_embedder_y_mas_de_un_auto_es_context_uncertain() -> None:
