@@ -50,7 +50,8 @@ class Settings(BaseSettings):
     # Umbrales del dominio
     reid_t_low: float = Field(default=0.50, ge=0.0, le=1.0)
     reid_t_high: float = Field(default=0.70, ge=0.0, le=1.0)
-    ocr_min_conf: float = Field(default=0.60, ge=0.0, le=1.0)
+    # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
+    ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
     damage_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
     face_min_conf: float = Field(default=0.30, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
