@@ -2,6 +2,22 @@
   "schema_version": 1,
   "models": [
     {
+      "name": "rfdetr_cardd",
+      "version": "rf-detr-small@cardd",
+      "ports": ["damage"],
+      "file": "rfdetr_cardd.onnx",
+      "sha256": "0610aa3a7f529d141dc98b0023f30e2cb07d003e44397696b0d882e6e83ceaca",
+      "license": "Apache-2.0 (modelo); los pesos heredan las condiciones de CarDD",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "RF-DETR Small ajustado con CarDD (PIC Lab, CAS; Wang, Li y Wu, IEEE T-ITS 24(7):7202-7214, 2023) con tools/training/damage/train.py y exportado con export.py",
+      "commercial": "escalable",
+      "notes": "CarDD sirve para investigacion con consentimiento previo del PIC Lab; el uso comercial, incluido probar sistemas comerciales, requiere su autorizacion previa. El dataset no se redistribuye y este archivo no se publica ni se redistribuye. Clases en el orden dent, scratch, crack, glass_shatter, lamp_broken, tire_flat. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels."
+    },
+    {
       "name": "rfdetr_openimages",
       "version": "rf-detr-small@openimages-v7",
       "ports": ["detector", "face"],
