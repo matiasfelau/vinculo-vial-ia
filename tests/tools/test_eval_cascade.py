@@ -120,8 +120,8 @@ def test_readable_plates_descarta_las_fotos_sin_auto_patente_o_lectura_segura(tm
     found = cascade.readable_plates(
         SimpleNamespace(vehicle=Detector(), plate=Reader()),
         pool,
-        random.Random(0),
-        wanted=1,  # noqa: S311
+        random.Random(0),  # noqa: S311
+        wanted=1,
     )
 
     assert [(path.name, text) for path, text in found] == [("ok.jpg", b"AB123CD")]
