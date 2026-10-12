@@ -534,7 +534,7 @@ uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --curb-pr
 | `--alerts N` | Alertas por escenario (20 por defecto), más una de calentamiento que no cuenta. |
 | `--curb-proxy` | Mientras no haya modelo de rebajes, simula su costo corriendo el segmentador de autos (misma arquitectura). Sin esto `curb` es `null` y los escenarios de rebaje cortan antes. |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
-| `--plate-tiling on|off`\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
+| `--plate-tiling on\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
 | `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
 | `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
 
