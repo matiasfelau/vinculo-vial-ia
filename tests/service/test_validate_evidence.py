@@ -157,17 +157,120 @@ def test_reprocesar_es_idempotente() -> None:
 def test_ningun_auto_es_no_vehicle_y_corta_la_cascada() -> None:
     models = happy_models()
     models.vehicle.by_marker[GENERAL] = [plate_box()]
+    models.cars.by_marker[GENERAL] = []
 
     result = _run(build_scenario(), models)
 
     assert result.verdict == Verdict.RED
     assert result.reason_codes == (R.NO_VEHICLE,)
     assert models.plate.calls == 0
+    assert is_fraud(result.reason_codes)
+
+
+# --- E1: presencia de auto en TODAS las fotos -----------------------------------------------------
+
+
+def _only(
+    models: FakeModels, marker: int, boxes: list[Box] | None, cars: list[CarInstance] | None
+) -> FakeModels:
+    models.vehicle.by_marker[marker] = boxes
+    models.cars.by_marker[marker] = cars
+    return models
+
+
+def test_una_foto_de_contexto_sin_auto_es_no_vehicle() -> None:
+    models = _only(
+        happy_models(), CONTEXT, [Box(0, 0, 10, 10, 0.9, BoxLabel.WHEEL)], []
+    )  # una rueda no alcanza
+
+    result = _run(build_scenario(GARAGE), models)
+
+    assert result.reason_codes == (R.NO_VEHICLE,) and result.verdict == Verdict.RED
+
+
+def test_una_foto_de_patente_sin_auto_ni_partes_es_no_vehicle() -> None:
+    result = _run(build_scenario(), _only(happy_models(), PLATE, [], []))
+
+    assert result.reason_codes == (R.NO_VEHICLE,) and is_fraud(result.reason_codes)
+
+
+def test_un_detalle_sin_auto_ni_partes_es_no_vehicle_aunque_las_demas_esten_bien() -> None:
+    models = _only(happy_models(), detail_marker(0), [], [])
+
+    result = _run(build_scenario(), models)
+
+    assert result.reason_codes == (R.NO_VEHICLE,) and result.redacted == ()
+
+
+def test_el_mismo_defecto_en_cualquiera_de_los_detalles_alcanza() -> None:
+    models = _only(happy_models(), detail_marker(2), [], [])
+
+    assert _codes(_run(build_scenario(CRASHED, details=3), models)) == {R.NO_VEHICLE}
+
+
+@pytest.mark.parametrize(
+    ("boxes", "cars"),
+    [
+        ([Box(0, 0, 60, 60, 0.9, BoxLabel.WHEEL)], []),  # una rueda
+        ([plate_box(0.95)], []),  # una patente
+        ([], [CarInstance(rect(0, 60, 0, 60))]),  # un auto segmentado
+        ([Box(0, 0, 90, 90, 0.9, BoxLabel.CAR)], None),  # un auto detectado, el segmentador sin modelo
+    ],
+)
+@pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
+def test_en_plate_y_detail_basta_una_parte_del_auto(
+    boxes: list[Box], cars: list[CarInstance] | None, role_marker: int
+) -> None:
+    models = _only(happy_models(), role_marker, boxes, cars)
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_en_general_una_rueda_o_una_patente_no_alcanzan() -> None:
+    models = _only(happy_models(), GENERAL, [Box(0, 0, 60, 60, 0.9, BoxLabel.WHEEL), plate_box()], [])
+
+    assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_una_caja_chica_no_cuenta_como_presencia() -> None:
+    small = Box(0, 0, 20, 20, 0.9, BoxLabel.CAR)  # 4 % de la foto de 100 x 100
+    models = _only(happy_models(), GENERAL, [small], [CarInstance(rect(0, 20, 0, 20))])
+
+    assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_una_patente_poco_confiable_no_cuenta_como_parte_del_auto() -> None:
+    models = _only(happy_models(), PLATE, [plate_box(0.3)], [])
+
+    assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_si_ningun_modelo_responde_no_hay_veredicto_de_fraude() -> None:
+    models = _only(happy_models(), detail_marker(0), None, None)
+
+    result = _run(build_scenario(), models)
+
+    assert R.NO_VEHICLE not in _codes(result) and R.BURST_UNCERTAIN in _codes(result)
+
+
+def test_si_un_modelo_falla_y_el_otro_no_ve_nada_tampoco_se_decide() -> None:
+    models = _only(happy_models(), detail_marker(0), None, [])
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_el_corte_por_falta_de_auto_no_corre_el_resto_de_la_cascada() -> None:
+    models = _only(happy_models(), detail_marker(0), [], [])
+
+    _run(build_scenario(), models)
+
+    assert models.plate.calls == 0 and models.damage.by_marker  # sin lectura de patente ni redacción
 
 
 def test_detector_sin_modelo_en_general_es_burst_uncertain() -> None:
     models = happy_models()
     models.vehicle.by_marker[GENERAL] = None
+    models.cars.by_marker[GENERAL] = None  # si el segmentador ve el auto, la presencia queda resuelta
 
     assert R.BURST_UNCERTAIN in _codes(_run(build_scenario(), models))
 

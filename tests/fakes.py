@@ -79,6 +79,8 @@ THRESHOLDS = Thresholds(
     reid_t_high=0.70,
     ocr_min_conf=0.60,
     damage_min_conf=0.70,
+    presence_min_area=0.05,
+    presence_plate_min_conf=0.40,
     ramp_t_low=-0.08,
     ramp_t_high=0.08,
     ramp_scale_fallback=0.45,
@@ -202,7 +204,7 @@ def happy_models() -> FakeModels:
                 GENERAL: [car_box(), plate_box()],
                 PLATE: [plate_box(0.95)],
                 CONTEXT: [car_box(), Box(35, 60, 45, 80, 0.9, BoxLabel.WHEEL)],
-                **{detail_marker(i): [] for i in range(3)},
+                **{detail_marker(i): [Box(0, 0, 80, 80, 0.9, BoxLabel.WHEEL)] for i in range(3)},
             }
         ),
         cars=FakeCarSegmenter(

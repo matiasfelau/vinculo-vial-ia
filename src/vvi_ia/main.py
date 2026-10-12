@@ -67,6 +67,8 @@ def build_thresholds(settings: Settings) -> Thresholds:
         reid_t_high=settings.reid_t_high,
         ocr_min_conf=settings.ocr_min_conf,
         damage_min_conf=settings.damage_min_conf,
+        presence_min_area=settings.presence_min_area,
+        presence_plate_min_conf=settings.detector_min_conf,
         ramp_t_low=settings.ramp_t_low,
         ramp_t_high=settings.ramp_t_high,
         ramp_scale_fallback=settings.ramp_scale_fallback,

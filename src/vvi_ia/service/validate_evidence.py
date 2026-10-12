@@ -96,6 +96,10 @@ class Thresholds:
     reid_t_high: float
     ocr_min_conf: float
     damage_min_conf: float
+    presence_min_area: (
+        float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
+    )
+    presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
     ramp_t_low: float  # solape (en escalas de rueda) debajo del cual el auto no bloquea: RED
     ramp_t_high: float  # solape desde el cual el auto bloquea con claridad: sin observación
     ramp_scale_fallback: float
@@ -243,7 +247,8 @@ class ValidateEvidence:
         codes: Codes = []
 
         with _timed(durations, "vehicle"):
-            if not self._vehicle_present(run, general, codes):
+            ordered = [general, plate_img, *by_role[EvidenceRole.DETAIL], *by_role[EvidenceRole.CONTEXT]]
+            if not self._vehicle_present(run, ordered, codes):
                 return self._finish(payload, codes, Scores(), durations)
         with _timed(durations, "burst"):
             similarity = self._burst(run, general, plate_img, codes)
@@ -298,16 +303,40 @@ class ValidateEvidence:
 
     # --- etapas -------------------------------------------------------------------------
 
-    def _vehicle_present(self, run: _Run, general: EvidenceImage, codes: Codes) -> bool:
-        """E1. `False` si no hay auto (RED): el resto de la cascada no tiene sentido."""
-        detections = run.detect(general)
-        if detections is None:
-            _add(codes, ReasonCode.BURST_UNCERTAIN)
-            return True
-        if not any(box.label == BoxLabel.CAR for box in detections):
-            _add(codes, ReasonCode.NO_VEHICLE)
-            return False
+    def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
+        """E1. `False` si falta el auto en alguna foto (RED): el resto de la cascada no tiene sentido.
+
+        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente).
+        Si los modelos no responden no se puede decidir y la foto suma `BURST_UNCERTAIN`.
+        """
+        for image in images:
+            found = self._has_car(run, image)
+            if found is None:
+                _add(codes, ReasonCode.BURST_UNCERTAIN)
+            elif not found:
+                _add(codes, ReasonCode.NO_VEHICLE)
+                return False
         return True
+
+    def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
+        """¿Hay un auto (o una parte, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
+
+        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, o una
+        instancia de auto del segmentador. `None` si no se pudo decidir (sin hallazgos y sin un modelo).
+        """
+        labels = {BoxLabel.CAR}
+        if image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL):
+            labels |= {BoxLabel.WHEEL, BoxLabel.PLATE}
+        minimum = self._t.presence_min_area * image.width * image.height
+        detections = run.detect(image)
+        for box in detections or ():
+            if box.label in labels and box.area >= minimum:
+                if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
+                    return True
+        cars = run.segment_cars(image)
+        if any(int(car.mask.sum()) >= minimum for car in cars or ()):
+            return True
+        return False if detections is not None and cars is not None else None
 
     def _burst(
         self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage, codes: Codes
