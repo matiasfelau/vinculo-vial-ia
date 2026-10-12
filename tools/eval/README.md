@@ -577,7 +577,7 @@ segmentador y el detector de daños reales sobre cuatro conjuntos, fuera del rep
 - **negativas**: 489 fotos de Open Images sin `Car`, `Vehicle registration plate` ni `Wheel` anotados.
 
 ```powershell
-$env:TRAIN_DATA_DIR = "D:v-eval\cardd"; $env:EVAL_DATA_DIR = "D:v-eval"; $env:EVAL_OUT = "D:v-eval\out\presence"
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\presence"
 $env:MODELS_DIR = "models\weights"
 uv run --frozen --extra dev --extra tools python tools/eval/presence.py
 ```
