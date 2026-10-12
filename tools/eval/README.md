@@ -571,7 +571,7 @@ También es una alerta por vez: con varios workers en la misma CPU cada una va a
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
 del dataset propio (`EVAL_DATA_DIR\curb\dataset\test`, que arma `tools/training/curb/prepare.py` y no cambia).
 Las máscaras de auto salen de `rfdetr_seg_coco` y la decisión de la misma función del servicio
-(`driveway_check`), con `RAMP_MARGIN` y `RAMP_SCALE_FALLBACK`.
+(`driveway_overlap`), con `RAMP_T_LOW`, `RAMP_T_HIGH` y `RAMP_SCALE_FALLBACK`.
 
 ```powershell
 $env:EVAL_DATA_DIR = "D:\vv-eval"
@@ -600,7 +600,7 @@ La comparación sin entrenar contra entrenado es un resultado para la tesis.
 | Tipo | Decisión esperada |
 |---|---|
 | `positivo_claro` | `BLOCKING` |
-| `positivo_marginal` | `BLOCKING` o `BLOCKING_MARGINAL` |
+| `positivo_marginal` | `BLOCKING` (la decisión es binaria: ya no hay `BLOCKING_MARGINAL`) |
 | `negativo_auto_junto_rebaje` | `NOT_BLOCKING` |
 | `negativo_auto_sin_rebaje` | `NO_DRIVEWAY` |
 | `negativo_parecido` | `NO_DRIVEWAY` (o `NO_CAR` si no hay auto) |
@@ -611,8 +611,7 @@ una sola foto).
 
 ### Cómo leer el resultado
 
-Por cada sistema muestra los aciertos, la **precisión** y el **recall de `BLOCKING`**, el **porcentaje de
-`BLOCKING_MARGINAL`** y los resultados por tipo (`curb_report.json`). Las fallas se dibujan en
+Por cada sistema muestra los aciertos, la **precisión** y el **recall de `BLOCKING`** y los resultados por tipo (`curb_report.json`). Las fallas se dibujan en
 `EVAL_OUT\failures\<sistema>\`, con lo anotado en verde y lo predicho en naranja.
 
 Cada falla se clasifica:
@@ -620,10 +619,26 @@ Cada falla se clasifica:
 - **`mascara_mala`**: la máscara del sistema no se parece a la anotada (IoU menor a 0,5) en el cordón o en el
   rebaje. El problema es el modelo: hace falta mejor modelo, más fotos o mejores prompts.
 - **`decision_mala_con_mascara_buena`**: las dos máscaras están bien y aun así la decisión es otra. El problema
-  es el criterio, no el modelo: **se ajusta `RAMP_MARGIN`, no se reentrena**.
+  es el criterio, no el modelo: **se ajusta el umbral (`RAMP_T_LOW`), no se reentrena**.
 
 Para eso el reporte incluye un **barrido de `RAMP_MARGIN` con las máscaras anotadas** (las del oráculo) y el
 valor que más decisiones acierta; si hay empate, el más cercano al actual. Es la forma de saber cuánto ayuda el
 margen sin que cuente el error del modelo.
 
 Con pocas fotos de prueba, una sola foto mueve los porcentajes: mirá siempre las cantidades.
+
+### Referencia sin entrenar: `--baseline`
+
+Cuando todavía no hay máscaras corregidas ni modelo entrenado, `--baseline` corre **solo SAM 3** sobre todas las
+fotos de `raw\` que no están descartadas y compara la decisión con el `tipo` del `fotos.csv`:
+
+```powershell
+uv run --frozen --extra dev --extra tools python tools/eval/curb.py --baseline --detector rfdetr_openimages --curb-model none
+```
+
+Muestra, por tipo, la decisión binaria (`BLOCKING` o `NOT_BLOCKING`, más `NO_DRIVEWAY` y `NO_CAR`) y el veredicto
+que daría el servicio con `RAMP_T_LOW` y `RAMP_T_HIGH` (verde si bloquea con claridad, amarillo si es dudoso, rojo
+si no hay problema). Además calibra los umbrales con las reglas de decisión: `T_LOW` queda justo sobre el mayor
+solape de un negativo (que ningún caso RED llegue a verde ni amarillo), se cuentan los positivos que quedan
+debajo (válidos que terminarían en rojo) y se informa la cota del 95 % (3/N). `T_HIGH` **no se puede calibrar**
+mientras no haya un set de casos dudosos (amarillos): se deja igual a `T_LOW`. La salida es `curb_baseline.json`.

@@ -87,6 +87,29 @@ Al final queda en `curb\prelabel\`:
 4. Cuando termines: **Menu de la task → Export task dataset → formato "COCO 1.0"**, sin guardar las imágenes.
    Descomprimí el zip en `curb\cvat-export\`.
 
+### CVAT local con Docker
+
+Si no tenés CVAT, se levanta en tu máquina (necesita Docker Desktop y Git):
+
+```powershell
+git clone https://github.com/cvat-ai/cvat
+cd cvat
+docker compose up -d
+docker exec -it cvat_server bash -ic "python3 ~/manage.py createsuperuser"
+```
+
+Entrá a <http://localhost:8080> con ese usuario. Después:
+
+1. **Projects → +** y creá el proyecto con **dos etiquetas de tipo *Polygon***: `curb` y `curb_cut` (exactamente
+   esos nombres).
+2. Dentro del proyecto, **Create new task** y subí las fotos de `curb\raw\` (con los mismos nombres de archivo).
+3. **Menu de la task → Upload annotations → "COCO 1.0"** y elegí `prelabel\prelabel_coco.zip`.
+4. Corregí foto por foto (ver arriba) y guardá.
+5. **Menu de la task → Export task dataset → "COCO 1.0"**, sin guardar las imágenes. Descomprimí el zip en
+   `curb\cvat-export\`.
+
+Para apagarlo: `docker compose down` (los datos quedan en volúmenes de Docker; las fotos siguen en tu carpeta).
+
 El resto del camino (el `fotos.csv`, el reparto y el entrenamiento) está en
 [tools/training/curb/README.md](../training/curb/README.md).
 

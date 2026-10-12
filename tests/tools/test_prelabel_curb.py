@@ -387,3 +387,40 @@ def test_si_el_segmentador_informa_su_pico_de_memoria_se_imprime(
     run_main(root, backend=WithMemory())
 
     assert "'pico_memoria_gpu_mb': 3857" in capsys.readouterr().out
+
+
+def test_con_fotos_csv_se_saltea_lo_descartado_y_lo_que_no_figura(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = tmp_path / "data"
+    make_photos(root / "curb" / "raw", 4)  # f0..f3.jpg
+    header = "archivo,tipo,rebaje,parecido,iluminacion,clima,oclusion,notas"
+    rows = [
+        "f0.jpg,positivo_claro,garage,no_aplica,dia,seco,ninguna,",
+        "f1.jpg,descartada,desconocido,no_aplica,desconocido,desconocido,desconocido,repetida",
+        "f2.jpeg,negativo_auto_sin_rebaje,ninguno,no_aplica,dia,seco,ninguna,",
+    ]
+    (root / "curb" / "fotos.csv").write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+    backend = FakeBackend()
+
+    code, _ = run_main(root, [], backend)
+
+    assert code == 0 and backend.calls == 2  # f0 y f2; f1 está descartada y f3 no figura
+    coco = json.loads(
+        (root / "curb" / "prelabel" / "annotations" / "instances_default.json").read_text(encoding="utf-8")
+    )
+    assert sorted(i["file_name"].split("/")[-1] for i in coco["images"]) == ["f0.jpg", "f2.jpg"]
+    assert "2 fotos quedan afuera" in capsys.readouterr().out
+
+
+def test_un_fotos_csv_con_errores_se_informa(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    root = tmp_path / "data"
+    make_photos(root / "curb" / "raw", 1)
+    (root / "curb" / "fotos.csv").write_text(
+        "archivo,tipo,rebaje,parecido,iluminacion,clima,oclusion,notas\nf0.jpg,raro,garage,,dia,seco,ninguna,\n",
+        encoding="utf-8",
+    )
+
+    code, _ = run_main(root, [])
+
+    assert code == 1 and "fila 2" in capsys.readouterr().err

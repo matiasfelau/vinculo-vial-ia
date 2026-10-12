@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from vvi_ia.domain.model import CarInstance
-from vvi_ia.domain.ramp import DrivewayCheck
+from vvi_ia.domain.ramp import DrivewayCheck, DrivewayMeasure
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SHAPE = (60, 100)
@@ -71,8 +71,8 @@ def test_un_auto_sobre_el_rebaje_bloquea() -> None:
     assert curb_eval.decide(CURB, CUT, car(35, 85), WHEEL) == DrivewayCheck.BLOCKING
 
 
-def test_un_auto_justo_en_el_borde_es_marginal() -> None:
-    assert curb_eval.decide(CURB, CUT, car(59, 90), WHEEL) == DrivewayCheck.BLOCKING_MARGINAL
+def test_un_auto_justo_en_el_borde_bloquea() -> None:
+    assert curb_eval.decide(CURB, CUT, car(59, 90), WHEEL) == DrivewayCheck.BLOCKING
 
 
 def test_un_auto_junto_al_rebaje_no_lo_bloquea() -> None:
@@ -87,7 +87,7 @@ def test_el_margen_cambia_la_decision_en_el_borde() -> None:
     near = car(61, 90)  # 1 px de separación con el rebaje
 
     assert curb_eval.decide(CURB, CUT, near, WHEEL, margin=0.08) == DrivewayCheck.NOT_BLOCKING
-    assert curb_eval.decide(CURB, CUT, near, WHEEL, margin=0.30) == DrivewayCheck.BLOCKING_MARGINAL
+    assert curb_eval.decide(CURB, CUT, near, WHEEL, margin=0.30) == DrivewayCheck.BLOCKING
 
 
 # --- máscaras anotadas y calidad -----------------------------------------------------------------------
@@ -130,10 +130,7 @@ def test_cada_tipo_del_csv_tiene_su_decision_esperada() -> None:
 
     assert set(curb_eval.EXPECTED) == set(photos.TYPES) - {photos.DISCARDED}
     assert curb_eval.EXPECTED["positivo_claro"] == {DrivewayCheck.BLOCKING}
-    assert curb_eval.EXPECTED["positivo_marginal"] == {
-        DrivewayCheck.BLOCKING,
-        DrivewayCheck.BLOCKING_MARGINAL,
-    }
+    assert curb_eval.EXPECTED["positivo_marginal"] == {DrivewayCheck.BLOCKING}  # la decisión es binaria
     assert curb_eval.EXPECTED["negativo_auto_junto_rebaje"] == {DrivewayCheck.NOT_BLOCKING}
     assert curb_eval.EXPECTED["negativo_auto_sin_rebaje"] == {DrivewayCheck.NO_DRIVEWAY}
     assert curb_eval.EXPECTED["negativo_parecido"] == {DrivewayCheck.NO_DRIVEWAY, DrivewayCheck.NO_CAR}
@@ -199,7 +196,7 @@ def test_precision_y_recall_de_blocking() -> None:
         [
             ("positivo_claro", DrivewayCheck.BLOCKING, True),  # acierto
             ("positivo_claro", DrivewayCheck.BLOCKING, True),  # acierto
-            ("positivo_marginal", DrivewayCheck.BLOCKING_MARGINAL, True),  # no cuenta como BLOCKING
+            ("positivo_marginal", DrivewayCheck.BLOCKING, True),  # acierto
             ("positivo_claro", DrivewayCheck.NOT_BLOCKING, True),  # se perdió
             ("negativo_auto_junto_rebaje", DrivewayCheck.BLOCKING, True),  # falso positivo
         ]
@@ -207,9 +204,8 @@ def test_precision_y_recall_de_blocking() -> None:
 
     summary = curb_eval.summarize(rows)
 
-    assert summary["precision_blocking"] == pytest.approx(2 / 3, abs=1e-4)
-    assert summary["recall_blocking"] == pytest.approx(2 / 4, abs=1e-4)
-    assert summary["pct_marginal"] == 0.2 and summary["pct_marginal_en_positivas"] == 0.25
+    assert summary["precision_blocking"] == pytest.approx(3 / 4, abs=1e-4)
+    assert summary["recall_blocking"] == pytest.approx(3 / 4, abs=1e-4)
 
 
 def test_resumen_por_tipo_y_por_causa_de_falla() -> None:
@@ -422,7 +418,7 @@ def test_main_exige_las_rutas(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_los_valores_por_defecto_coinciden_con_la_config() -> None:
     from vvi_ia.config import Settings
 
-    assert curb_eval.DEFAULT_MARGIN == Settings.model_fields["ramp_margin"].default
+    assert curb_eval.DEFAULT_MARGIN == -Settings.model_fields["ramp_t_low"].default
     assert curb_eval.DEFAULT_SCALE_FALLBACK == Settings.model_fields["ramp_scale_fallback"].default
 
 
@@ -458,3 +454,124 @@ def test_main_sin_modelo_entrenado_evalua_sam3_y_el_oraculo(
     report = json.loads((tmp_path / "out" / "curb_report.json").read_text(encoding="utf-8"))
     assert code == 0 and list(report["sistemas"]) == ["sam3", "oraculo"] and report["modelos"]["curb"] is None
     assert selections == [{"segmenter": "rfdetr_seg_coco"}]  # el modelo de rebajes ni se intenta cargar
+
+
+# --- referencia con SAM 3 sin etiquetas a mano --------------------------------------------------------------
+
+
+def measure(score: float | None = None, status: DrivewayCheck | None = None) -> DrivewayMeasure:
+    return DrivewayMeasure(status, score)
+
+
+def test_calibrate_ramp_pone_T_LOW_justo_sobre_el_mayor_solape_de_un_negativo() -> None:
+    rows = [
+        ("negativo_auto_junto_rebaje", measure(-0.30)),
+        ("negativo_parecido", measure(-0.10)),
+        ("negativo_auto_sin_rebaje", measure(status=DrivewayCheck.NO_DRIVEWAY)),
+        ("positivo_claro", measure(0.50)),
+        ("positivo_marginal", measure(-0.20)),  # queda bajo T_LOW: viola la regla C
+        ("positivo_claro", measure(status=DrivewayCheck.NO_CAR)),
+    ]
+
+    result = curb_eval.calibrate_ramp(rows)
+
+    assert result["RAMP_T_LOW"] == -0.09 and result["RAMP_T_HIGH"] == -0.09
+    assert result["negativos"] == 3 and result["negativos_con_solape_medido"] == 2
+    assert result["positivos"] == 3 and result["positivos_bajo_T_LOW"] == 1
+    assert result["positivos_sin_medida"] == {"NO_CAR": 1}
+    assert result["cota_95_regla_A_y_B"] == 1.0 and result["cota_95_regla_C"] == 1.0
+    assert "no calibrable" in result["T_HIGH"]
+
+
+def test_calibrate_ramp_sin_negativos_medidos_no_inventa_el_umbral() -> None:
+    result = curb_eval.calibrate_ramp([("positivo_claro", measure(0.5))])
+
+    assert result["RAMP_T_LOW"] is None and result["positivos_bajo_T_LOW"] is None
+    assert result["cota_95_regla_A_y_B"] is None
+
+
+def test_la_cota_del_95_es_3_sobre_n() -> None:
+    assert curb_eval.rate_bound(30) == 0.1
+    assert curb_eval.rate_bound(2) == 1.0
+    assert curb_eval.rate_bound(0) is None
+
+
+def test_outcome_aplica_los_dos_umbrales() -> None:
+    assert curb_eval.outcome(measure(0.2), -0.08, 0.08) == "GREEN"
+    assert curb_eval.outcome(measure(0.0), -0.08, 0.08) == "YELLOW"
+    assert curb_eval.outcome(measure(-0.3), -0.08, 0.08) == "RED"
+    assert curb_eval.outcome(measure(status=DrivewayCheck.NO_DRIVEWAY), -0.08, 0.08) == "RED"
+    assert curb_eval.outcome(measure(status=DrivewayCheck.NO_CAR), -0.08, 0.08) == "YELLOW"
+
+
+def test_baseline_report_arma_la_matriz_por_tipo() -> None:
+    rows = [
+        {"archivo": "a", "tipo": "positivo_claro", "medida": measure(0.5), "mascaras": (True, True)},
+        {"archivo": "b", "tipo": "positivo_claro", "medida": measure(-0.5), "mascaras": (True, True)},
+        {
+            "archivo": "c",
+            "tipo": "negativo_auto_junto_rebaje",
+            "medida": measure(-0.4),
+            "mascaras": (True, False),
+        },
+    ]
+
+    report = curb_eval.baseline_report(rows, 0.08, -0.08, 0.08)
+
+    claro = report["por_tipo"]["positivo_claro"]
+    assert claro["fotos"] == 2 and claro["decisiones"] == {"BLOCKING": 1, "NOT_BLOCKING": 1}
+    assert claro["veredictos"] == {"GREEN": 1, "RED": 1} and claro["aciertos"] == 1
+    assert report["por_tipo"]["negativo_auto_junto_rebaje"]["aciertos"] == 1
+    assert report["sin_curb_cut_detectado"] == 1 and report["fotos"] == 3
+    assert {r["archivo"] for r in report["por_foto"]} == {"a", "b", "c"}
+
+
+def test_main_baseline_corre_sam3_sobre_las_fotos_no_descartadas(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    curb = tmp_path / "data" / "curb"
+    (curb / "raw").mkdir(parents=True)
+    rows = ["archivo,tipo,rebaje,parecido,iluminacion,clima,oclusion,notas"]
+    for name, kind in (
+        ("a.jpeg", "positivo_claro"),
+        ("b.jpeg", "negativo_auto_sin_rebaje"),
+        ("c.jpeg", "descartada"),
+    ):
+        cv2.imwrite(str(curb / "raw" / name), np.full((100, 100, 3), 120, np.uint8))
+        known = "ninguno" if kind != "positivo_claro" else "garage"
+        rows.append(f"{name.replace('jpeg', 'jpg')},{kind},{known},no_aplica,dia,seco,ninguna,")
+    (curb / "fotos.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    class Models:
+        cars = type("Cars", (), {"cars": staticmethod(lambda img: [])})()
+
+        def versions(self) -> dict[str, str]:
+            return {"segmenter": "fake"}
+
+    monkeypatch.setattr(curb_eval, "build_models", lambda *args, **kwargs: Models())
+    seen: list[str] = []
+
+    def factory(args: object):  # type: ignore[no-untyped-def]
+        def predict(sample):  # type: ignore[no-untyped-def]
+            seen.append(sample.name)
+            return np.zeros((100, 100), bool), np.zeros((100, 100), bool)
+
+        return predict
+
+    code = curb_eval.main(
+        [
+            "--baseline",
+            "--data-dir",
+            str(tmp_path / "data"),
+            "--out-dir",
+            str(tmp_path / "out"),
+            "--models-dir",
+            str(tmp_path),
+        ],
+        sam3_factory=factory,
+    )
+
+    assert code == 0 and seen == ["a.jpeg", "b.jpeg"]  # la descartada no se procesa y el nombre es el real
+    report = json.loads((tmp_path / "out" / "curb_baseline.json").read_text(encoding="utf-8"))
+    assert report["fotos"] == 2 and set(report["por_tipo"]) == {"positivo_claro", "negativo_auto_sin_rebaje"}
+    assert "Calibración" in capsys.readouterr().out

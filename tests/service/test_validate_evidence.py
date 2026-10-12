@@ -1,4 +1,5 @@
 import logging
+from dataclasses import replace
 
 import pytest
 
@@ -377,6 +378,33 @@ def test_contacto_exacto_es_context_uncertain() -> None:
     result = _run(build_scenario(GARAGE), models)
 
     assert _codes(result) == {R.CONTEXT_UNCERTAIN}
+
+
+@pytest.mark.parametrize(
+    ("t_low", "t_high", "expected"),
+    [
+        (-0.2, -0.1, set()),  # el solape (~ -0,05) llega a T_HIGH: bloquea con claridad
+        (-0.08, 0.08, {R.CONTEXT_UNCERTAIN}),  # entre los dos umbrales: dudoso
+        (0.01, 0.08, {R.CONTEXT_NOT_DETECTED}),  # bajo T_LOW: el auto no bloquea
+    ],
+)
+def test_los_dos_umbrales_de_la_rampa_deciden_el_codigo(
+    t_low: float, t_high: float, expected: set[R]
+) -> None:
+    models = _garage_models(CarInstance(rect(40, 80, 80, 98)), 40 * 18)  # solape 0
+    scenario = build_scenario(GARAGE)
+    use_case = ValidateEvidence(
+        store=scenario.store,
+        writer=FakeWriter(),
+        decryptor=scenario.decryptor,
+        decoder=scenario.decoder,
+        renderer=JpegRenderer(),
+        models=models.as_models(),
+        thresholds=replace(THRESHOLDS, ramp_t_low=t_low, ramp_t_high=t_high),
+        redaction=REDACTION,
+    )
+
+    assert _codes(use_case.execute(scenario.payload)) == expected
 
 
 def test_auto_lejos_del_rebaje_es_context_not_detected() -> None:

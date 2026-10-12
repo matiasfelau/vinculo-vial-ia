@@ -2,14 +2,11 @@
 
 Reglas:
 
-- **Ninguna escena en dos conjuntos.** Las fotos con la misma `escena` (el mismo auto en el mismo rebaje y
-  momento) se parecen demasiado: si una quedara en entrenamiento y otra en prueba, el resultado de la prueba
-  sería optimista. Una foto sin escena es un grupo de una sola foto.
+- **Cada foto se reparte sola**: no se agrupan por lugar ni por escena.
 - Al azar con semilla fija, aproximadamente 60 / 20 / 20 y **estratificado por tipo**: cada conjunto tiene una
   proporción parecida de cada tipo de foto.
 - **El test se guarda en un archivo la primera vez y después no cambia**, para poder comparar modelos
-  entrenados en momentos distintos con las mismas fotos. Los grupos nuevos van solo a train y valid; si
-  aparece una foto nueva de una escena del test, queda afuera de todo (moverla ensuciaría el test).
+  entrenados en momentos distintos con las mismas fotos. Las fotos nuevas van solo a train y valid.
 """
 
 import json
@@ -37,10 +34,10 @@ class Assignment:
     """Resultado del reparto."""
 
     splits: Mapping[str, list[CurbPhoto]]
-    left_out: list[CurbPhoto]  # fotos nuevas de escenas que ya están en el test
+    left_out: list[CurbPhoto]  # fotos nuevas de un grupo que ya está en el test
 
     def summary(self) -> dict[str, Any]:
-        """Cifras por conjunto: fotos, grupos (escenas o fotos únicas) y fotos de cada tipo."""
+        """Cifras por conjunto: fotos, grupos y fotos de cada tipo."""
         return {
             name: {
                 "fotos": len(photos),
@@ -100,8 +97,7 @@ def assign(
     if fixed_test is None:
         if len(groups) < MIN_GROUPS:
             raise SplitError(
-                f"hacen falta al menos {MIN_GROUPS} grupos distintos (escenas o fotos sin escena) para "
-                f"repartir (hay {len(groups)})"
+                f"hacen falta al menos {MIN_GROUPS} fotos distintas para repartir (hay {len(groups)})"
             )
         chosen = _distribute(groups, TARGETS, seed)
     else:

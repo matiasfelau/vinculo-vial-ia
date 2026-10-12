@@ -1,4 +1,4 @@
-"""Rebajes: validación de fotos.csv, reparto por escena y armado del dataset, con datos sintéticos.
+"""Rebajes: validación de fotos.csv, reparto por foto y armado del dataset, con datos sintéticos.
 
 No hay fotos reales: las imágenes son arreglos lisos y las anotaciones, polígonos inventados.
 """
@@ -37,7 +37,6 @@ HEADER = ",".join(photos_mod.COLUMNS)
 
 def row(
     archivo: str = "a.jpg",
-    escena: str = "",
     tipo: str = "positivo_claro",
     rebaje: str = "garage",
     parecido: str = "",
@@ -49,7 +48,6 @@ def row(
     return ",".join(
         [
             archivo,
-            escena,
             tipo,
             rebaje,
             parecido,
@@ -82,7 +80,7 @@ def test_carga_fotos_validas_y_excluye_las_descartadas(tmp_path: Path) -> None:
     photos = photos_mod.load_photos(path)
 
     assert [p.file for p in photos] == ["a.jpg", "c.jpg"]
-    assert photos[0].kind == "positivo_claro" and photos[0].lighting == "dia" and photos[0].scene == ""
+    assert photos[0].kind == "positivo_claro" and photos[0].lighting == "dia"
 
 
 @pytest.mark.parametrize(
@@ -143,19 +141,14 @@ def test_el_parecido_de_una_descartada_tambien_se_valida(tmp_path: Path) -> None
         photos_mod.load_photos(path)
 
 
-def test_el_archivo_es_obligatorio_y_la_escena_opcional(tmp_path: Path) -> None:
+def test_el_archivo_es_obligatorio(tmp_path: Path) -> None:
     with pytest.raises(photos_mod.PhotosError, match="falta archivo"):
         photos_mod.load_photos(write_csv(tmp_path / "a.csv", [row("")]))
 
-    photos = photos_mod.load_photos(write_csv(tmp_path / "b.csv", [row("a.jpg"), row("b.jpg", escena="e01")]))
 
-    assert [p.scene for p in photos] == ["", "e01"]
-
-
-def test_las_columnas_son_las_nuevas_y_en_ese_orden() -> None:
+def test_las_columnas_son_las_del_csv_actual_y_en_ese_orden() -> None:
     assert photos_mod.COLUMNS == (
         "archivo",
-        "escena",
         "tipo",
         "rebaje",
         "parecido",
@@ -166,32 +159,66 @@ def test_las_columnas_son_las_nuevas_y_en_ese_orden() -> None:
     )
 
 
-def test_un_csv_con_las_columnas_viejas_se_rechaza(tmp_path: Path) -> None:
-    old = "archivo,fecha,barrio,calle,tipo,rebaje,parecido,iluminacion,clima,oclusion,dispositivo,notas"
+def test_un_csv_con_la_columna_escena_de_mas_se_acepta_y_se_ignora(tmp_path: Path) -> None:
+    header = HEADER.replace("archivo,", "archivo,escena,")
+    path = write_csv(tmp_path / "fotos.csv", [row("a.jpg").replace("a.jpg,", "a.jpg,e01,", 1)], header=header)
 
-    with pytest.raises(photos_mod.PhotosError, match="faltan: escena"):
-        photos_mod.load_photos(write_csv(tmp_path / "fotos.csv", [], header=old))
+    assert [p.file for p in photos_mod.load_photos(path)] == ["a.jpg"]
 
 
-def test_una_escena_comparte_rebaje_iluminacion_y_clima(tmp_path: Path) -> None:
+def test_parecido_no_aplica_equivale_a_vacio(tmp_path: Path) -> None:
+    path = write_csv(tmp_path / "fotos.csv", [row("a.jpg", parecido="no_aplica")])
+
+    (photo,) = photos_mod.load_photos(path)
+
+    assert photo.similar == ""
+
+
+def test_no_aplica_no_vale_con_negativo_parecido(tmp_path: Path) -> None:
     path = write_csv(
         tmp_path / "fotos.csv",
-        [
-            row("a.jpg", escena="e01"),
-            row("b.jpg", escena="E01"),  # mayúsculas: es la misma escena
-            row("c.jpg", escena="e01", rebaje="accesibilidad", iluminacion="noche"),
-            row("d.jpg", escena="e01", tipo="descartada", clima="lluvia"),  # las descartadas no cuentan
-            row("e.jpg", escena="e02", rebaje="accesibilidad"),
-        ],
+        [row("a.jpg", tipo="negativo_parecido", rebaje="ninguno", parecido="no_aplica")],
     )
 
-    with pytest.raises(photos_mod.PhotosError) as error:
+    with pytest.raises(photos_mod.PhotosError, match="falta parecido"):
         photos_mod.load_photos(path)
 
-    assert len(error.value.problems) == 1
-    problem = error.value.problems[0]
-    assert problem.startswith("fila 4:") and "la escena 'e01' tiene rebaje 'accesibilidad'" in problem
-    assert "fila 2" in problem and "iluminacion 'noche'" in problem
+
+def test_una_descartada_puede_tener_valores_desconocidos_pero_una_valida_no(tmp_path: Path) -> None:
+    unknown = {
+        "rebaje": "desconocido",
+        "iluminacion": "desconocido",
+        "clima": "desconocido",
+        "oclusion": "desconocido",
+    }
+    ok = write_csv(tmp_path / "a.csv", [row("a.jpg", tipo="descartada", **unknown), row("b.jpg")])
+    assert [p.file for p in photos_mod.load_photos(ok)] == ["b.jpg"]
+
+    bad = write_csv(tmp_path / "b.csv", [row("a.jpg", rebaje="desconocido")])
+    with pytest.raises(photos_mod.PhotosError, match="rebaje desconocido 'desconocido'"):
+        photos_mod.load_photos(bad)
+
+
+def test_el_archivo_se_busca_tambien_por_su_nombre_sin_extension(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    (raw / "a.jpeg").write_bytes(b"x")
+    (raw / "b.jpg").write_bytes(b"x")
+    (raw / "b.png").write_bytes(b"x")  # dos fotos con el mismo nombre: ambiguo
+    path = write_csv(tmp_path / "fotos.csv", [row("a.jpg"), row("b.jpeg")])
+
+    with pytest.raises(photos_mod.PhotosError, match="fila 3: la foto no está en la carpeta"):
+        photos_mod.load_photos(path, raw)
+    assert [p.file for p in photos_mod.load_photos(path)] == ["a.jpg", "b.jpeg"]  # sin carpeta no se resuelve
+    (raw / "b.png").unlink()
+    assert [p.file for p in photos_mod.load_photos(path, raw)] == ["a.jpeg", "b.jpg"]
+
+
+def test_cada_foto_es_su_propio_grupo() -> None:
+    a = photos_mod.CurbPhoto("a.jpg", "positivo_claro", "garage", "", "dia", "seco", "ninguna", "")
+    b = photos_mod.CurbPhoto("b.jpg", "positivo_claro", "garage", "", "dia", "seco", "ninguna", "")
+
+    assert a.group != b.group
 
 
 def test_foto_repetida(tmp_path: Path) -> None:
@@ -227,17 +254,6 @@ def test_filtra_por_tipo(tmp_path: Path) -> None:
     assert [p.file for p in photos_mod.load_photos(path, keep={"positivo_marginal"})] == ["b.jpg"]
 
 
-def test_el_grupo_es_la_escena_sin_distinguir_mayusculas_o_la_foto_misma() -> None:
-    def photo(file: str, scene: str) -> object:
-        return photos_mod.CurbPhoto(file, scene, "positivo_claro", "garage", "", "dia", "seco", "ninguna", "")
-
-    a, b, c = photo("a", "E01"), photo("b", "e01"), photo("c", "e02")
-    solo, other_solo = photo("x", ""), photo("y", "")
-
-    assert a.group == b.group != c.group
-    assert solo.group != other_solo.group and solo.group != a.group
-
-
 # --- reparto -------------------------------------------------------------------------------------
 
 KINDS = [
@@ -251,14 +267,14 @@ KINDS = [
 
 
 def make_photos(scenes: int = 30, per_scene: int = 4) -> list:
-    """`scenes` escenas de `per_scene` fotos cada una."""
+    """`scenes * per_scene` fotos (los nombres conservan el viejo agrupado, que ya no existe)."""
     out = []
     for scene in range(scenes):
         for index in range(per_scene):
             kind = KINDS[(scene + index) % len(KINDS)]
             out.append(
                 photos_mod.CurbPhoto(
-                    f"c{scene:02d}_{index}.jpg", f"e{scene:02d}", kind, "garage",
+                    f"c{scene:02d}_{index}.jpg", kind, "garage",
                     "boca_tormenta" if kind == "negativo_parecido" else "",
                     "dia", "seco", "ninguna", "",
                 )
@@ -270,7 +286,7 @@ def single_photos(count: int = 60) -> list:
     """Fotos sin escena."""
     return [
         photos_mod.CurbPhoto(
-            f"u{index:03d}.jpg", "", KINDS[index % len(KINDS)], "garage",
+            f"u{index:03d}.jpg", KINDS[index % len(KINDS)], "garage",
             "boca_tormenta" if KINDS[index % len(KINDS)] == "negativo_parecido" else "",
             "dia", "seco", "ninguna", "",
         )
@@ -279,7 +295,7 @@ def single_photos(count: int = 60) -> list:
 
 
 @pytest.mark.parametrize("seed", [0, 1, 7])
-def test_ninguna_escena_esta_en_dos_conjuntos(seed: int) -> None:
+def test_ninguna_foto_esta_en_dos_conjuntos(seed: int) -> None:
     assignment = splits_mod.assign(make_photos(), seed)
 
     groups = {name: {p.group for p in photos} for name, photos in assignment.splits.items()}
@@ -287,19 +303,6 @@ def test_ninguna_escena_esta_en_dos_conjuntos(seed: int) -> None:
     assert not (groups["valid"] & groups["test"])
     assert sum(len(v) for v in assignment.splits.values()) == 120
     assert {p.file for v in assignment.splits.values() for p in v} == {p.file for p in make_photos()}
-
-
-def test_las_fotos_de_una_escena_van_juntas_y_las_sueltas_se_reparten_solas() -> None:
-    photos = [*make_photos(scenes=12, per_scene=5), *single_photos(60)]
-
-    assignment = splits_mod.assign(photos, 0)
-
-    where = {p.file: name for name, v in assignment.splits.items() for p in v}
-    for scene in range(12):
-        assert len({where[f"c{scene:02d}_{i}.jpg"] for i in range(5)}) == 1
-    assert len({where[f"u{i:03d}.jpg"] for i in range(60)}) == 3  # sin escena: cada foto va por su cuenta
-    sizes = {name: len(v) for name, v in assignment.splits.items()}
-    assert 0.5 <= sizes["train"] / 120 <= 0.7 and sizes["valid"] > 0 and sizes["test"] > 0
 
 
 def test_las_proporciones_son_aproximadamente_60_20_20() -> None:
@@ -331,9 +334,9 @@ def test_el_reparto_es_reproducible_y_cambia_con_la_semilla() -> None:
     assert names(first) != names(other)
 
 
-def test_con_menos_de_tres_grupos_no_se_puede_repartir() -> None:
-    with pytest.raises(splits_mod.SplitError, match="al menos 3 grupos"):
-        splits_mod.assign(make_photos(scenes=2), 0)
+def test_con_menos_de_tres_fotos_no_se_puede_repartir() -> None:
+    with pytest.raises(splits_mod.SplitError, match="al menos 3 fotos"):
+        splits_mod.assign(make_photos(scenes=1, per_scene=2), 0)
 
 
 def test_el_test_se_guarda_la_primera_vez_y_no_se_pisa(tmp_path: Path) -> None:
@@ -354,29 +357,15 @@ def test_con_el_test_guardado_las_fotos_nuevas_no_lo_cambian(tmp_path: Path) -> 
     first = splits_mod.assign(make_photos(), 0)
     splits_mod.save_test(tmp_path, first, 0)
     fixed = splits_mod.load_fixed_test(tmp_path)
-    more = [*make_photos(scenes=40), *single_photos(5)]  # llegan 10 escenas y 5 fotos sueltas
+    more = [*make_photos(scenes=40), *single_photos(5)]  # llegan 45 fotos nuevas
 
     second = splits_mod.assign(more, 9, fixed)
 
     assert [p.file for p in second.splits["test"]] == [p.file for p in first.splits["test"]]
     new_groups = {p.group for p in more} - {p.group for p in make_photos()}
-    assert len(new_groups) == 15 and not (new_groups & {p.group for p in second.splits["test"]})
+    assert len(new_groups) == 45 and not (new_groups & {p.group for p in second.splits["test"]})
     train_valid = {p.group for p in second.splits["train"]} & {p.group for p in second.splits["valid"]}
     assert not train_valid and not second.left_out
-
-
-def test_una_foto_nueva_de_una_escena_del_test_queda_afuera_de_todo(tmp_path: Path) -> None:
-    first = splits_mod.assign(make_photos(), 0)
-    splits_mod.save_test(tmp_path, first, 0)
-    test_scene = first.splits["test"][0].scene
-    extra = photos_mod.CurbPhoto(
-        "nueva.jpg", test_scene, "positivo_claro", "garage", "", "dia", "seco", "ninguna", ""
-    )
-
-    second = splits_mod.assign([*make_photos(), extra], 0, splits_mod.load_fixed_test(tmp_path))
-
-    assert [p.file for p in second.left_out] == ["nueva.jpg"]
-    assert "nueva.jpg" not in {p.file for v in second.splits.values() for p in v}
 
 
 def test_el_test_guardado_nombra_los_grupos(tmp_path: Path) -> None:
@@ -385,7 +374,7 @@ def test_el_test_guardado_nombra_los_grupos(tmp_path: Path) -> None:
     saved = json.loads((tmp_path / "test.json").read_text(encoding="utf-8"))
 
     assert set(saved) == {"semilla", "grupos", "archivos"}
-    assert all(g.startswith(("escena:", "foto:")) for g in saved["grupos"])
+    assert all(g.startswith("foto:") for g in saved["grupos"])
 
 
 def test_el_resumen_y_las_asignaciones(tmp_path: Path) -> None:
@@ -424,7 +413,6 @@ def make_curb(
             rows.append(
                 row(
                     name,
-                    escena=f"e{scene}",
                     tipo=kind,
                     rebaje="garage",
                     parecido="boca_tormenta" if kind == "negativo_parecido" else "",
