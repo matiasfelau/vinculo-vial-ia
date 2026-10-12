@@ -141,3 +141,45 @@ def test_sin_fotos_no_arranca(tmp_path: Path, capsys: pytest.CaptureFixture[str]
     )
 
     assert code == 1 and "No hay fotos" in capsys.readouterr().err
+
+
+def test_resized_copy_deja_el_lado_mayor_en_el_valor_pedido_y_no_repite_el_trabajo(tmp_path: Path) -> None:
+    source = tmp_path / "car.jpg"
+    cv2.imwrite(str(source), np.full((30, 60, 3), 90, np.uint8))
+
+    target = cascade.resized_copy(source, 240, tmp_path / "copias")
+
+    assert cv2.imread(str(target)).shape[:2] == (120, 240)
+    stamp = target.stat().st_mtime_ns
+    assert cascade.resized_copy(source, 240, tmp_path / "copias") == target
+    assert target.stat().st_mtime_ns == stamp
+
+
+def test_readable_plates_usa_la_foto_preparada(tmp_path: Path) -> None:
+    import random
+
+    original = write_photo(tmp_path / "a.jpg")
+    prepared = write_photo(tmp_path / "grande.jpg")
+    seen: list[Path] = []
+
+    class Detector:
+        def detect(self, img: np.ndarray) -> list[Box]:
+            return [Box(0, 0, 30, 20, 0.9, BoxLabel.CAR), Box(2, 2, 10, 8, 0.9, BoxLabel.PLATE)]
+
+    class Reader:
+        def read(self, img: np.ndarray) -> tuple[str, float]:
+            return "AB123CD", 0.99
+
+    def prepare(path: Path) -> Path:
+        seen.append(path)
+        return prepared
+
+    found = cascade.readable_plates(
+        SimpleNamespace(vehicle=Detector(), plate=Reader()),
+        [original],
+        random.Random(0),  # noqa: S311
+        wanted=1,
+        prepare=prepare,
+    )
+
+    assert seen == [original] and found == [(prepared, b"AB123CD")]
