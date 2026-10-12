@@ -367,3 +367,26 @@ SCRFD solo puede entrar con la licencia comercial confirmada.
 La decodificación de SCRFD y RetinaFace sigue el código de sus repositorios originales y está probada con
 tensores sintéticos; con los pesos reales, si algún detector da resultados absurdos (cero detecciones, cajas
 corridas), el primer sospechoso es que el ONNX exportado no coincide con el que el script espera.
+
+## Daños de la carrocería (`damage.py`)
+
+Mide qué tan bien el detector de daños (`rfdetr_cardd`) encuentra abolladuras, rayones, grietas, vidrios
+rotos, ópticas rotas y neumáticos pinchados en las fotos de **prueba** de CarDD (374 fotos que el modelo nunca
+vio al entrenar). Corre el adaptador real, el mismo código y el mismo ONNX que el servicio.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\damage"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/damage.py --split test
+```
+
+Se lee igual que la evaluación del detector de vehículos (`reales`, `recall`, `prec.`, `FP`, `chicas`,
+`rec.ch.` y `AP50`; ver arriba), con el umbral `DAMAGE_MIN_CONF` (0,40 por defecto, o `--damage-min-conf`).
+El AP50 se calcula con el umbral casi en cero, así que no depende de él.
+
+Para el servicio lo que importa es **si hay algún daño**, no cuál: la foto de detalle pasa si el detector
+encuentra al menos una caja con confianza suficiente. Por eso, además de la tabla por clase, conviene mirar el
+recall de las clases más frecuentes (abolladuras y rayones) y cuántos falsos positivos por foto hay.
+
+CarDD no se redistribuye: el dataset, la salida y los pesos entrenados quedan en tu máquina, fuera del repo.

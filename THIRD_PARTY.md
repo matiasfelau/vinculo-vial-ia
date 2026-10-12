@@ -45,6 +45,8 @@ Notas:
   código del commit `1902db043c02`. Lee una sola línea de texto: las patentes de dos líneas (motos)
   están fuera de alcance.
 - **`damage`:** los pesos entrenados con CarDD no se publican ni se redistribuyen.
+  Se generan con [tools/training/damage/](tools/training/damage/README.md) a partir de un CarDD que cada
+  persona tiene en su máquina; el dataset nunca entra al repositorio ni a la imagen.
 
 ## Modelos que solo viven en `tools/`
 
