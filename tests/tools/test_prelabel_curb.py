@@ -398,7 +398,7 @@ def test_con_fotos_csv_se_saltea_lo_descartado_y_lo_que_no_figura(
     rows = [
         "f0.jpg,positivo_claro,garage,no_aplica,dia,seco,ninguna,",
         "f1.jpg,descartada,desconocido,no_aplica,desconocido,desconocido,desconocido,repetida",
-        "f2.jpeg,negativo_auto_sin_rebaje,ninguno,no_aplica,dia,seco,ninguna,",  # el CSV y la foto difieren en la extensión
+        "f2.jpeg,negativo_auto_sin_rebaje,ninguno,no_aplica,dia,seco,ninguna,",
     ]
     (root / "curb" / "fotos.csv").write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
     backend = FakeBackend()
