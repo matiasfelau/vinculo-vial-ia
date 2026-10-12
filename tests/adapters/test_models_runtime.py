@@ -264,8 +264,22 @@ def test_modelo_que_no_esta_en_el_manifest(tmp_path: Path) -> None:
 def test_commercial_no_no_se_puede_seleccionar(tmp_path: Path) -> None:
     env = Env(tmp_path, [entry(commercial="no")])
 
-    with pytest.raises(ModelSetupError, match="commercial=no"):
+    with pytest.raises(ModelSetupError, match="commercial=no.*puerto detector"):
         _build(env, {"detector": "tiny"})
+
+
+def test_commercial_no_se_admite_solo_en_el_puerto_face(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    env = Env(tmp_path, [entry(commercial="no")])
+
+    with caplog.at_level("WARNING"):
+        models = _build(env, {"face": "tiny"})
+
+    assert models.versions()["face"].startswith("tiny@")
+    assert any("sin licencia comercial" in record.getMessage() for record in caplog.records)
+    with pytest.raises(ModelSetupError, match="commercial=no"):
+        _build(env, {"face": "tiny", "detector": "tiny"})  # el mismo modelo en otro puerto sigue prohibido
 
 
 @pytest.mark.parametrize("commercial", ["yes", "escalable"])

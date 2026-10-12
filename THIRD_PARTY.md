@@ -10,7 +10,7 @@ El campo `commercial` del manifest usa tres valores:
 |---|---|
 | `yes` | Licencia que permite uso comercial. |
 | `escalable` | Uso académico hoy; el titular puede autorizar el uso comercial. |
-| `no` | Sin camino comercial. No se puede seleccionar en el servicio; solo se usa en `tools/` para comparar. |
+| `no` | Sin camino comercial. No se puede seleccionar en el servicio (solo se usa en `tools/` para comparar), con una excepción: el puerto `face` puede seleccionar un modelo `no` si es el que mejor protege la privacidad. |
 
 ## Modelos del servicio
 
@@ -20,6 +20,7 @@ El campo `commercial` del manifest usa tres valores:
 | `segmenter` | RF-DETR-Seg (Small o Medium), pesos preentrenados con COCO | Mismo paper, ICLR 2026 | Apache 2.0 | `yes` |
 | `curb` | RF-DETR-Seg Small, entrenado con el dataset propio de rebajes | Mismo paper, ICLR 2026 | Apache 2.0. Datos propios | `yes` |
 | `embedder` | DINOv2 ViT-S/14, sin entrenar | Oquab et al. *DINOv2: Learning Robust Visual Features without Supervision*. TMLR 2024 | Apache 2.0 | `yes` |
+| `face` | SCRFD-10G (`scrfd_10g`), pesos de InsightFace sin reentrenar | Guo et al. *Sample and Computation Redistribution for Efficient Face Detection*. ICLR 2022 | Pesos para investigación (entrenados con WIDER FACE, CC BY-NC-ND 4.0). InsightFace ofrece licencias comerciales | `escalable` |
 | `ocr` | PARSeq, pesos preentrenados | Bautista y Atienza. *Scene Text Recognition with Permuted Autoregressive Sequence Models*. ECCV 2022 | Código Apache 2.0. El repositorio no declara una licencia para los pesos | `escalable` |
 | `damage` | RF-DETR, entrenado con CarDD | RF-DETR: ICLR 2026. Datos: ver CarDD | Modelo Apache 2.0. Los pesos heredan las condiciones de CarDD | `escalable` |
 
@@ -44,6 +45,10 @@ Notas:
   convertidos a ONNX sin reentrenar con [tools/export/parseq.py](tools/export/parseq.py), que carga el
   código del commit `1902db043c02`. Lee una sola línea de texto: las patentes de dos líneas (motos)
   están fuera de alcance.
+- **`face`:** el servicio puede usar RF-DETR (`rfdetr_openimages`, `commercial = yes`) o SCRFD-10G
+  (`scrfd_10g`). SCRFD es el `det_10g.onnx` del paquete `buffalo_l` de InsightFace, sin modificar; sus pesos son
+  para investigación y el uso comercial requiere la licencia de InsightFace. Detecta mejor las caras chicas
+  (ver [tools/eval/README.md](tools/eval/README.md)).
 - **`damage`:** los pesos entrenados con CarDD no se publican ni se redistribuyen.
   Se generan con [tools/training/damage/](tools/training/damage/README.md) a partir de un CarDD que cada
   persona tiene en su máquina; el dataset nunca entra al repositorio ni a la imagen.
@@ -55,11 +60,18 @@ No van al servicio. Se usan para preetiquetar o como referencia en las evaluacio
 | Modelo | Uso | Paper | Licencia | `commercial` |
 |---|---|---|---|---|
 | SAM 3 (`facebook/sam3`) | Preetiquetado de cordones y rebajes, y referencia sin entrenar en la evaluación de `curb` | Carion et al. *SAM 3: Segment Anything with Concepts*. ICLR 2026 | SAM License | No aplica: no se sirve |
-| SCRFD | Comparación de detectores de rostros | Guo et al. *Sample and Computation Redistribution for Efficient Face Detection*. ICLR 2022 | Solo investigación. InsightFace ofrece licencias comerciales | `escalable`: solo entra al servicio si gana la comparación y se confirma esa licencia |
 | RetinaFace-R50 (biubug6) | Comparación de detectores de rostros | Deng et al. *RetinaFace: Single-Shot Multi-Level Face Localisation in the Wild*. CVPR 2020 | Código MIT. Entrenado con WIDER FACE (CC BY-NC-ND 4.0) | `no` |
 | YuNet | Comparación de detectores de rostros | Wu et al. *YuNet: A Tiny Millisecond-level Face Detector*. Machine Intelligence Research, 2023 | Código MIT. Entrenado con WIDER FACE (CC BY-NC-ND 4.0) | `no` |
 
 ## Datasets
+
+### WIDER FACE
+
+- **Uso:** solo referencia académica en `tools/eval/face.py` (una muestra de 998 fotos del conjunto de
+  validación). Nunca se usa para entrenar ni entra al repositorio ni a la imagen.
+- **Licencia:** CC BY-NC-ND 4.0.
+- **Cita:** Yang, Luo, Loy y Tang. *WIDER FACE: A Face Detection Benchmark*. CVPR 2016.
+- **Sitio:** <http://shuoyang1213.me/WIDERFACE/>
 
 ### Open Images V7
 

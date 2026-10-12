@@ -572,3 +572,80 @@ def test_los_candidatos_se_arman_segun_las_opciones(monkeypatch: pytest.MonkeyPa
 
     assert candidates == {"scrfd": "scrfd", "retinaface_r50": "retina", "yunet": "yunet"}
     assert created == ["scrfd:320", "retina:320", "yunet:y.onnx"]
+
+
+# --- tamaños y mosaico ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("side", "expected"),
+    [
+        (10, "chicas"),
+        (31.9, "chicas"),
+        (32, "medianas"),
+        (96, "medianas"),
+        (96.1, "grandes"),
+        (400, "grandes"),
+    ],
+)
+def test_el_tamano_se_mide_por_el_lado_menor(side: float, expected: str) -> None:
+    assert face.size_of((0, 0, side, 500)) == expected
+    assert face.size_of((0, 0, 500, side)) == expected
+
+
+def test_los_puntos_de_operacion_dan_el_recall_por_tamano() -> None:
+    truths = {1: [(0, 0, 20, 20), (100, 100, 160, 160), (200, 200, 400, 400)]}  # chica, mediana, grande
+    predictions = {1: [box(100, 100, 160, 160, 0.9), box(200, 200, 400, 400, 0.8)]}
+
+    row = {r["umbral"]: r for r in face.operating_points(truths, predictions)}[0.5]
+
+    assert row["recall_por_tamano"] == {"chicas": 0.0, "medianas": 1.0, "grandes": 1.0}
+
+
+def test_el_mosaico_agrega_lo_que_solo_se_ve_en_un_tile() -> None:
+    class SmallOnlyInTiles:
+        def detect(self, img: np.ndarray) -> list[Box]:
+            return [box(5, 5, 25, 25, 0.9)] if img.shape[0] < 1000 else []
+
+    tiled = face.Tiled(SmallOnlyInTiles(), tile=640, overlap=0.25)
+
+    found = tiled.detect(np.zeros((1000, 1000, 3), np.uint8))
+
+    assert found is not None and len(found) >= 1
+    assert [b.conf for b in found] == sorted((b.conf for b in found), reverse=True)
+
+
+def test_el_mosaico_propaga_el_fallo() -> None:
+    class Broken:
+        def detect(self, img: np.ndarray) -> None:
+            return None
+
+    assert face.Tiled(Broken()).detect(np.zeros((1000, 1000, 3), np.uint8)) is None
+
+
+def test_tiling_suma_el_candidato_con_sufijo(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(face, "YuNet", lambda path: FixedDetector([]))
+    args = face.parse_args(
+        [
+            *("--data-dir", str(tmp_path), "--out-dir", str(tmp_path), "--yunet-model", "y.onnx"),
+            *("--tiling", "yunet", "--tile-px", "512", "--overlap", "0.3"),
+        ]
+    )  # fmt: skip
+
+    candidates = face.build_candidates(args)
+
+    assert set(candidates) == {"yunet", "yunet+mosaico"} and isinstance(
+        candidates["yunet+mosaico"], face.Tiled
+    )
+    args.tiling = ["scrfd"]
+    with pytest.raises(ValueError, match="no se pasó su modelo"):
+        face.build_candidates(args)
+
+
+def test_evaluate_reconoce_el_candidato_con_mosaico() -> None:
+    truths = {1: [(0, 0, 40, 40)]}
+
+    report = face.evaluate(truths, {"rfdetr+mosaico": {1: [box(0, 0, 40, 40, 0.9)]}})
+
+    assert report["rfdetr+mosaico"]["commercial"] == "yes"
+    assert report["rfdetr+mosaico"]["nombre"].endswith("+ mosaico")

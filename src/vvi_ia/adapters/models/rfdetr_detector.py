@@ -9,6 +9,10 @@ ImageNet). El ONNX (`tools/training/detector/export.py`) devuelve `dets` (cajas 
 `labels` (logits por clase). Las columnas de `labels` siguen el orden de `LABELS`, que es el orden en
 que `tools/training/detector/dataset.py` declara las categorías: no se puede cambiar sin reentrenar.
 
+Mosaico opcional (`tiling.py`): con `face_tiling` o `plate_tiling` la foto grande se recorre también en
+tiles y se fusionan las cajas de rostros o de patentes. Es más lento (una inferencia por tile) y solo
+mejora los objetos chicos; `car` y `wheel` siempre salen de la foto completa.
+
 Umbrales: `car` y `wheel` usan `detector_min_conf`; `plate` y `face` salen desde `redaction_min_conf`, bajo
 a propósito porque el dominio decide cuáles tapar y ante la duda se tapa.
 """
@@ -25,6 +29,13 @@ from numpy.typing import NDArray
 
 from vvi_ia.adapters.models.onnx_session import InferenceSessionLike
 from vvi_ia.adapters.models.registry import ModelContext, register
+from vvi_ia.adapters.models.tiling import (
+    DEFAULT_MAX_SIDE_PX,
+    DEFAULT_OVERLAP,
+    DEFAULT_TILE_PX,
+    Tiling,
+    detect_tiled,
+)
 from vvi_ia.domain.model import Box, BoxLabel, Pixels
 
 logger = logging.getLogger(__name__)
@@ -38,6 +49,11 @@ DETECTOR_MIN_CONF_PARAM = "detector_min_conf"
 REDACTION_MIN_CONF_PARAM = "redaction_min_conf"
 DEFAULT_DETECTOR_MIN_CONF = 0.40
 DEFAULT_REDACTION_MIN_CONF = 0.10
+FACE_TILING_PARAM = "face_tiling"
+PLATE_TILING_PARAM = "plate_tiling"
+TILE_PX_PARAM = "tiling_tile_px"
+TILE_OVERLAP_PARAM = "tiling_overlap"
+TILE_MAX_SIDE_PARAM = "tiling_max_side_px"
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
 MAX_PIXEL = 255.0
@@ -107,22 +123,43 @@ class RfDetrDetections:
         input_size: tuple[int, int],
         thresholds: Mapping[str, float],
         names: Mapping[int, str] = LABELS,
+        tiling: Tiling | None = None,
     ) -> None:
         self._session = session
         self._input_name = input_name
         self._input_size = input_size  # (alto, ancho) del modelo
         self._thresholds = thresholds
         self._names = names
+        self._tiling = tiling
         self._local = threading.local()
+
+    def _infer(self, img: Pixels) -> list[Box]:
+        tensor = preprocess(img, *self._input_size)
+        dets, labels = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
+        return decode_boxes(dets, labels, (img.shape[0], img.shape[1]), self._thresholds, self._names)
 
     def detect_all(self, img: Pixels) -> list[Box] | None:
         remembered = getattr(self._local, "last", None)
         if remembered is not None and remembered[0]() is img:
             return list(remembered[1])
         try:
-            tensor = preprocess(img, *self._input_size)
-            dets, labels = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
-            boxes = decode_boxes(dets, labels, (img.shape[0], img.shape[1]), self._thresholds, self._names)
+            boxes = self._infer(img)
+            if self._tiling is not None:
+                tiled = detect_tiled(
+                    self._infer,
+                    img,
+                    self._tiling.labels,
+                    self._tiling.tile,
+                    self._tiling.overlap,
+                    self._tiling.nms_iou,
+                    full=boxes,
+                    max_side=self._tiling.max_side,
+                )
+                if tiled is None:  # no pasa: `_infer` lanza ante un error, no devuelve `None`
+                    raise ValueError("falló la inferencia por mosaico")
+                boxes = sorted(
+                    [b for b in boxes if b.label not in self._tiling.labels] + tiled, key=lambda b: -b.conf
+                )
         except Exception as exc:
             # Solo el tipo de error: el mensaje podría arrastrar contenido de la imagen.
             logger.warning("falló la inferencia del detector", extra={"error": type(exc).__name__})
@@ -163,6 +200,22 @@ def _thresholds(params: Mapping[str, Any]) -> dict[str, float]:
     return {BoxLabel.CAR: detector, BoxLabel.WHEEL: detector, BoxLabel.PLATE: redaction, FACE: redaction}
 
 
+def _tiling(params: Mapping[str, Any]) -> Tiling | None:
+    labels = frozenset(
+        label
+        for label, param in ((FACE, FACE_TILING_PARAM), (BoxLabel.PLATE, PLATE_TILING_PARAM))
+        if float(params.get(param, 0.0))
+    )
+    if not labels:
+        return None
+    return Tiling(
+        labels,
+        int(params.get(TILE_PX_PARAM, DEFAULT_TILE_PX)),
+        float(params.get(TILE_OVERLAP_PARAM, DEFAULT_OVERLAP)),
+        max_side=int(params.get(TILE_MAX_SIDE_PARAM, DEFAULT_MAX_SIDE_PX)),
+    )
+
+
 def _core(ctx: ModelContext) -> RfDetrDetections:
     """El núcleo del modelo: se construye una vez y lo comparten los dos puertos."""
     if "detector_core" not in ctx.model.shared:
@@ -173,7 +226,11 @@ def _core(ctx: ModelContext) -> RfDetrDetections:
         if len(shape) != NCHW_NDIM or not isinstance(shape[2], int) or not isinstance(shape[3], int):
             raise ValueError("la entrada del modelo debe ser NCHW con alto y ancho fijos")
         core = RfDetrDetections(
-            session, session.input_names[0], (shape[2], shape[3]), _thresholds(ctx.params)
+            session,
+            session.input_names[0],
+            (shape[2], shape[3]),
+            _thresholds(ctx.params),
+            tiling=_tiling(ctx.params),
         )
         # Inferencia de prueba sobre una imagen gris: si el archivo no se comporta como el modelo
         # esperado, el servicio no arranca.

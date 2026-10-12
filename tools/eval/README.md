@@ -307,66 +307,159 @@ Para tapar rostros y patentes manda el **recall**: una caja de más tapa de más
 rostro a la vista. La precisión importa menos. La salida completa queda en `detector_report.json`, solo
 con cifras. `--detector-min-conf`, `--plate-min-conf` y `--face-min-conf` cambian los umbrales.
 
+### Mosaico para patentes y rostros chicos
+
+`--plate-tiling` y `--face-tiling` (los mismos `PLATE_TILING` y `FACE_TILING` del servicio) recorren la foto
+también en tiles de `--tile-px` (640 por defecto) con solape `--overlap` (0,25), y fusionan las cajas con NMS.
+Las fotos de más de 1600 px se achican a ese lado antes de cortar los tiles, para acotar el costo. Solo mejora
+los objetos chicos y cuesta **una inferencia más por tile**. Con el split de prueba de Open Images (204 fotos de
+unos 1000 px, CPU de 6 núcleos):
+
+| Patentes | Recall | Recall en chicas (< 32 px) | AP50 | Falsos positivos | ms por foto |
+|---|---|---|---|---|---|
+| sin mosaico | 0,83 | 0,61 | 0,787 | 40 | 288 |
+| `--plate-tiling` (640 px) | 0,90 | 0,76 | 0,831 | 71 | 1437 |
+| `--plate-tiling --tile-px 480` | 0,90 | 0,76 | 0,825 | 79 | 2082 |
+
+Con tiles de 640 px el recall de patentes sube 7 puntos y el de las chicas 15, a cambio de unos 1,1 s más por
+foto y más cajas de más (que, al tapar, cuestan poco). Los tiles de 480 px no mejoran y son más lentos. Autos,
+ruedas y rostros no cambian: el mosaico solo toca las clases pedidas.
+
 ## Detectores de rostros (`face.py`)
 
 El servicio tapa los rostros de las fotos con un relleno opaco antes de guardarlas. Si un rostro no se
 detecta, **queda a la vista**: por eso lo que importa es el **recall** (qué fracción de las caras se encuentra),
-más que la precisión. Este script compara cuatro detectores sobre tus fotos con las caras anotadas.
-
-> Estado: el script está escrito y probado con datos sintéticos. Todavía no se corrió con fotos ni con pesos
-> reales.
+más que la precisión. Este script compara detectores sobre fotos con las caras anotadas.
 
 | Detector | Licencia de los pesos (`commercial`) | ¿Puede entrar al servicio? |
 |---|---|---|
-| RF-DETR (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | **Sí: es el elegido.** |
-| SCRFD | `escalable` (InsightFace vende licencias comerciales) | Solo si **gana la comparación y se confirma** esa licencia. |
-| RetinaFace-R50 (biubug6) | `no` (WIDER FACE, CC BY-NC-ND) | No: solo referencia. |
-| YuNet | `no` (WIDER FACE, CC BY-NC-ND) | No: solo referencia. |
+| RF-DETR (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | Sí. |
+| SCRFD-10G (InsightFace) | `escalable` (InsightFace vende licencias comerciales) | Sí, `scrfd_10g`. |
+| RetinaFace-R50 (biubug6) | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
+| YuNet | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
 
-Los que no son RF-DETR **no se bajan ni se incluyen en el repo**: los cargás vos desde un ONNX tuyo.
+El puerto `face` es el único que puede seleccionar un modelo `commercial = no`, si es el que mejor protege la
+privacidad (el registro lo deja pasar y avisa en el log). Los que no son RF-DETR ni SCRFD **no se incluyen en
+el repo**: los cargás vos desde un ONNX tuyo.
 
 ### 1. Armar las fotos
 
-Fotos propias con las caras anotadas, **fuera del repo** (tienen rostros de terceros). Se anotan en CVAT con una
-sola etiqueta de tipo *Rectangle* (el nombre no importa: todas se tratan como rostros) y se exportan en
-formato "COCO 1.0". En `EVAL_DATA_DIR\face\` tienen que quedar las fotos y el `_annotations.coco.json`.
-(WIDER FACE sirve **solo como referencia académica**.)
+Hay dos conjuntos de referencia, fuera del repo (tienen rostros de terceros):
 
-### 2. Conseguir los modelos de referencia
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"      # ahí está el subset de Open Images del detector
+$env:EVAL_DATA_DIR = "D:\vv-eval"
+uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py wider        # 1000 fotos al azar de WIDER FACE (validación)
+uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py openimages   # el split de prueba de Open Images, solo rostros
+```
 
-- **YuNet**: el archivo `face_detection_yunet_2023mar.onnx` del repositorio `opencv_zoo`.
-- **SCRFD**: un ONNX de 6 o 9 salidas, por ejemplo `scrfd_10g_bnkps.onnx` del paquete de InsightFace.
-- **RetinaFace-R50**: exportalo con `convert_to_onnx.py` del repositorio de biubug6 (`--network resnet50
-  --long_side 640`), con la entrada cuadrada fija.
+- **WIDER FACE (validación)**: referencia académica. Se baja de Hugging Face y se usa una muestra al azar
+  (semilla 0). Se descartan las caras que WIDER marca como inválidas y las de menos de 8 px. **Nunca para
+  entrenar.** Es un benchmark muy duro (de las 11 896 caras, 8 611 miden menos de 32 px) y muchas caras chicas
+  no están anotadas, así que sus falsos positivos por foto están inflados.
+- **Open Images (prueba)**: fotos que RF-DETR nunca vio. Se parece más a las fotos del servicio, pero tiene
+  solo 135 caras (13 chicas), así que sus recalls por tamaño son ruidosos.
+
+También sirven fotos propias con las caras anotadas en CVAT (una sola etiqueta de tipo *Rectangle*, exportada en
+formato "COCO 1.0") en `EVAL_DATA_DIR\face\`: es lo que mejor predice cómo va a andar el servicio.
+
+### 2. Conseguir los modelos
+
+- **YuNet**: `face_detection_yunet_2023mar.onnx` del repositorio `opencv_zoo` (con Git LFS).
+- **SCRFD**: `det_10g.onnx` del paquete `buffalo_l` de InsightFace (el mismo que registra el manifest como
+  `scrfd_10g`; también sirve `scrfd_10g_bnkps.onnx`).
+- **RetinaFace-R50**: un ONNX de entrada cuadrada fija 640 exportado con `convert_to_onnx.py` del repositorio de
+  biubug6 (`--network resnet50 --long_side 640`).
 - **RF-DETR**: `rfdetr_openimages` ya exportado en `MODELS_DIR` (ver
   [tools/training/detector/README.md](../training/detector/README.md)).
 
 ### 3. Correrlo
 
 ```powershell
-$env:EVAL_DATA_DIR = "D:\vv-eval"
 $env:EVAL_OUT = "D:\vv-eval\out\face"
 $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/face.py --rfdetr-model rfdetr_openimages --retinaface-model D:\modelos\retinaface_r50.onnx --scrfd-model D:\modelos\scrfd_10g_bnkps.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx
+uv run --frozen --extra dev --extra tools python tools/eval/face.py --dataset-dir D:\vv-eval\face-wider --rfdetr-model rfdetr_openimages --scrfd-model D:\modelos\det_10g.onnx --retinaface-model D:\modelos\retinaface_r50.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx --tiling rfdetr scrfd retinaface_r50
 ```
 
 Pasá solo los que tengas. `--size` es el lado de la entrada de SCRFD y RetinaFace (640 por defecto).
+`--tiling NOMBRE...` suma una versión `NOMBRE+mosaico` de esos detectores (`--tile-px`, `--overlap`).
+Esa versión no aplica el tope de 1600 px del servicio (corta la foto tal cual está), así que es el peor caso de
+latencia.
+`--service-model scrfd_10g` corre un modelo del manifest a través del **adaptador del servicio** (y
+`--service-tiling` suma el adaptador con `FACE_TILING=true`): da lo mismo que `--scrfd-model` y sirve para
+comprobar el adaptador con los pesos reales.
 
 ### 4. Cómo leer el resultado
 
 Por detector muestra el **recall con IoU 0,5 o más** a distintos topes de falsos positivos por foto (0,1, 0,5 y
-1,0: qué tanto se encuentra si solo se tolera esa cantidad de cajas de más), el **recall en caras chicas**
-(un lado menor a 32 px), el **AP50** (calidad sin depender del umbral) y cuánto tarda en CPU. Todos los
-detectores se comparan en el mismo punto de falsos positivos, porque cada uno tiene su propia escala de
-confianza. `face_report.json` tiene además la curva completa.
+1,0: qué tanto se encuentra si solo se tolera esa cantidad de cajas de más), el **AP50** (calidad sin depender
+del umbral) y cuánto tarda en CPU. Todos los detectores se comparan en el mismo punto de falsos positivos,
+porque cada uno tiene su propia escala de confianza. Después, por cada tope, el **recall por tamaño de cara**
+(lado menor: chicas < 32 px, medianas de 32 a 96 px, grandes > 96 px), los falsos positivos reales y la latencia
+(mediana y p95). `face_report.json` tiene además la curva completa y el umbral de cada punto.
 
-El criterio de [docs/modelos.md](../../docs/modelos.md): **se queda RF-DETR si su recall queda cerca del de
-RetinaFace-R50** (hasta 3 puntos menos). Si SCRFD lo supera por más que eso, el reporte lo marca y recuerda que
-SCRFD solo puede entrar con la licencia comercial confirmada.
+### 5. Resultados de referencia
 
-La decodificación de SCRFD y RetinaFace sigue el código de sus repositorios originales y está probada con
-tensores sintéticos; con los pesos reales, si algún detector da resultados absurdos (cero detecciones, cajas
-corridas), el primer sospechoso es que el ONNX exportado no coincide con el que el script espera.
+Recall con a lo sumo **0,5 falsos positivos por foto**; latencia por foto en una CPU de 6 núcleos
+(AMD Ryzen 5 3600; la máquina no estaba del todo libre, tomalas como orden de magnitud).
+
+**WIDER FACE, 998 fotos de validación y 11 896 caras** (8 611 chicas, 2 701 medianas, 584 grandes):
+
+| Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana / p95) |
+|---|---|---|---|---|---|---|
+| RF-DETR | 0,47 | 0,33 | 0,14 | 0,77 | 0,96 | 304 / 410 |
+| **SCRFD-10G** | **0,80** | **0,66** | **0,55** | **0,92** | **0,97** | **118 / 200** |
+| RetinaFace-R50 | 0,63 | 0,51 | 0,35 | 0,90 | 0,97 | 317 / 410 |
+| YuNet | 0,75 | 0,57 | 0,46 | 0,83 | 0,90 | 64 / 127 |
+| RF-DETR + mosaico | 0,58 | 0,39 | 0,21 | 0,83 | 0,96 | 1239 / 2266 |
+| SCRFD-10G + mosaico | 0,87 | 0,69 | 0,61 | 0,91 | 0,96 | 762 / 7421 |
+| RetinaFace-R50 + mosaico | 0,82 | 0,65 | 0,54 | 0,92 | 0,98 | 1561 / 2471 |
+
+**Open Images (prueba), 204 fotos y 135 caras** (13 chicas, 57 medianas, 65 grandes):
+
+| Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana) |
+|---|---|---|---|---|---|---|
+| RF-DETR | 0,83 | 0,87 | 0,46 | 0,91 | 0,91 | 294 |
+| SCRFD-10G | 0,73 | 0,86 | 0,62 | 0,89 | 0,88 | 105 |
+| RetinaFace-R50 | 0,82 | 0,86 | 0,38 | 0,89 | 0,92 | 392 |
+| YuNet | 0,72 | 0,82 | 0,69 | 0,81 | 0,86 | 72 |
+| RF-DETR + mosaico | 0,85 | 0,90 | 0,38 | 0,95 | 0,95 | 1589 |
+| SCRFD-10G + mosaico | 0,68 | 0,86 | 0,62 | 0,89 | 0,88 | 563 |
+
+Cómo leerlo:
+
+- **Las caras chicas son el punto débil de RF-DETR**: en WIDER encuentra 14 de cada 100 (SCRFD, 55). Se entrenó
+  con Open Images, que anota poco las caras chicas, y achica la foto a 512 px.
+- **SCRFD-10G** gana en WIDER por mucho y en Open Images queda empatado con RF-DETR a 0,5 falsos positivos por
+  foto, siendo **unas tres veces más rápido** (105 contra 294 ms). Ojo: SCRFD y RetinaFace se entrenaron con WIDER
+  FACE, así que ahí juegan de local; Open Images es el árbitro más neutral y no los contradice.
+- Con el tope de **0,1** falsos positivos por foto SCRFD parece peor en Open Images (0,50 contra 0,79 de recall):
+  es la forma de su confianza (pone alta confianza a caras que Open Images no anotó). En un servicio que tapa de
+  más antes que de menos, importa más el punto de 0,5 a 1,0.
+- **El mosaico ayuda a las caras chicas con SCRFD en WIDER** (de 0,55 a 0,61 con 0,5 falsos positivos y de 0,34 a
+  0,45 con 0,1) pero **no en Open Images**, donde las caras no son tan chicas, y cuesta 5 a 6 veces la latencia
+  (con picos de varios segundos en fotos grandes). Con RF-DETR ayuda poco: en WIDER las chicas pasan de 0,14 a 0,21.
+- Las cifras de Open Images se apoyan en pocas caras chicas: confirmalas con fotos propias antes de decidir.
+
+El criterio de [docs/modelos.md](../../docs/modelos.md) (que RF-DETR quede cerca de RetinaFace-R50) dio
+`rfdetr_queda: false` en WIDER (RF-DETR pierde 14 puntos a 0,1 falsos positivos) y `true` en Open Images.
+
+### 6. Configuración de redacción propuesta (provisoria)
+
+Con estos datos, y sin tocar `REDACTION_REQUIRED` (sigue en `false` solo en local):
+
+```dotenv
+MODEL_DETECTOR=rfdetr_openimages   # autos, ruedas y patentes
+MODEL_FACE=scrfd_10g               # rostros: mejor recall, sobre todo en caras chicas, y 3 veces más rápido
+FACE_MIN_CONF=0.30                 # con SCRFD son unos 0,8 falsos positivos por foto en Open Images
+PLATE_REDACT_MIN_CONF=0.20
+FACE_TILING=false                  # sin evidencia de mejora en fotos parecidas a las del servicio; cuesta 5 veces la latencia
+PLATE_TILING=false                 # +7 puntos de recall de patentes por ~1,1 s más por foto: decidir según la latencia aceptable
+```
+
+Con `MODEL_FACE=scrfd_10g` el detector de rostros ya no comparte la inferencia con el de patentes (RF-DETR
+resuelve los dos con una sola pasada): son unos 105 ms más por foto. La confianza de SCRFD no es la de
+RF-DETR: `FACE_MIN_CONF` se eligió mirando la curva de SCRFD, no copiando el valor viejo.
 
 ## Daños de la carrocería (`damage.py`)
 

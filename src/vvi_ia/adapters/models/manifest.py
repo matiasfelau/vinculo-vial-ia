@@ -27,7 +27,7 @@ class Commercial(StrEnum):
 
     YES = "yes"  # licencia comercial
     ESCALABLE = "escalable"  # académica, con autorización comercial posible
-    NO = "no"  # no se puede seleccionar en el servicio; solo vive en tools para comparar
+    NO = "no"  # solo vive en tools para comparar; la única excepción es el puerto `face` (ver registry.py)
 
 
 class Paper(BaseModel):

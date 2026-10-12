@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
     curb_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
+    # Mosaico: además de la foto completa, el detector recorre tiles para encontrar rostros o patentes chicos
+    face_tiling: bool = False
+    plate_tiling: bool = False
+    tiling_tile_px: int = Field(default=640, ge=64)
+    tiling_overlap: float = Field(default=0.25, ge=0.0, le=0.9)
 
     # Modelos: `null` (default) o el nombre de un modelo de models/manifest.json
     model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
