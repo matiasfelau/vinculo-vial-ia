@@ -49,6 +49,7 @@ class ReasonCode(StrEnum):
     PLATE_UNREADABLE = "PLATE_UNREADABLE"
     CONTEXT_NOT_DETECTED = "CONTEXT_NOT_DETECTED"
     CONTEXT_UNCERTAIN = "CONTEXT_UNCERTAIN"
+    REDACTION_UNAVAILABLE = "REDACTION_UNAVAILABLE"
 
 
 RED_CODES: frozenset[ReasonCode] = frozenset(
@@ -56,7 +57,9 @@ RED_CODES: frozenset[ReasonCode] = frozenset(
         ReasonCode.NO_VEHICLE,
         ReasonCode.BURST_MISMATCH,
         ReasonCode.PLATE_MISMATCH,
+        ReasonCode.CONTEXT_NOT_DETECTED,
         ReasonCode.EVIDENCE_UNREADABLE,
+        ReasonCode.REDACTION_UNAVAILABLE,
     }
 )
 YELLOW_CODES: frozenset[ReasonCode] = frozenset(
@@ -64,7 +67,6 @@ YELLOW_CODES: frozenset[ReasonCode] = frozenset(
         ReasonCode.BURST_UNCERTAIN,
         ReasonCode.PLATE_FUZZY,
         ReasonCode.PLATE_UNREADABLE,
-        ReasonCode.CONTEXT_NOT_DETECTED,
         ReasonCode.CONTEXT_UNCERTAIN,
     }
 )
