@@ -88,10 +88,13 @@ prueba, que el modelo no vio. Ver [tools/eval/README.md](../../eval/README.md).
 ```dotenv
 MODEL_DAMAGE=rfdetr_cardd
 MODELS_DIR=./models/weights
-DAMAGE_MIN_CONF=0.40
+DAMAGE_MIN_CONF=0.70
 ```
 
-`DAMAGE_MIN_CONF` es la confianza mínima para dar un daño por encontrado.
+`DAMAGE_MIN_CONF` es la confianza mínima para dar un daño por encontrado. El default (0,70) es **provisorio**:
+sale del barrido de `tools/eval/damage_fp.py` con CarDD test y 416 autos enteros de Open Images (18,5 % de las
+fotos sin daño con alguna caja y 89,0 % de recall por foto); hay que revisarlo con fotos propias de detalle sin
+daño. Las cifras de abajo se midieron con 0,40.
 
 ## Problemas frecuentes
 

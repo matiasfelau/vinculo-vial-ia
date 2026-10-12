@@ -382,7 +382,7 @@ uv run --frozen --extra dev --extra tools python tools/eval/damage.py --split te
 ```
 
 Se lee igual que la evaluación del detector de vehículos (`reales`, `recall`, `prec.`, `FP`, `chicas`,
-`rec.ch.` y `AP50`; ver arriba), con el umbral `DAMAGE_MIN_CONF` (0,40 por defecto, o `--damage-min-conf`).
+`rec.ch.` y `AP50`; ver arriba), con el umbral `DAMAGE_MIN_CONF` (0,70 por defecto, provisorio; o `--damage-min-conf`).
 El AP50 se calcula con el umbral casi en cero, así que no depende de él.
 
 Para el servicio lo que importa es **si hay algún daño**, no cuál: la foto de detalle pasa si el detector

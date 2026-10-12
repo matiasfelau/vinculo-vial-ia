@@ -35,7 +35,7 @@ DAMAGE_LABELS: Mapping[int, str] = {
     5: "tire_flat",
 }
 DAMAGE_MIN_CONF_PARAM = "damage_min_conf"
-DEFAULT_DAMAGE_MIN_CONF = 0.40
+DEFAULT_DAMAGE_MIN_CONF = 0.70
 IMAGE_CHANNELS = 3
 NCHW_NDIM = 4
 WARMUP_SIDE = 64
