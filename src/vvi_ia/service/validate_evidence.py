@@ -38,7 +38,7 @@ from vvi_ia.domain.ports import (
     PlateReader,
     VehicleDetector,
 )
-from vvi_ia.domain.ramp import DrivewayCheck, driveway_check, wheel_diameter
+from vvi_ia.domain.ramp import driveway_overlap, ramp_reason, wheel_diameter
 from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
 from vvi_ia.domain.reid import ReidOutcome, best_match, same_vehicle
 from vvi_ia.domain.verdict import aggregate
@@ -96,7 +96,8 @@ class Thresholds:
     reid_t_high: float
     ocr_min_conf: float
     damage_min_conf: float
-    ramp_margin: float
+    ramp_t_low: float  # solape (en escalas de rueda) debajo del cual el auto no bloquea: RED
+    ramp_t_high: float  # solape desde el cual el auto bloquea con claridad: sin observación
     ramp_scale_fallback: float
 
 
@@ -387,18 +388,16 @@ class ValidateEvidence:
             _add(codes, ReasonCode.CONTEXT_UNCERTAIN)
             return similarity
         wheels = [box for box in run.detect(context) or () if box.label == BoxLabel.WHEEL]
-        check = driveway_check(
+        measure = driveway_overlap(
             curb[0],
             curb[1],
             target.mask,
             wheel_diam=wheel_diameter(wheels, target.mask),
-            margin=self._t.ramp_margin,
             scale_fallback=self._t.ramp_scale_fallback,
         )
-        if check == DrivewayCheck.BLOCKING_MARGINAL or check == DrivewayCheck.NO_CAR:
-            _add(codes, ReasonCode.CONTEXT_UNCERTAIN)
-        elif check in (DrivewayCheck.NOT_BLOCKING, DrivewayCheck.NO_DRIVEWAY):
-            _add(codes, ReasonCode.CONTEXT_NOT_DETECTED)
+        reason = ramp_reason(measure, self._t.ramp_t_low, self._t.ramp_t_high)
+        if reason is not None:
+            _add(codes, reason)
         return similarity
 
     def _target_car(

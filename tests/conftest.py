@@ -27,6 +27,8 @@ _CONFIG_KEYS = {
     "DETECTOR_MIN_CONF",
     "DAMAGE_MIN_CONF",
     "CURB_MIN_CONF",
+    "RAMP_T_LOW",
+    "RAMP_T_HIGH",
     "FACE_TILING",
     "PLATE_TILING",
     "TILING_TILE_PX",

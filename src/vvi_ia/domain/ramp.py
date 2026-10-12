@@ -4,13 +4,14 @@ Sin chequeo de distancia al cordón (decisión explícita: el auto de enfrente e
 """
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 
 import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from vvi_ia.domain.model import Box, Mask
+from vvi_ia.domain.model import Box, Mask, ReasonCode
 
 _KERNEL_SIZE = 3
 _FIT_LINE_EPS = 0.01
@@ -18,13 +19,23 @@ _MIN_COMPONENTS = 2
 
 
 class DrivewayCheck(StrEnum):
-    """Resultado de `driveway_check`."""
+    """Resultado de `driveway_check`: la decisión es binaria (bloquea o no)."""
 
     BLOCKING = "BLOCKING"
-    BLOCKING_MARGINAL = "BLOCKING_MARGINAL"
     NOT_BLOCKING = "NOT_BLOCKING"
     NO_DRIVEWAY = "NO_DRIVEWAY"
     NO_CAR = "NO_CAR"
+
+
+@dataclass(frozen=True)
+class DrivewayMeasure:
+    """Qué se pudo medir: `status` si no hay auto o rebaje, o el `score` del solape (en escalas de rueda).
+
+    `score > 0` es que el auto se mete en el rebaje; `score < 0`, que queda a esa distancia.
+    """
+
+    status: DrivewayCheck | None
+    score: float | None
 
 
 def _largest(mask: Mask) -> Mask:
@@ -58,6 +69,50 @@ def wheel_diameter(wheels: Sequence[Box], car: Mask) -> float | None:
     return float(np.median(heights)) if heights else None
 
 
+def driveway_overlap(
+    curb: Mask,
+    cut: Mask,
+    car: Mask,
+    wheel_diam: float | None = None,
+    scale_fallback: float = 0.45,
+    min_cut: float = 0.002,
+) -> DrivewayMeasure:
+    """Mide cuánto del tramo rebajado del cordón queda cubierto por el auto.
+
+    Proyecta la envolvente inferior del auto y el rebaje sobre la recta del cordón. El solape se expresa en
+    escalas: diámetros de rueda (o, sin rueda, una fracción de la altura del auto).
+    """
+    cut = _open(cut)
+    car = _open(car)
+    if not car.any():
+        return DrivewayMeasure(DrivewayCheck.NO_CAR, None)
+    if cut.sum() < min_cut * cut.size:
+        return DrivewayMeasure(DrivewayCheck.NO_DRIVEWAY, None)
+    pts = np.column_stack(np.nonzero(_largest(curb | cut))[::-1]).astype(np.float32)
+    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_HUBER, 0, _FIT_LINE_EPS, _FIT_LINE_EPS).ravel()
+    direction, origin = np.array([vx, vy]), np.array([x0, y0])
+    scale = wheel_diam or scale_fallback * np.ptp(np.nonzero(car)[0])
+    t_car = (_lower_envelope(car) - origin) @ direction
+    t_cut = (np.column_stack(np.nonzero(cut)[::-1]).astype(np.float32) - origin) @ direction
+    overlap = min(t_car.max(), t_cut.max()) - max(t_car.min(), t_cut.min())
+    return DrivewayMeasure(None, float(overlap / scale))
+
+
+def ramp_reason(measure: DrivewayMeasure, t_low: float, t_high: float) -> ReasonCode | None:
+    """Código de razón de PARKED_ON_GARAGE según el solape: `None` si el auto bloquea con claridad.
+
+    Sin auto no se puede medir (dudoso). Sin rebaje, o con el auto claramente aparte (`score < t_low`), el
+    problema no está (RED). Entre `t_low` y `t_high` es dudoso (YELLOW).
+    """
+    if measure.status == DrivewayCheck.NO_CAR:
+        return ReasonCode.CONTEXT_UNCERTAIN
+    if measure.status == DrivewayCheck.NO_DRIVEWAY or (measure.score is not None and measure.score < t_low):
+        return ReasonCode.CONTEXT_NOT_DETECTED
+    if measure.score is not None and measure.score < t_high:
+        return ReasonCode.CONTEXT_UNCERTAIN
+    return None
+
+
 def driveway_check(
     curb: Mask,
     cut: Mask,
@@ -67,27 +122,9 @@ def driveway_check(
     scale_fallback: float = 0.45,
     min_cut: float = 0.002,
 ) -> DrivewayCheck:
-    """Mide cuánto del tramo rebajado del cordón queda cubierto por el auto.
-
-    Proyecta la envolvente inferior del auto y el rebaje sobre la recta del cordón. El solape
-    se compara contra `margin * escala`, con la escala en diámetros de rueda (o, sin rueda,
-    una fracción de la altura del auto).
-    """
-    cut = _open(cut)
-    car = _open(car)
-    if not car.any():
-        return DrivewayCheck.NO_CAR
-    if cut.sum() < min_cut * cut.size:
-        return DrivewayCheck.NO_DRIVEWAY
-    pts = np.column_stack(np.nonzero(_largest(curb | cut))[::-1]).astype(np.float32)
-    vx, vy, x0, y0 = cv2.fitLine(pts, cv2.DIST_HUBER, 0, _FIT_LINE_EPS, _FIT_LINE_EPS).ravel()
-    direction, origin = np.array([vx, vy]), np.array([x0, y0])
-    scale = wheel_diam or scale_fallback * np.ptp(np.nonzero(car)[0])
-    t_car = (_lower_envelope(car) - origin) @ direction
-    t_cut = (np.column_stack(np.nonzero(cut)[::-1]).astype(np.float32) - origin) @ direction
-    overlap = min(t_car.max(), t_cut.max()) - max(t_car.min(), t_cut.min())
-    if overlap > margin * scale:
-        return DrivewayCheck.BLOCKING
-    if overlap > -margin * scale:
-        return DrivewayCheck.BLOCKING_MARGINAL
-    return DrivewayCheck.NOT_BLOCKING
+    """Decisión binaria: BLOCKING si el solape supera `-margin` escalas (casi tocando también bloquea)."""
+    measure = driveway_overlap(curb, cut, car, wheel_diam, scale_fallback, min_cut)
+    if measure.status is not None:
+        return measure.status
+    assert measure.score is not None
+    return DrivewayCheck.BLOCKING if measure.score > -margin else DrivewayCheck.NOT_BLOCKING

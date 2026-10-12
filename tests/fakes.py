@@ -79,7 +79,8 @@ THRESHOLDS = Thresholds(
     reid_t_high=0.70,
     ocr_min_conf=0.60,
     damage_min_conf=0.70,
-    ramp_margin=0.08,
+    ramp_t_low=-0.08,
+    ramp_t_high=0.08,
     ramp_scale_fallback=0.45,
 )
 

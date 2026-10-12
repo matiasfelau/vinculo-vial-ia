@@ -56,7 +56,10 @@ class Settings(BaseSettings):
     damage_min_conf: float = Field(default=0.70, ge=0.0, le=1.0)
     face_min_conf: float = Field(default=0.30, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
-    ramp_margin: float = Field(default=0.08, ge=0.0)
+    # Rampa: el solape auto/rebaje se mide en escalas de rueda. < T_LOW: el auto no bloquea (RED);
+    # entre T_LOW y T_HIGH: dudoso (YELLOW); desde T_HIGH: bloquea. Sin calibrar con datos propios
+    ramp_t_low: float = -0.08
+    ramp_t_high: float = 0.08
     ramp_scale_fallback: float = Field(default=0.45, gt=0.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)

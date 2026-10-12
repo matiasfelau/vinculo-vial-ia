@@ -270,6 +270,21 @@ def list_photos(raw_dir: Path) -> list[Path]:
     return sorted(p for p in raw_dir.iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
 
 
+def keep_labeled(photos: Sequence[Path], csv_path: Path) -> tuple[list[Path], int]:
+    """Las fotos que figuran en `fotos.csv` sin ser `descartada`, y cuántas se dejaron afuera.
+
+    El CSV manda: una foto que no está en el CSV, o que está como descartada, no se preetiqueta. Lanza
+    `PhotosError` si el CSV tiene errores.
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training" / "curb"))
+    from photos import load_photos
+
+    raw_dir = photos[0].parent if photos else csv_path.parent
+    wanted = {p.file for p in load_photos(csv_path, raw_dir)}
+    kept = [p for p in photos if p.name in wanted]
+    return kept, len(photos) - len(kept)
+
+
 def run_batch(
     photos: Sequence[Path],
     out_dir: Path,
@@ -491,12 +506,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--explore", nargs="+", metavar="PROMPT", help="probar prompts sueltos en pocas fotos"
     )
     parser.add_argument("--explore-photos", type=int, default=5, help="fotos para --explore")
+    parser.add_argument(
+        "--photos-csv",
+        type=Path,
+        help="fotos.csv (por defecto <curb>/fotos.csv): se preetiquetan las que no son descartadas",
+    )
     args = parser.parse_args(argv)
     if args.data_dir is None and (args.images is None or args.out_dir is None):
         parser.error("indicá --data-dir (EVAL_DATA_DIR) o --images y --out-dir")
     curb = Path(args.data_dir) / CURB_FOLDER if args.data_dir else None
     args.images = args.images or (curb / "raw" if curb else None)
     args.out_dir = args.out_dir or (curb / "prelabel" if curb else None)
+    if args.photos_csv is None and curb is not None and (curb / "fotos.csv").is_file():
+        args.photos_csv = curb / "fotos.csv"
     for flag, value in (("--threshold", args.threshold), ("--mask-threshold", args.mask_threshold)):
         if not 0.0 <= value <= 1.0:
             parser.error(f"{flag} debe estar entre 0 y 1")
@@ -518,8 +540,22 @@ def main(
         print(f"No existe la carpeta de fotos {args.images}.", file=sys.stderr)
         return 1
     photos = list_photos(Path(args.images))
+    if photos and args.photos_csv is not None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training" / "curb"))
+        from photos import PhotosError
+
+        try:
+            photos, skipped = keep_labeled(photos, Path(args.photos_csv))
+        except PhotosError as exc:
+            print(
+                "fotos.csv tiene errores:\n" + "\n".join(f"  {problem}" for problem in exc.problems),
+                file=sys.stderr,
+            )
+            return 1
+        if skipped:
+            print(f"{skipped} fotos quedan afuera: descartadas o ausentes de fotos.csv")
     if not photos:
-        print("No hay fotos en la carpeta.", file=sys.stderr)
+        print("No hay fotos para preetiquetar.", file=sys.stderr)
         return 1
     settings = (args.threshold, args.mask_threshold, args.simplify, args.min_area)
     prompts = {"curb": args.curb_prompts, "curb_cut": args.curb_cut_prompts}

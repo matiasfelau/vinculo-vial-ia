@@ -9,7 +9,7 @@ decisión del dominio (`driveway_check`):
   *máscaras*.
 
 La decisión esperada de cada tipo de foto (la lista está en `EXPECTED`) permite medir la precisión y el recall
-de BLOCKING y qué parte de las fotos cae en BLOCKING_MARGINAL. Cada falla se clasifica en "máscara mala" (la
+de BLOCKING (la decisión es binaria: BLOCKING o NOT_BLOCKING). Cada falla se clasifica en "máscara mala" (la
 máscara del sistema no se parece a la anotada: hace falta mejor modelo o más datos) o "decisión mala con
 máscara buena" (las máscaras están bien y falla el criterio: se ajusta `RAMP_MARGIN`, no se reentrena).
 
@@ -19,6 +19,7 @@ Uso: ver `tools/eval/README.md`.
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
@@ -33,8 +34,15 @@ from numpy.typing import NDArray
 
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
-from vvi_ia.domain.model import Mask
-from vvi_ia.domain.ramp import DrivewayCheck, driveway_check, wheel_diameter
+from vvi_ia.domain.model import RED_CODES, Mask
+from vvi_ia.domain.ramp import (
+    DrivewayCheck,
+    DrivewayMeasure,
+    driveway_check,
+    driveway_overlap,
+    ramp_reason,
+    wheel_diameter,
+)
 from vvi_ia.service.validate_evidence import largest_car
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -54,11 +62,10 @@ GT_COLOR = (0, 158, 115)  # verde (RGB): lo anotado a mano
 PRED_COLOR = (213, 94, 0)  # bermellón: lo que predijo el sistema
 
 BLOCKING = DrivewayCheck.BLOCKING
-MARGINAL = DrivewayCheck.BLOCKING_MARGINAL
 # Decisiones que se aceptan para cada tipo de foto (los nombres son los del `tipo` de fotos.csv)
 EXPECTED: Mapping[str, frozenset[DrivewayCheck]] = {
     "positivo_claro": frozenset({BLOCKING}),
-    "positivo_marginal": frozenset({BLOCKING, MARGINAL}),
+    "positivo_marginal": frozenset({BLOCKING}),
     "negativo_auto_junto_rebaje": frozenset({DrivewayCheck.NOT_BLOCKING}),
     "negativo_auto_sin_rebaje": frozenset({DrivewayCheck.NO_DRIVEWAY}),
     "negativo_parecido": frozenset(
@@ -156,7 +163,7 @@ def rate(numerator: int, denominator: int) -> float | None:
 
 
 def summarize(judged: Sequence[tuple[Sample, dict[str, Any]]]) -> dict[str, Any]:
-    """Precisión y recall de BLOCKING, % MARGINAL, resultados por tipo y por qué fallan."""
+    """Precisión y recall de BLOCKING, resultados por tipo y por qué fallan."""
     predicted = [(s, j) for s, j in judged if j["decision"] == BLOCKING]
     positives = [(s, j) for s, j in judged if s.kind in POSITIVE_TYPES]
     true_positives = sum(s.kind in POSITIVE_TYPES for s, _ in predicted)
@@ -175,10 +182,6 @@ def summarize(judged: Sequence[tuple[Sample, dict[str, Any]]]) -> dict[str, Any]
         "aciertos": sum(j["ok"] for _, j in judged),
         "precision_blocking": rate(true_positives, len(predicted)),
         "recall_blocking": rate(true_positives, len(positives)),
-        "pct_marginal": rate(sum(j["decision"] == MARGINAL for _, j in judged), len(judged)),
-        "pct_marginal_en_positivas": rate(
-            sum(j["decision"] == MARGINAL for _, j in positives), len(positives)
-        ),
         "por_tipo": by_kind,
         "fallas": {MASK_BAD: failures.get(MASK_BAD, 0), DECISION_BAD: failures.get(DECISION_BAD, 0)},
     }
@@ -314,6 +317,133 @@ def annotated(sample: Sample) -> tuple[Mask, Mask]:
     return sample.gt_curb, sample.gt_cut
 
 
+# --- referencia sin etiquetas a mano: SAM 3 contra el tipo del CSV ----------------------------------------
+
+NEGATIVE_KINDS = tuple(kind for kind in EXPECTED if kind not in POSITIVE_TYPES)
+
+
+def rate_bound(n: int) -> float | None:
+    """Cota superior del 95 % cuando hay 0 fallas en `n` casos (regla del 3)."""
+    return round(min(1.0, 3 / n), 4) if n else None
+
+
+def calibrate_ramp(
+    rows: Sequence[tuple[str, DrivewayMeasure]], default_margin: float = DEFAULT_MARGIN
+) -> dict[str, Any]:
+    """`RAMP_T_LOW` y `RAMP_T_HIGH` con las reglas A, B y C, a partir del solape medido en cada foto.
+
+    Casos RED (A): los negativos (el auto no bloquea el rebaje). Válidos (C): los positivos. No hay un set de
+    casos dudosos (YELLOW), así que `T_HIGH` no se puede calibrar y se deja igual a `T_LOW`.
+    """
+    negatives = [(k, m) for k, m in rows if k in NEGATIVE_KINDS]
+    positives = [(k, m) for k, m in rows if k in POSITIVE_TYPES]
+    scored = [m.score for _, m in negatives if m.score is not None]
+    t_low = None if not scored else math.ceil((max(scored) + 1e-9) * 100) / 100
+    below = None if t_low is None else sum(m.score is not None and m.score < t_low for _, m in positives)
+    return {
+        "negativos": len(negatives),
+        "negativos_con_solape_medido": len(scored),
+        "negativos_sin_auto": sum(m.status == DrivewayCheck.NO_CAR for _, m in negatives),
+        "cota_95_regla_A_y_B": rate_bound(len(negatives)),
+        "positivos": len(positives),
+        "positivos_sin_medida": dict(Counter(m.status.value for _, m in positives if m.status is not None)),
+        "solape_maximo_de_un_negativo": None if not scored else round(max(scored), 4),
+        "RAMP_T_LOW": t_low,
+        "RAMP_T_HIGH": t_low,
+        "positivos_bajo_T_LOW": below,
+        "cota_95_regla_C": rate_bound(len(positives)),
+        "T_HIGH": "no calibrable: no hay un set de casos dudosos (YELLOW)",
+        "margen_binario_equivalente": None if t_low is None else -t_low,
+        "margen_por_defecto": default_margin,
+    }
+
+
+def binary_decision(measure: DrivewayMeasure, margin: float) -> DrivewayCheck:
+    if measure.status is not None:
+        return measure.status
+    assert measure.score is not None
+    return BLOCKING if measure.score > -margin else DrivewayCheck.NOT_BLOCKING
+
+
+def outcome(measure: DrivewayMeasure, t_low: float, t_high: float) -> str:
+    """El semáforo del chequeo de rampa para PARKED_ON_GARAGE."""
+    reason = ramp_reason(measure, t_low, t_high)
+    if reason is None:
+        return "GREEN"
+    return "RED" if reason in RED_CODES else "YELLOW"
+
+
+def baseline_rows(
+    photos: Sequence[Any],
+    raw_dir: Path,
+    cars: Callable[[Any], Any],
+    predictor: Predictor,
+    wheels: Callable[[Any, Mask], float | None] | None = None,
+    scale_fallback: float = DEFAULT_SCALE_FALLBACK,
+) -> list[dict[str, Any]]:
+    """Por foto: tipo y solape medido con las máscaras del predictor."""
+    decoder = CvImageDecoder()
+    rows = []
+    for photo in photos:
+        pixels = decoder.decode((raw_dir / photo.file).read_bytes())
+        found = cars(pixels)
+        car = largest_car(found).mask if found else None
+        diameter = wheels(pixels, car) if wheels is not None and car is not None else None
+        empty = np.zeros(pixels.shape[:2], bool)
+        sample = Sample(photo.file, photo.kind, pixels, empty, empty, car, diameter)
+        prediction = predictor(sample)
+        curb, cut = prediction if prediction is not None else (empty, empty)
+        if car is None or not car.any():
+            measure = DrivewayMeasure(DrivewayCheck.NO_CAR, None)
+        else:
+            measure = driveway_overlap(curb, cut, car, diameter, scale_fallback)
+        rows.append(
+            {
+                "archivo": photo.file,
+                "tipo": photo.kind,
+                "medida": measure,
+                "mascaras": (bool(curb.any()), bool(cut.any())),
+            }
+        )
+    return rows
+
+
+def baseline_report(
+    rows: Sequence[dict[str, Any]], margin: float, t_low: float, t_high: float
+) -> dict[str, Any]:
+    """Matriz por tipo de la decisión binaria y del veredicto del servicio, más la calibración."""
+    by_kind: dict[str, dict[str, Any]] = {}
+    for kind in EXPECTED:
+        group = [r for r in rows if r["tipo"] == kind]
+        if not group:
+            continue
+        verdicts = Counter(outcome(r["medida"], t_low, t_high) for r in group)
+        expected = "GREEN" if kind in POSITIVE_TYPES else "RED"
+        by_kind[kind] = {
+            "fotos": len(group),
+            "decisiones": dict(Counter(binary_decision(r["medida"], margin).value for r in group)),
+            "veredictos": dict(verdicts),
+            "veredicto_esperado": expected,
+            "aciertos": verdicts.get(expected, 0),
+        }
+    return {
+        "fotos": len(rows),
+        "por_tipo": by_kind,
+        "sin_curb_cut_detectado": sum(not r["mascaras"][1] for r in rows),
+        "sin_curb_detectado": sum(not r["mascaras"][0] for r in rows),
+        "calibracion": calibrate_ramp([(r["tipo"], r["medida"]) for r in rows], margin),
+        "por_foto": [
+            {
+                "archivo": r["archivo"],
+                "tipo": r["tipo"],
+                "score": None if r["medida"].score is None else round(r["medida"].score, 3),
+                "estado": None if r["medida"].status is None else r["medida"].status.value,
+            }
+            for r in rows
+        ],
+    }
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -335,6 +465,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--no-sam3", action="store_true", help="no correr SAM 3 (no hace falta la GPU ni el acceso)"
     )
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda", help="dispositivo de SAM 3")
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="solo SAM 3 sobre todas las fotos de raw/ (sin etiquetas a mano ni modelo entrenado): "
+        "matriz por tipo y calibración de RAMP_T_LOW y RAMP_T_HIGH",
+    )
+    parser.add_argument("--t-low", type=float, default=float(os.environ.get("RAMP_T_LOW", -0.08)))
+    parser.add_argument("--t-high", type=float, default=float(os.environ.get("RAMP_T_HIGH", 0.08)))
     parser.add_argument("--margin", type=float, default=float(os.environ.get("RAMP_MARGIN", DEFAULT_MARGIN)))
     parser.add_argument(
         "--scale-fallback",
@@ -360,6 +498,8 @@ def main(
     if any(Path(p).resolve().is_relative_to(REPO_ROOT) for p in (curb, args.out_dir)):
         print("Las fotos y la salida no pueden estar dentro del repositorio.", file=sys.stderr)
         return 1
+    if args.baseline:
+        return run_baseline(args, curb, sam3_factory)
     split_dir = curb / "dataset" / "test"
     if not (split_dir / ANNOTATIONS).is_file():
         print(f"Falta el split test en {split_dir}. Corré antes prepare.py.", file=sys.stderr)
@@ -407,13 +547,56 @@ def main(
         print(
             f"{name:<10} aciertos {row['aciertos']}/{row['fotos']} · "
             f"BLOCKING precisión {row['precision_blocking']} "
-            f"recall {row['recall_blocking']} · MARGINAL {row['pct_marginal']} · fallas {row['fallas']}"
+            f"recall {row['recall_blocking']} · fallas {row['fallas']}"
         )
     print(
         f"RAMP_MARGIN: actual {report['margen']['actual']} · "
         f"recomendado con las máscaras anotadas {report['margen']['recomendado']}"
     )
     print(f"Fallas dibujadas en {Path(args.out_dir) / FAILURES_FOLDER}: {failures}")
+    return 0
+
+
+def run_baseline(
+    args: argparse.Namespace, curb: Path, sam3_factory: Callable[[argparse.Namespace], Any] | None
+) -> int:
+    """SAM 3 sin entrenar sobre todas las fotos de `raw/` que no están descartadas."""
+    selection = {"segmenter": args.segmenter}
+    if args.detector:
+        selection["detector"] = args.detector
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "training" / "curb"))
+        from photos import PhotosError, load_photos
+
+        photos = load_photos(curb / "fotos.csv", curb / "raw")
+        models = build_models(selection, args.manifest, args.models_dir)
+    except (PhotosError, ModelSetupError) as exc:
+        print(f"No se pudo empezar: {exc}", file=sys.stderr)
+        return 1
+    measure = None
+    if args.detector:
+        from vvi_ia.domain.model import BoxLabel
+
+        def measure(image: NDArray[np.uint8], car: Mask) -> float | None:
+            found = [box for box in models.vehicle.detect(image) or () if box.label == BoxLabel.WHEEL]
+            return wheel_diameter(found, car)
+
+    predictor = (sam3_factory or _default_sam3)(args)
+    rows = baseline_rows(photos, curb / "raw", models.cars.cars, predictor, measure, args.scale_fallback)
+    report = baseline_report(rows, args.margin, args.t_low, args.t_high)
+    report["modelos"] = {"segmenter": models.versions()["segmenter"], "sam3": "facebook/sam3 sin entrenar"}
+    Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    (Path(args.out_dir) / "curb_baseline.json").write_text(
+        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    print(f"{report['fotos']} fotos (sin las descartadas) · SAM 3 sin entrenar")
+    print(f"{'tipo':<30}{'fotos':>6}  decisiones binarias · veredicto del servicio (esperado)")
+    for kind, row in report["por_tipo"].items():
+        print(
+            f"{kind:<30}{row['fotos']:>6}  {row['decisiones']} · {row['veredictos']} "
+            f"({row['veredicto_esperado']})"
+        )
+    print(f"Calibración: {report['calibracion']}")
     return 0
 
 

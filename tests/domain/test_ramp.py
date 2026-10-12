@@ -4,7 +4,7 @@ import pytest
 from numpy.typing import NDArray
 
 from vvi_ia.domain.model import Box, BoxLabel
-from vvi_ia.domain.ramp import DrivewayCheck, driveway_check, wheel_diameter
+from vvi_ia.domain.ramp import DrivewayCheck, driveway_check, driveway_overlap, wheel_diameter
 
 SIZE = 800
 CURB_ROWS = slice(400, 410)
@@ -46,17 +46,41 @@ def test_auto_sobre_el_rebaje_bloquea() -> None:
     assert _check(_scene((350, 450))) == DrivewayCheck.BLOCKING
 
 
-def test_invasion_de_pocos_pixeles_es_marginal() -> None:
-    # el auto termina 3 px dentro del rebaje; el margen es 4 px
-    assert _check(_scene((200, 303))) == DrivewayCheck.BLOCKING_MARGINAL
+def test_invasion_de_pocos_pixeles_bloquea() -> None:
+    # el auto termina 3 px dentro del rebaje: la decisión es binaria, ya no hay un caso marginal
+    assert _check(_scene((200, 303))) == DrivewayCheck.BLOCKING
 
 
 def test_invasion_clara_bloquea() -> None:
     assert _check(_scene((200, 320))) == DrivewayCheck.BLOCKING
 
 
-def test_contacto_exacto_es_marginal() -> None:
-    assert _check(_scene((200, 300))) == DrivewayCheck.BLOCKING_MARGINAL
+def test_contacto_exacto_bloquea() -> None:
+    assert _check(_scene((200, 300))) == DrivewayCheck.BLOCKING
+
+
+def test_a_menos_de_un_margen_del_rebaje_bloquea_y_mas_lejos_no() -> None:
+    # margen 0,08 con ruedas de 50 px: 4 px. A 3 px del rebaje todavía bloquea; a 6 px, no
+    assert _check(_scene((200, 298))) == DrivewayCheck.BLOCKING
+    assert _check(_scene((200, 295))) == DrivewayCheck.NOT_BLOCKING
+
+
+def test_el_score_es_el_solape_en_escalas_de_rueda() -> None:
+    curb, cut, car = _scene((200, 325))  # 25 px dentro del rebaje
+
+    measure = driveway_overlap(curb, cut, car, wheel_diam=WHEEL_DIAM)
+
+    assert measure.status is None and measure.score == pytest.approx(25 / WHEEL_DIAM, abs=0.05)
+    apart = driveway_overlap(*_scene((100, 250)), wheel_diam=WHEEL_DIAM)
+    assert apart.score is not None and apart.score == pytest.approx(-50 / WHEEL_DIAM, abs=0.05)
+
+
+def test_sin_auto_o_sin_rebaje_no_hay_score() -> None:
+    assert driveway_overlap(*_scene(None), wheel_diam=WHEEL_DIAM) == driveway_overlap(
+        *_scene(None), wheel_diam=WHEEL_DIAM
+    )
+    assert driveway_overlap(*_scene(None)).status == DrivewayCheck.NO_CAR
+    assert driveway_overlap(*_scene((350, 450), with_cut=False)).score is None
 
 
 def test_auto_separado_del_rebaje_no_bloquea() -> None:
