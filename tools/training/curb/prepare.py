@@ -1,7 +1,7 @@
 """Arma el dataset de rebajes para RF-DETR-Seg a partir de la exportación de CVAT y de `fotos.csv`.
 
 Toma las anotaciones (polígonos `curb` y `curb_cut`) de la exportación "COCO 1.0" de CVAT, reparte las
-fotos en train, valid y test por calle (ver `splits.py`) y deja el dataset en `<curb>/dataset/`. Las fotos
+fotos en train, valid y test por escena (ver `splits.py`) y deja el dataset en `<curb>/dataset/`. Las fotos
 se copian (o enlazan) desde `raw/`, que no se toca. Todo queda fuera del repo: son fotos de la calle con
 rostros y patentes de terceros. Uso: ver `tools/training/curb/README.md`.
 """
@@ -215,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
     save_test(curb / "splits", assignment, args.seed)
     write_assignments(curb / "splits", assignment)
     summary = write_dataset(assignment, converted, curb / "raw", curb / DATASET_FOLDER)
-    summary["split_por_calle"] = assignment.summary()
+    summary["split"] = assignment.summary()
     summary["anotaciones_descartadas"] = dict(discarded)
     without_cut = missing_cuts(assignment, converted)
     summary["fotos_sin_curb_cut_esperado"] = len(without_cut)
@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{split}: {summary[split]} · tipos {assignment.summary()[split]['tipos']}")
     if assignment.left_out:
         print(
-            f"Atención: {len(assignment.left_out)} fotos nuevas son de calles del test y quedaron "
+            f"Atención: {len(assignment.left_out)} fotos nuevas son de escenas del test y quedaron "
             "afuera de todo."
         )
     if discarded:
