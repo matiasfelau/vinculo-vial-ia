@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     ramp_scale_fallback: float = Field(default=0.45, gt=0.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
+    detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
 
     # Modelos: `null` (default) o el nombre de un modelo de models/manifest.json
     model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)

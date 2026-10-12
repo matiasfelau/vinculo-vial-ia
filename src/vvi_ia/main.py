@@ -47,7 +47,12 @@ def load_models(settings: Settings) -> Models:
 
 def adapter_params(settings: Settings) -> dict[str, float]:
     """Parámetros que cada adaptador de modelo lee de su configuración."""
-    return {"segmenter_min_conf": settings.segmenter_min_conf}
+    return {
+        "segmenter_min_conf": settings.segmenter_min_conf,
+        "detector_min_conf": settings.detector_min_conf,
+        # Rostros y patentes salen desde el umbral de redacción más bajo: el dominio decide cuáles tapar
+        "redaction_min_conf": min(settings.face_min_conf, settings.plate_redact_min_conf),
+    }
 
 
 def build_thresholds(settings: Settings) -> Thresholds:

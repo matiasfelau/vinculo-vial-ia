@@ -70,6 +70,9 @@ class LoadedModel:
     entry: ModelEntry
     version: str
     session: OnnxSession
+    # Espacio para que los adaptadores de un mismo modelo (por ejemplo `detector` y `face`) compartan
+    # lo que construyen una sola vez.
+    shared: dict[str, Any] = field(default_factory=dict, compare=False, hash=False, repr=False)
 
 
 @dataclass

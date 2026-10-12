@@ -27,6 +27,11 @@ Notas:
 
 - **RF-DETR:** solo se usan los tamaños con licencia Apache 2.0. Los tamaños XL y 2XL se
   distribuyen con la licencia PML 1.0 y no se usan en ninguna parte del proyecto.
+- **Detector (`detector` y `face`):** RF-DETR Small ajustado por este proyecto con un subconjunto de Open Images
+  V7 (clases Car, Wheel, Vehicle registration plate y Human face), partiendo de los pesos COCO de Roboflow
+  (Apache 2.0). Los pesos resultantes son propios y no se redistribuyen con el repositorio; se generan con
+  [tools/training/detector/](tools/training/detector/README.md). Open Images: anotaciones CC BY 4.0 e imágenes CC BY
+  2.0 (ver la sección del dataset).
 - **DINOv2:** pesos `facebook/dinov2-small` publicados por Meta en Hugging Face
   (<https://huggingface.co/facebook/dinov2-small>), convertidos a ONNX sin modificar con
   [tools/export/dinov2.py](tools/export/dinov2.py).

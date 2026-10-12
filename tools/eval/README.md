@@ -276,3 +276,33 @@ apoyan en muy pocos pares: tomá la propuesta como orientativa y mirá el histog
   fotos y al menos 2 autos.
 - **Muchas fotos descartadas por "sin auto"**: el segmentador no encontró un auto; probá bajar
   `--segmenter-min-conf`.
+
+## Detector de autos, ruedas, patentes y rostros (`detector.py`)
+
+Mide qué tan bien encuentra el detector (`rfdetr_openimages`) cada clase en fotos que **nunca vio al
+entrenar**: el split `test` del subconjunto de Open Images que baja
+[tools/training/detector/download.py](../training/detector/README.md). Corre el adaptador real, el mismo
+código y el mismo ONNX que el servicio.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\detector"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/detector.py --split test
+```
+
+Por cada clase muestra:
+
+| Columna | Qué significa |
+|---|---|
+| `reales` | Cajas anotadas en las fotos. |
+| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros: son los de `PLATE_REDACT_MIN_CONF` y `FACE_MIN_CONF`). |
+| `recall` | De las cajas reales, qué fracción encontró (IoU 0,5 o más) con ese umbral. |
+| `prec.` | De las cajas que dibujó, qué fracción acertó. |
+| `FP` | Falsos positivos: cajas que no corresponden a nada. |
+| `chicas` y `rec.ch.` | Cajas con un lado menor a 32 px y el recall sobre ellas. |
+| `AP50` | Calidad promedio sin depender del umbral: 1,0 es perfecto. |
+
+Para tapar rostros y patentes manda el **recall**: una caja de más tapa de más, una de menos deja un
+rostro a la vista. La precisión importa menos. La salida completa queda en `detector_report.json`, solo
+con cifras. `--detector-min-conf`, `--plate-min-conf` y `--face-min-conf` cambian los umbrales.
