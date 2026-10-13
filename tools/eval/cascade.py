@@ -95,6 +95,9 @@ class CurbCostProxy:
 
     version = "curb-proxy"
     STRIP_PX = 6
+    STRIP_FRACTION = (
+        0.02  # alto del cordón como fracción del alto de la foto (para que el rebaje no sea diminuto)
+    )
 
     def __init__(self, segmenter: Any) -> None:
         self._segmenter = segmenter
@@ -105,9 +108,10 @@ class CurbCostProxy:
         cut = np.zeros(img.shape[:2], np.bool_)
         if cars:
             ys, xs = np.nonzero(max(cars, key=lambda car: int(car.mask.sum())).mask)
-            bottom = min(int(ys.max()) + 1, img.shape[0] - self.STRIP_PX)
-            curb[bottom : bottom + self.STRIP_PX, :] = True
-            cut[bottom : bottom + self.STRIP_PX, int(xs.min()) : int(xs.max()) + 1] = True
+            strip = max(self.STRIP_PX, round(self.STRIP_FRACTION * img.shape[0]))
+            bottom = min(int(ys.max()) + 1, img.shape[0] - strip)
+            curb[bottom : bottom + strip, :] = True
+            cut[bottom : bottom + strip, int(xs.min()) : int(xs.max()) + 1] = True
             curb &= ~cut
         return curb, cut
 
