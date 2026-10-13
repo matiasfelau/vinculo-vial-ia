@@ -474,6 +474,39 @@ def propose_min_conf(readings: Sequence[Reading]) -> dict[str, Any]:
     }
 
 
+def cross_pairs(readings: Sequence[Reading], min_conf: float) -> dict[str, Any]:
+    """R3 con pares cruzados: la lectura de una foto contra la etiqueta de OTRA patente.
+
+    Son casos que deberían dar `PLATE_MISMATCH` (la patente de la foto no es la reportada). Se cuenta qué
+    parte sale MISMATCH con el umbral `min_conf` (RED en el servicio) y cuál se escapa como GREEN: `FUZZY`
+    (una etiqueta parecida), `UNREADABLE` (lectura poco segura) o `MATCH` (etiquetas parecidas en el texto).
+    """
+    labels = sorted({reading.sample.label for reading in readings})
+    total: Counter[str] = Counter()
+    sure: Counter[str] = Counter()
+    for reading in readings:
+        if reading.failed or not reading.text:
+            continue
+        for label in labels:
+            if label == reading.sample.label:
+                continue
+            check = plate_check(label, reading.text, reading.conf, min_conf)
+            total[check.value] += 1
+            if reading.conf >= min_conf:
+                sure[check.value] += 1
+
+    def shares(counts: Counter[str]) -> dict[str, Any]:
+        n = sum(counts.values())
+        return {
+            "pares": n,
+            "mismatch": counts[PlateCheck.MISMATCH.value],
+            "mismatch_pct": round(100 * counts[PlateCheck.MISMATCH.value] / n, 2) if n else None,
+            "distribucion": {check.value: counts.get(check.value, 0) for check in PlateCheck},
+        }
+
+    return {"todos": shares(total), "con_lectura_segura": shares(sure)}
+
+
 def build_report(
     readings: Sequence[Reading],
     min_conf: float,
@@ -508,6 +541,7 @@ def build_report(
         "propuesta": propose_min_conf(in_scope),
         "propuesta_con_todos_los_formatos": propose_min_conf(readings),
         "lecturas_fuera_de_alcance": len(readings) - len(in_scope),
+        "pares_cruzados": cross_pairs(in_scope, min_conf),
     }
 
 
@@ -691,6 +725,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Lecturas: {total['lecturas']} · fallas del modelo: {total['fallas_del_modelo']}")
     print(f"Coincidencia exacta: {total['coincidencia_exacta']} ({total['coincidencia_exacta_pct']} %)")
     print(f"Distribución con OCR_MIN_CONF={args.min_conf}: {total['distribucion']}")
+    crossed = report["pares_cruzados"]
+    print(
+        f"R3, pares cruzados (patente de una foto contra la etiqueta de otra, solo formatos en alcance): "
+        f"{crossed['todos']['mismatch_pct']} % sale MISMATCH de {crossed['todos']['pares']} pares "
+        f"({crossed['todos']['distribucion']}); con lectura segura: "
+        f"{crossed['con_lectura_segura']['mismatch_pct']} % de {crossed['con_lectura_segura']['pares']}"
+    )
     print(
         f"Propuesta (sin {report['lecturas_fuera_de_alcance']} lecturas de otros formatos): "
         f"OCR_MIN_CONF={proposal['OCR_MIN_CONF']} "

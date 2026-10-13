@@ -166,6 +166,15 @@ Tomala como orientativa:
   líneas (fuera de alcance). El reporte muestra también qué saldría con todas;
 - para aplicarla, poné `OCR_MIN_CONF=<valor>` en el `.env` del servicio.
 
+### R3 con pares cruzados
+
+El script también mide qué hace R3 (`PLATE_MISMATCH` solo con una lectura segura que no coincide) cuando la patente de
+una foto se compara con la etiqueta de **otra** (`pares_cruzados` en el reporte). Con `OCR_MIN_CONF=0,78` y solo los
+formatos en alcance: de 14 835 pares, el **75,2 %** sale `MISMATCH` (RED); el resto se escapa como GREEN, casi todo
+(24,8 %) porque la lectura de esa foto no llega a 0,78 y 4 pares (0,03 %) por una etiqueta casi igual (`FUZZY`). Ningún
+par da `MATCH`. Cuando la lectura es segura, el 99,96 % sale `MISMATCH`. Del otro lado, ninguna patente en alcance que
+coincide con su etiqueta sale `MISMATCH` con 0,78.
+
 ### Opciones
 
 | Opción | Para qué |

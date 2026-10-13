@@ -802,3 +802,40 @@ def test_main_escribe_la_causa_en_la_auditoria_y_en_el_reporte(tmp_path: Path) -
     wrong = [row for row in rows if row["exacta"] == "no"]
     assert [row["causa"] for row in wrong] == [ocr.BLUR]  # los recortes sintéticos son diminutos
     assert ocr.DOUBTFUL_LABEL in wrong[0]["factores"]
+
+
+def test_pares_cruzados_cuenta_que_parte_de_las_patentes_ajenas_sale_mismatch() -> None:
+    readings = [
+        reading("AB123CD", "AB123CD", 0.95),
+        reading("EF456GH", "EF456GH", 0.90),
+        reading("IJ789KL", "IJ789KL", 0.40),  # lectura poco segura: se escapa como ilegible
+    ]
+
+    result = ocr.cross_pairs(readings, 0.78)
+
+    assert result["todos"]["pares"] == 6  # cada lectura contra las 2 etiquetas ajenas
+    assert result["todos"]["distribucion"]["PLATE_MISMATCH"] == 4
+    assert result["todos"]["distribucion"]["PLATE_UNREADABLE"] == 2
+    assert result["todos"]["mismatch_pct"] == pytest.approx(66.67)
+    assert result["con_lectura_segura"] == {
+        "pares": 4,
+        "mismatch": 4,
+        "mismatch_pct": 100.0,
+        "distribucion": {"PLATE_MATCH": 0, "PLATE_FUZZY": 0, "PLATE_MISMATCH": 4, "PLATE_UNREADABLE": 0},
+    }
+
+
+def test_pares_cruzados_no_cuenta_la_etiqueta_propia_ni_las_lecturas_vacias() -> None:
+    readings = [reading("AB123CD", "AB123CD", 0.95), reading("EF456GH", "", 0.0)]
+
+    result = ocr.cross_pairs(readings, 0.78)
+
+    assert result["todos"]["pares"] == 1 and result["todos"]["distribucion"]["PLATE_MATCH"] == 0
+
+
+def test_pares_cruzados_con_etiquetas_casi_iguales_se_escapan_como_fuzzy() -> None:
+    readings = [reading("AB123CD", "AB123CD", 0.95), reading("AB123CE", "AB123CE", 0.95)]
+
+    result = ocr.cross_pairs(readings, 0.78)
+
+    assert result["todos"]["distribucion"]["PLATE_FUZZY"] == 2 and result["todos"]["mismatch"] == 0
