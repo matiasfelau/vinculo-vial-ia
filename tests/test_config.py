@@ -13,7 +13,8 @@ def test_carga_valida_con_valores_por_defecto(base_env: pytest.MonkeyPatch) -> N
     assert settings.input_queue == "ia.alert-evidence-uploaded.q"
     assert settings.workers == 2
     assert settings.redaction_required is True
-    assert settings.reid_t_low < settings.reid_t_high
+    assert settings.reid_t == 0.50 and settings.damage_presence_t == 0.97
+    assert settings.model_curb == "" and settings.model_selection()["curb"] == "null"
 
 
 @pytest.mark.parametrize("missing", sorted(BASE_ENV))
@@ -46,10 +47,20 @@ def test_redaction_required_false_con_env_local_arranca(base_env: pytest.MonkeyP
     assert load_settings().redaction_required is False
 
 
-def test_umbrales_reid_deben_estar_ordenados(base_env: pytest.MonkeyPatch) -> None:
-    base_env.setenv("REID_T_LOW", "0.8")
-    base_env.setenv("REID_T_HIGH", "0.7")
+def test_el_umbral_de_reid_debe_estar_entre_0_y_1(base_env: pytest.MonkeyPatch) -> None:
+    base_env.setenv("REID_T", "1.5")
 
+    with pytest.raises(ValidationError):
+        load_settings()
+
+
+def test_el_modelo_de_rebajes_vacio_no_carga_pesos_y_con_nombre_exige_models_dir(
+    base_env: pytest.MonkeyPatch,
+) -> None:
+    assert load_settings().model_selection()["curb"] == "null"
+
+    base_env.setenv("MODEL_CURB", "rfdetr_seg_curb")
+    base_env.delenv("MODELS_DIR", raising=False)
     with pytest.raises(ValidationError):
         load_settings()
 

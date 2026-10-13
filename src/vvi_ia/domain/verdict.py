@@ -1,18 +1,13 @@
-"""Agregación de códigos de razón en el semáforo."""
+"""Agregación de códigos de razón en el veredicto (solo GREEN o RED)."""
 
 from collections.abc import Iterable
 
-from vvi_ia.domain.model import FRAUD_CODES, RED_CODES, YELLOW_CODES, ReasonCode, Verdict
+from vvi_ia.domain.model import FRAUD_CODES, RED_CODES, ReasonCode, Verdict
 
 
 def aggregate(codes: Iterable[ReasonCode]) -> Verdict:
-    """RED si hay algún código RED; si no, YELLOW si hay alguno YELLOW; si no, GREEN."""
-    present = set(codes)
-    if present & RED_CODES:
-        return Verdict.RED
-    if present & YELLOW_CODES:
-        return Verdict.YELLOW
-    return Verdict.GREEN
+    """RED si hay algún código; sin códigos, GREEN."""
+    return Verdict.RED if set(codes) & RED_CODES else Verdict.GREEN
 
 
 def fraud_codes(codes: Iterable[ReasonCode]) -> frozenset[ReasonCode]:

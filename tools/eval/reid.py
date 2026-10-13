@@ -41,8 +41,10 @@ CSV_NAME = "fotos.csv"
 COLUMNS = ("archivo", "auto")
 DEFAULT_SEGMENTER = "rfdetr_seg_coco"
 DEFAULT_EMBEDDER = "dinov2_vits14"
-CURRENT_T_LOW = 0.50  # los valores por defecto de REID_T_LOW y REID_T_HIGH en `config.py`
-CURRENT_T_HIGH = 0.70
+CURRENT_T_LOW = (
+    0.50  # el valor por defecto de REID_T en `config.py` (un solo umbral: otro auto si cos < REID_T)
+)
+CURRENT_T_HIGH = 0.70  # el límite alto que usaba el modelo anterior; solo informativo
 DEFAULT_MAX_FALSE_FRAUD = 0.01
 DEFAULT_MAX_FALSE_ACCEPT = 0.01
 DEFAULT_MAX_DIFFERENT = 20_000

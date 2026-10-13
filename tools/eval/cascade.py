@@ -9,8 +9,8 @@ lugar de cortarse en un RED.
 Lo que NO mide es la red (S3) ni el descifrado HPKE: el almacenamiento y el descifrado son en memoria. Los
 tiempos por etapa salen del propio log del caso de uso.
 
-`curb` queda en `null` hasta que haya un modelo de rebajes; con `--curb-proxy` se simula su costo corriendo
-el segmentador de autos (misma arquitectura RF-DETR-Seg Small), sin usar su resultado. La consola y
+El chequeo de rebajes salió de la cascada, así que no hay nada que simular.
+La consola y
 `cascade_report.json` tienen solo cifras. Uso: ver `tools/eval/README.md`.
 """
 
@@ -27,7 +27,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -52,14 +52,7 @@ SELECTION = {
     "ocr": "parseq",
     "damage": "rfdetr_cardd",
 }
-RELAXED = {
-    "reid_t_low": -1.0,
-    "reid_t_high": -1.0,
-    "damage_t_low": 0.0,
-    "damage_t_high": 0.0,
-    "ramp_t_low": -1e9,
-    "ramp_t_high": -1e9,
-}
+RELAXED = {"reid_t": -1.0, "damage_presence_t": 0.0}
 PLATE_READ_CONF = 0.9  # la patente reportada tiene que ser la que lee el OCR con seguridad
 MIN_READABLE = 12
 STAGES = ("load", "vehicle", "burst", "plate", "context", "redaction")
@@ -84,36 +77,6 @@ class MemoryStore:
 
     def put(self, key: str, body: bytes, content_type: str) -> None:
         self.objects[key] = body
-
-
-class CurbCostProxy:
-    """`curb` que gasta lo mismo que el modelo real (una pasada RF-DETR-Seg) y arma un rebaje bajo el auto.
-
-    Las máscaras salen del auto más grande: un cordón de 6 px bajo él y, sobre el ancho del auto, el tramo
-    rebajado. Así el auto bloquea el rebaje y la cascada sigue por el camino verde (con la redacción).
-    """
-
-    version = "curb-proxy"
-    STRIP_PX = 6
-    STRIP_FRACTION = (
-        0.02  # alto del cordón como fracción del alto de la foto (para que el rebaje no sea diminuto)
-    )
-
-    def __init__(self, segmenter: Any) -> None:
-        self._segmenter = segmenter
-
-    def curb(self, img: Pixels) -> tuple[Any, Any] | None:
-        cars = self._segmenter.cars(img) or []
-        curb = np.zeros(img.shape[:2], np.bool_)
-        cut = np.zeros(img.shape[:2], np.bool_)
-        if cars:
-            ys, xs = np.nonzero(max(cars, key=lambda car: int(car.mask.sum())).mask)
-            strip = max(self.STRIP_PX, round(self.STRIP_FRACTION * img.shape[0]))
-            bottom = min(int(ys.max()) + 1, img.shape[0] - strip)
-            curb[bottom : bottom + strip, :] = True
-            cut[bottom : bottom + strip, int(xs.min()) : int(xs.max()) + 1] = True
-            curb &= ~cut
-        return curb, cut
 
 
 class DurationCapture(logging.Handler):
@@ -259,7 +222,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         help="reescala las fotos a este lado mayor en px (p. ej. 4000 para fotos de celular de 4000 x 3000)",
     )
-    parser.add_argument("--curb-proxy", action="store_true", help="simular el costo del modelo de rebajes")
     parser.add_argument("--general-dir", type=Path, help="autos (por defecto <data-dir>/damage-fp/images)")
     parser.add_argument("--detail-dir", type=Path, help="daños (por defecto <data-dir>/cardd-detector/test)")
     args = parser.parse_args(argv)
@@ -330,8 +292,6 @@ def main(argv: list[str] | None = None) -> int:
     except ModelSetupError as exc:
         print(f"No se pudo empezar: {exc}", file=sys.stderr)
         return 1
-    if args.curb_proxy:
-        models = replace(models, curb=CurbCostProxy(models.cars))
     store = MemoryStore()
     use_case = ValidateEvidence(
         store=store,
@@ -395,7 +355,6 @@ def main(argv: list[str] | None = None) -> int:
         "redaccion": not args.no_redaction,
         "mosaico_patentes": args.plate_tiling == "on",
         "lado_mayor_px": args.long_side,
-        "curb": "simulado (costo de una pasada RF-DETR-Seg)" if args.curb_proxy else "null",
         "escenarios": {},
     }
     for name, (alert_type, alert_layouts) in scenarios.items():
@@ -408,7 +367,6 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Hilos ONNX: {args.threads or 'por defecto'} · redacción: {report['redaccion']} · "
         f"mosaico de patentes: {report['mosaico_patentes']} · lado mayor: {args.long_side or 'original'} · "
-        f"curb: {report['curb']}"
     )
     header = "".join(f"{s:>10}" for s in STAGES)
     print(f"{'escenario':<60}{'mediana':>9}{'p95':>8}{'máx':>8}   etapas medianas (ms): {header}")

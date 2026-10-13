@@ -48,21 +48,14 @@ class Settings(BaseSettings):
     redaction_required: bool = True
 
     # Umbrales del dominio
-    reid_t_low: float = Field(default=0.50, ge=0.0, le=1.0)
-    reid_t_high: float = Field(default=0.70, ge=0.0, le=1.0)
+    # coseno bajo el cual la re-ID confirma que es otro auto. SIN CALIBRAR: falta VeRi-776
+    reid_t: float = Field(default=0.50, ge=0.0, le=1.0)
     # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
-    # provisorio: CarDD test y 416 autos de Open Images (damage_fp.py); revisar con fotos propias
-    # provisorio: tools/eval/damage_fp.py (mayor confianza de una foto de auto sin daño); no cumple la regla C
-    damage_t_low: float = Field(default=0.969, ge=0.0, le=1.0)
-    damage_t_high: float = Field(default=0.969, ge=0.0, le=1.0)
+    # el daño solo cuenta como presencia de auto en DETAIL; ver tools/eval/presence.py
+    damage_presence_t: float = Field(default=0.97, ge=0.0, le=1.0)
     face_min_conf: float = Field(default=0.30, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
-    # Rampa: el solape auto/rebaje se mide en escalas de rueda. < T_LOW: el auto no bloquea (RED);
-    # entre T_LOW y T_HIGH: dudoso (YELLOW); desde T_HIGH: bloquea. Sin calibrar con datos propios
-    ramp_t_low: float = -0.08
-    ramp_t_high: float = 0.08
-    ramp_scale_fallback: float = Field(default=0.45, gt=0.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
@@ -79,7 +72,8 @@ class Settings(BaseSettings):
     model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_face: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_segmenter: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
-    model_curb: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    # EXPERIMENTAL y fuera de la cascada: vacío (no se cargan pesos) salvo para probar el modelo de rebajes
+    model_curb: str = Field(default="", pattern=r"^([a-z0-9][a-z0-9_]*)?$")
     model_embedder: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_ocr: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_damage: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
@@ -102,8 +96,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
-        if self.reid_t_low >= self.reid_t_high:
-            raise ValueError("REID_T_LOW debe ser menor que REID_T_HIGH")
         if not self.redaction_required and self.env != LOCAL_ENV:
             raise ValueError(f"REDACTION_REQUIRED=false solo se acepta con ENV={LOCAL_ENV}")
         if self.models_dir is None and any(name != NULL_MODEL for name in self.model_selection().values()):
@@ -116,7 +108,7 @@ class Settings(BaseSettings):
             "detector": self.model_detector,
             "face": self.model_face,
             "segmenter": self.model_segmenter,
-            "curb": self.model_curb,
+            "curb": self.model_curb or NULL_MODEL,
             "embedder": self.model_embedder,
             "ocr": self.model_ocr,
             "damage": self.model_damage,

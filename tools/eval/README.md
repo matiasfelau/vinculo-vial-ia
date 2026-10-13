@@ -658,6 +658,23 @@ foto dejan de pasar. **El detector de daños no sirve para esto** (con 0,70 disp
 auto). Los primeros planos de la carrocería que no muestran ninguna parte reconocible (21 de 374) se rechazan:
 la regla A gana sobre la C.
 
+## Veredicto de la IA: solo GREEN o RED
+
+La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
+
+| Regla | Código | Cuándo |
+|---|---|---|
+| R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay evidencia de un auto: GENERAL y CONTEXT, un auto; PLATE, un auto, una parte o una patente; DETAIL, lo mismo o una caja de daño de confianza `DAMAGE_PRESENCE_T`. |
+| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`). Dudoso o no comparable: GREEN. |
+| R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
+| R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE` | Sin fraude: foto ilegible o no se pudo redactar todas las fotos. |
+| R5 | (sin códigos) | Todo lo demás: GREEN. |
+
+Salieron de la cascada el chequeo de **rebajes** (experimental y en construcción: `MODEL_CURB` vacío, sin pesos) y el
+chequeo de **daño** (solo queda como prueba de presencia en DETAIL). `presence.py` calibra `DAMAGE_PRESENCE_T`: el primer
+valor sobre la mayor confianza de daño de una de las 489 fotos sin auto de Open Images (0,97: pasan 0 de 489, cota del
+95 % = 0,6 %), que recupera 5 de los 21 primeros planos de CarDD que las otras reglas rechazaban.
+
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
 
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**

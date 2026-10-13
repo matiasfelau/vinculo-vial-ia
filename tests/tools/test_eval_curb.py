@@ -416,10 +416,14 @@ def test_main_exige_las_rutas(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_los_valores_por_defecto_coinciden_con_la_config() -> None:
-    from vvi_ia.config import Settings
+    # el chequeo de rampa salió del servicio (experimental): los valores quedan en `domain/ramp.py`
+    import inspect
 
-    assert curb_eval.DEFAULT_MARGIN == -Settings.model_fields["ramp_t_low"].default
-    assert curb_eval.DEFAULT_SCALE_FALLBACK == Settings.model_fields["ramp_scale_fallback"].default
+    from vvi_ia.domain.ramp import driveway_check
+
+    defaults = inspect.signature(driveway_check).parameters
+    assert curb_eval.DEFAULT_MARGIN == defaults["margin"].default
+    assert curb_eval.DEFAULT_SCALE_FALLBACK == defaults["scale_fallback"].default
 
 
 def test_main_sin_modelo_entrenado_evalua_sam3_y_el_oraculo(

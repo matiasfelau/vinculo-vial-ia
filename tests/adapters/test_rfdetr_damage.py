@@ -225,9 +225,9 @@ def test_un_archivo_que_no_es_el_detector_de_danos_no_deja_arrancar(tmp_path: Pa
 
 
 def test_el_umbral_de_danos_viaja_a_los_adaptadores(base_env: pytest.MonkeyPatch) -> None:
-    assert adapter_params(load_settings())["damage_min_conf"] == 0.969
+    assert adapter_params(load_settings())["damage_min_conf"] == 0.97
 
-    base_env.setenv("DAMAGE_T_LOW", "0.55")
+    base_env.setenv("DAMAGE_PRESENCE_T", "0.55")
     assert adapter_params(load_settings())["damage_min_conf"] == 0.55  # el adaptador devuelve desde T_LOW
 
 

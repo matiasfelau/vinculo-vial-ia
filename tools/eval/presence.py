@@ -17,6 +17,7 @@ o una caja de daño. Las fotos y la salida quedan fuera del repo; la consola mue
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections.abc import Mapping, Sequence
@@ -82,6 +83,31 @@ def rates(
 def bound(n: int) -> float | None:
     """Cota superior del 95 % con 0 fallas en `n` casos (regla del 3)."""
     return round(min(1.0, 3 / n), 4) if n else None
+
+
+def calibrate_damage_presence(
+    negatives: Sequence[Signals], rejected_details: Sequence[Signals]
+) -> dict[str, Any]:
+    """`DAMAGE_PRESENCE_T`: el primer valor (a 3 decimales) sobre la mayor confianza de daño sin auto.
+
+    Con ese umbral ninguna foto sin auto pasa por presencia de daño (regla absoluta: cota 95 % = 3/N).
+    Después se cuenta cuántos primeros planos que las otras reglas rechazaban se recuperan con él.
+    """
+
+    def best(signals: Signals) -> float:
+        return max((conf for conf, _ in signals.get("damage", ())), default=0.0)
+
+    highest = max((best(s) for s in negatives), default=0.0)
+    threshold = math.ceil((highest + 1e-9) * 1000) / 1000
+    return {
+        "DAMAGE_PRESENCE_T": threshold if threshold <= 1.0 else None,
+        "negativas": len(negatives),
+        "negativas_que_pasan": sum(best(s) >= threshold for s in negatives),
+        "cota_95": bound(len(negatives)),
+        "mayor_confianza_de_una_negativa": round(highest, 4),
+        "detalles_rechazados_por_las_otras_reglas": len(rejected_details),
+        "detalles_recuperados": sum(best(s) >= threshold for s in rejected_details),
+    }
 
 
 def verdict(table: Mapping[str, Any]) -> dict[str, Any]:
@@ -224,12 +250,15 @@ def main(argv: list[str] | None = None) -> int:
         ]
         print(f"{name}: {len(scores[name])} fotos medidas")
     table = rates(scores)
+    rejected = [s for s in scores["detail"] if not passes(s, RULES["R2"], DEFAULT_THRESHOLDS, 0.05)]
+    damage_presence = calibrate_damage_presence(scores["negativas"], rejected)
     sweep = {str(area): rates(scores, min_area=area) for area in AREA_SWEEP}
     report = {
         "umbrales": DEFAULT_THRESHOLDS,
         "tabla": table,
         "reglas": verdict(table),
         "barrido_de_area": {area: {"tabla": rows, "reglas": verdict(rows)} for area, rows in sweep.items()},
+        "presencia_por_dano": damage_presence,
         "senales": scores,
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -241,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{name:<11}{row['fotos']:>6}{row['solo_car']:>10}{row['R1']:>6}{row['R2']:>6}{row['R3']:>6}")
     for rule, row in report["reglas"].items():
         print(f"{rule}: {row}")
+    print(f"Presencia por daño en DETAIL: {damage_presence}")
     print("Barrido del área mínima (fracción de la foto): negativas que pasan / válidas rechazadas")
     for area, rows in sweep.items():
         verdicts = verdict(rows)

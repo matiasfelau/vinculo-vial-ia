@@ -34,10 +34,11 @@ from numpy.typing import NDArray
 
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
-from vvi_ia.domain.model import RED_CODES, Mask
+from vvi_ia.domain.model import Mask
 from vvi_ia.domain.ramp import (
     DrivewayCheck,
     DrivewayMeasure,
+    RampOutcome,
     driveway_check,
     driveway_overlap,
     ramp_reason,
@@ -370,7 +371,7 @@ def outcome(measure: DrivewayMeasure, t_low: float, t_high: float) -> str:
     reason = ramp_reason(measure, t_low, t_high)
     if reason is None:
         return "GREEN"
-    return "RED" if reason in RED_CODES else "YELLOW"
+    return "RED" if reason == RampOutcome.NOT_DETECTED else "YELLOW"
 
 
 def baseline_rows(

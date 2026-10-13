@@ -104,7 +104,7 @@ class FakeUseCase:
 
 
 def _result(
-    verdict: Verdict = Verdict.YELLOW, codes: tuple[ReasonCode, ...] = (ReasonCode.PLATE_FUZZY,)
+    verdict: Verdict = Verdict.RED, codes: tuple[ReasonCode, ...] = (ReasonCode.PLATE_MISMATCH,)
 ) -> ValidationResult:
     return ValidationResult(
         verdict=verdict,
@@ -181,12 +181,12 @@ async def test_publica_con_confirm_y_recien_despues_hace_ack() -> None:
 
     assert rig.order == ["publish_event", "ack"]
     routing_key, body, message_id, correlation_id = rig.publisher.events[0]
-    assert routing_key == "ia.evidence.validated.yellow"
+    assert routing_key == "ia.evidence.validated.red"
     assert correlation_id == "corr-1"
     assert json.loads(body)["eventId"] == message_id
 
 
-@pytest.mark.parametrize("verdict", [Verdict.GREEN, Verdict.YELLOW, Verdict.RED])
+@pytest.mark.parametrize("verdict", [Verdict.GREEN, Verdict.RED])
 async def test_la_routing_key_lleva_el_veredicto_en_minusculas(verdict: Verdict) -> None:
     rig = Rig(_result(verdict, ()))
 
@@ -197,8 +197,8 @@ async def test_la_routing_key_lleva_el_veredicto_en_minusculas(verdict: Verdict)
 
 async def test_el_evento_de_salida_respeta_el_contrato() -> None:
     result = ValidationResult(
-        verdict=Verdict.YELLOW,
-        reason_codes=(ReasonCode.PLATE_FUZZY,),
+        verdict=Verdict.RED,
+        reason_codes=(ReasonCode.PLATE_MISMATCH,),
         scores=Scores(burst_similarity=0.91, ocr_confidence=0.93, context_confidence=None),
         model_versions={"detector": "d1", "ocr": "o1"},
         redacted=(RedactedRef(EvidenceRole.GENERAL, 0, "alerts/x/redacted/general-0.jpg"),),
@@ -216,8 +216,8 @@ async def test_el_evento_de_salida_respeta_el_contrato() -> None:
     assert event["payload"] == {
         "alert_id": rig.payload.alert_id,
         "causation_event_id": str(event_id),
-        "verdict": "YELLOW",
-        "reason_codes": ["PLATE_FUZZY"],
+        "verdict": "RED",
+        "reason_codes": ["PLATE_MISMATCH"],
         "scores": {"burst_similarity": 0.91, "ocr_confidence": 0.93, "context_confidence": None},
         "model_versions": {"detector": "d1", "ocr": "o1"},
         "redacted": [{"role": "GENERAL", "index": 0, "key": "alerts/x/redacted/general-0.jpg"}],

@@ -1,5 +1,4 @@
 import logging
-from dataclasses import replace
 
 import pytest
 
@@ -89,92 +88,12 @@ def _null_models() -> Models:
     )
 
 
-# --- camino feliz y adaptador null ------------------------------------------------------
-
-
-@pytest.mark.parametrize("alert_type", [CRASHED, GARAGE])
-def test_caso_feliz_es_green(alert_type: AlertType) -> None:
-    result = _run(build_scenario(alert_type))
-
-    assert result.verdict == Verdict.GREEN
-    assert result.reason_codes == ()
-    assert len(result.redacted) == 3
-    assert result.scores.burst_similarity is not None
-    assert result.scores.ocr_confidence == pytest.approx(0.95)
-    assert result.scores.context_confidence is not None
-
-
-@pytest.mark.parametrize("alert_type", [CRASHED, GARAGE])
-def test_todo_none_da_red_por_redaccion_no_disponible(alert_type: AlertType) -> None:
-    result = _run(build_scenario(alert_type), _null_models())
-
-    assert result.verdict == Verdict.RED  # sin modelos de redacción no hay veredicto aprobable
-    assert _codes(result) == {
-        R.BURST_UNCERTAIN,
-        R.PLATE_UNREADABLE,
-        R.CONTEXT_UNCERTAIN,
-        R.REDACTION_UNAVAILABLE,
-    }
-    assert result.redacted == ()
-    assert set(result.model_versions) == {
-        "detector",
-        "segmenter",
-        "embedder",
-        "ocr",
-        "damage",
-        "curb",
-        "face",
-    }
-    assert set(result.model_versions.values()) == {"null"}
-
-
-def test_un_none_nunca_produce_fraude() -> None:
-    models = happy_models()
-    models.vehicle.by_marker[GENERAL] = None
-
-    result = _run(build_scenario(), models)
-
-    assert not is_fraud(result.reason_codes)
-    assert result.verdict == Verdict.RED and R.REDACTION_UNAVAILABLE in result.reason_codes
-
-
-def test_las_versiones_de_modelo_viajan_en_el_resultado() -> None:
-    result = _run(build_scenario())
-
-    assert result.model_versions["detector"] == "fake-detector"
-    assert result.model_versions["ocr"] == "fake-ocr"
-
-
-def test_reprocesar_es_idempotente() -> None:
-    scenario = build_scenario(GARAGE)
-
-    assert _run(scenario) == _run(scenario)
-
-
-# --- E1: vehículo -----------------------------------------------------------------------
-
-
-def test_ningun_auto_es_no_vehicle_y_corta_la_cascada() -> None:
-    models = happy_models()
-    models.vehicle.by_marker[GENERAL] = [plate_box()]
-    models.cars.by_marker[GENERAL] = []
-
-    result = _run(build_scenario(), models)
-
-    assert result.verdict == Verdict.RED
-    assert result.reason_codes == (R.NO_VEHICLE,)
-    assert models.plate.calls == 0
-    assert is_fraud(result.reason_codes)
-
-
-# --- E1: presencia de auto en TODAS las fotos -----------------------------------------------------
-
-
 def _only(
     models: FakeModels, marker: int, boxes: list[Box] | None, cars: list[CarInstance] | None
 ) -> FakeModels:
     models.vehicle.by_marker[marker] = boxes
     models.cars.by_marker[marker] = cars
+    models.damage.by_marker[marker] = []  # el daño solo cuenta en DETAIL y acá se prueba la falta de partes
     return models
 
 
@@ -245,37 +164,12 @@ def test_una_patente_poco_confiable_no_cuenta_como_parte_del_auto() -> None:
     assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
 
 
-def test_si_ningun_modelo_responde_no_hay_veredicto_de_fraude() -> None:
-    models = _only(happy_models(), detail_marker(0), None, None)
-
-    result = _run(build_scenario(), models)
-
-    assert R.NO_VEHICLE not in _codes(result) and R.BURST_UNCERTAIN in _codes(result)
-
-
-def test_si_un_modelo_falla_y_el_otro_no_ve_nada_tampoco_se_decide() -> None:
-    models = _only(happy_models(), detail_marker(0), None, [])
-
-    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
-
-
 def test_el_corte_por_falta_de_auto_no_corre_el_resto_de_la_cascada() -> None:
     models = _only(happy_models(), detail_marker(0), [], [])
 
     _run(build_scenario(), models)
 
     assert models.plate.calls == 0 and models.damage.by_marker  # sin lectura de patente ni redacción
-
-
-def test_detector_sin_modelo_en_general_es_burst_uncertain() -> None:
-    models = happy_models()
-    models.vehicle.by_marker[GENERAL] = None
-    models.cars.by_marker[GENERAL] = None  # si el segmentador ve el auto, la presencia queda resuelta
-
-    assert R.BURST_UNCERTAIN in _codes(_run(build_scenario(), models))
-
-
-# --- E1b: ráfaga ------------------------------------------------------------------------
 
 
 def test_mismo_auto_en_ambas_fotos_no_agrega_codigos() -> None:
@@ -293,64 +187,6 @@ def test_autos_distintos_son_burst_mismatch() -> None:
     assert result.scores.burst_similarity == pytest.approx(0.17, abs=0.01)
 
 
-def test_similitud_intermedia_es_burst_uncertain() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)
-
-    result = _run(build_scenario(), models)
-
-    assert result.verdict == Verdict.YELLOW
-    assert _codes(result) == {R.BURST_UNCERTAIN}
-
-
-@pytest.mark.parametrize("missing", ["embedder", "general_cars", "plate_cars", "general_empty"])
-def test_cualquier_none_en_la_rafaga_es_uncertain(missing: str) -> None:
-    models = happy_models()
-    if missing == "embedder":
-        models.embedder.by_marker_area[(GENERAL, 6400)] = None
-    elif missing == "general_cars":
-        models.cars.by_marker[GENERAL] = None
-    elif missing == "plate_cars":
-        models.cars.by_marker[PLATE] = None
-    else:
-        models.cars.by_marker[GENERAL] = []
-
-    assert _codes(_run(build_scenario(), models)) == {R.BURST_UNCERTAIN}
-
-
-def test_plate_sin_auto_cruza_el_ocr_y_coincide() -> None:
-    models = happy_models()
-    models.cars.by_marker[PLATE] = []
-
-    assert _run(build_scenario(), models).verdict == Verdict.GREEN
-
-
-def test_plate_sin_auto_y_lecturas_distintas_es_burst_mismatch() -> None:
-    models = happy_models()
-    models.cars.by_marker[PLATE] = []
-    models.plate.by_marker[GENERAL] = ("ZZ999ZZ", 0.9)
-
-    assert R.BURST_MISMATCH in _codes(_run(build_scenario(), models))
-
-
-@pytest.mark.parametrize(
-    "general_read",
-    [None, ("ZZ999ZZ", 0.3), ("", 0.9)],
-)
-def test_plate_sin_auto_y_lecturas_no_comparables_es_uncertain(
-    general_read: tuple[str, float] | None,
-) -> None:
-    models = happy_models()
-    models.cars.by_marker[PLATE] = []
-    models.plate.by_marker[GENERAL] = general_read
-
-    assert R.BURST_UNCERTAIN in _codes(_run(build_scenario(), models))
-    assert R.BURST_MISMATCH not in _codes(_run(build_scenario(), models))
-
-
-# --- E2: patente ------------------------------------------------------------------------
-
-
 def test_patente_distinta_es_plate_mismatch() -> None:
     models = happy_models()
     models.plate.by_marker[PLATE] = ("ZZ999ZZ", 0.95)
@@ -359,34 +195,6 @@ def test_patente_distinta_es_plate_mismatch() -> None:
 
     assert result.verdict == Verdict.RED
     assert _codes(result) == {R.PLATE_MISMATCH}
-
-
-def test_patente_con_un_caracter_de_diferencia_es_plate_fuzzy() -> None:
-    models = happy_models()
-    models.plate.by_marker[PLATE] = (REPORTED_PLATE[:-1] + "9", 0.95)
-
-    result = _run(build_scenario(), models)
-
-    assert result.verdict == Verdict.YELLOW
-    assert _codes(result) == {R.PLATE_FUZZY}
-
-
-@pytest.mark.parametrize("read", [None, (REPORTED_PLATE, 0.2), ("", 0.9)])
-def test_patente_ilegible(read: tuple[str, float] | None) -> None:
-    models = happy_models()
-    models.plate.by_marker[PLATE] = read
-
-    result = _run(build_scenario(), models)
-
-    assert result.verdict == Verdict.YELLOW
-    assert _codes(result) == {R.PLATE_UNREADABLE}
-
-
-def test_sin_caja_de_patente_en_plate_es_plate_unreadable() -> None:
-    models = happy_models()
-    models.vehicle.by_marker[PLATE] = []
-
-    assert _codes(_run(build_scenario(), models)) == {R.PLATE_UNREADABLE}
 
 
 def test_se_lee_la_caja_de_patente_de_mayor_confianza() -> None:
@@ -404,90 +212,6 @@ def test_se_lee_la_caja_de_patente_de_mayor_confianza() -> None:
     _run(build_scenario(), models)
 
     assert (20, 50) in seen  # recorte ajustado de la caja de 0.99, sin padding
-
-
-def test_patente_y_rafaga_fallidas_acumulan_codigos() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(80)
-    models.plate.by_marker[PLATE] = ("ZZ999ZZ", 0.95)
-
-    assert _codes(_run(build_scenario(), models)) == {R.BURST_MISMATCH, R.PLATE_MISMATCH}
-
-
-# --- E3: contexto (CRASHED) -------------------------------------------------------------
-
-
-def test_dano_bajo_el_umbral_es_context_not_detected() -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = [Box(0, 0, 9, 9, 0.39)]
-
-    result = _run(build_scenario(), models)
-
-    assert result.verdict == Verdict.RED  # el problema ausente es RED, pero no es fraude
-    assert _codes(result) == {R.CONTEXT_NOT_DETECTED}
-
-
-@pytest.mark.parametrize(
-    ("confidence", "expected"),
-    [
-        (0.95, set()),  # desde T_HIGH: el daño está
-        (0.80, {R.CONTEXT_UNCERTAIN}),  # entre los dos umbrales: dudoso
-        (0.69, {R.CONTEXT_NOT_DETECTED}),  # bajo T_LOW el adaptador no devuelve nada: el daño no está
-    ],
-)
-def test_los_dos_umbrales_de_dano_deciden_el_codigo(confidence: float, expected: set[R]) -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = [Box(0, 0, 9, 9, confidence)]
-    scenario = build_scenario()
-    use_case = ValidateEvidence(
-        store=scenario.store,
-        writer=FakeWriter(),
-        decryptor=scenario.decryptor,
-        decoder=scenario.decoder,
-        renderer=JpegRenderer(),
-        models=models.as_models(),
-        thresholds=replace(THRESHOLDS, damage_t_low=0.70, damage_t_high=0.90),
-        redaction=REDACTION,
-    )
-
-    assert _codes(use_case.execute(scenario.payload)) == expected
-
-
-def test_sin_cajas_de_dano_es_context_not_detected() -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = []
-
-    assert _codes(_run(build_scenario(), models)) == {R.CONTEXT_NOT_DETECTED}
-
-
-def test_detector_de_dano_sin_modelo_es_context_uncertain() -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = None
-
-    assert _codes(_run(build_scenario(), models)) == {R.CONTEXT_UNCERTAIN}
-
-
-def test_basta_una_foto_de_detalle_con_dano() -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = []
-    models.damage.by_marker[detail_marker(1)] = [Box(0, 0, 9, 9, 0.2)]
-    models.damage.by_marker[detail_marker(2)] = [Box(0, 0, 9, 9, 0.7)]
-
-    result = _run(build_scenario(CRASHED, details=3), models)
-
-    assert result.verdict == Verdict.GREEN
-    assert result.scores.context_confidence == pytest.approx(0.7)
-
-
-def test_un_detalle_sin_modelo_y_otro_vacio_es_uncertain() -> None:
-    models = happy_models()
-    models.damage.by_marker[detail_marker(0)] = None
-    models.damage.by_marker[detail_marker(1)] = []
-
-    assert _codes(_run(build_scenario(CRASHED, details=2), models)) == {R.CONTEXT_UNCERTAIN}
-
-
-# --- E1c: re-identificación de DETAIL y CONTEXT contra GENERAL -----------------------------------------
 
 
 def _detail_with_car(models: FakeModels, angle: float | None, index: int = 0) -> FakeModels:
@@ -510,12 +234,6 @@ def test_un_detalle_de_otro_auto_es_burst_mismatch() -> None:
     assert result.verdict == Verdict.RED and is_fraud(result.reason_codes)
 
 
-def test_un_detalle_con_similitud_intermedia_es_burst_uncertain() -> None:
-    result = _run(build_scenario(), _detail_with_car(happy_models(), 55))
-
-    assert _codes(result) == {R.BURST_UNCERTAIN} and result.verdict == Verdict.YELLOW
-
-
 def test_el_mismatch_se_detecta_en_cualquiera_de_los_detalles() -> None:
     models = _detail_with_car(_detail_with_car(happy_models(), 5, 0), 85, 2)
 
@@ -526,26 +244,6 @@ def test_un_detalle_sin_auto_segmentado_no_se_compara() -> None:
     models = happy_models()  # en un primer plano no se segmenta ningún auto
 
     assert _codes(_run(build_scenario(), models)) == set()
-
-
-def test_un_detalle_cuyo_segmentador_falla_es_burst_uncertain() -> None:
-    models = happy_models()
-    models.cars.by_marker[detail_marker(0)] = None
-
-    assert _codes(_run(build_scenario(), models)) == {R.BURST_UNCERTAIN}
-
-
-def test_un_detalle_sin_embedding_es_burst_uncertain() -> None:
-    assert _codes(_run(build_scenario(), _detail_with_car(happy_models(), None))) == {R.BURST_UNCERTAIN}
-
-
-def test_sin_embedding_de_general_no_se_comparan_los_detalles() -> None:
-    models = _detail_with_car(happy_models(), 85)
-    models.cars.by_marker[
-        GENERAL
-    ] = []  # sin auto en GENERAL: la ráfaga ya es dudosa y no hay con qué comparar
-
-    assert _codes(_run(build_scenario(), models)) == {R.BURST_UNCERTAIN}
 
 
 def test_el_contexto_de_otro_auto_es_burst_mismatch() -> None:
@@ -570,151 +268,6 @@ def test_el_embedding_del_contexto_se_calcula_una_sola_vez_por_auto() -> None:
     _run(build_scenario(GARAGE), models)
 
     assert calls.count(CONTEXT) == 2  # los dos autos del contexto, una vez cada uno
-
-
-# --- E3: contexto (PARKED_ON_GARAGE) ----------------------------------------------------
-
-
-def _garage_models(target: CarInstance, area: int) -> FakeModels:
-    models = happy_models()
-    models.cars.by_marker[CONTEXT] = [target, CarInstance(rect(20, 40, 0, 20))]
-    models.embedder.by_marker_area[(CONTEXT, area)] = vec(5)
-    return models
-
-
-def test_auto_sobre_el_rebaje_es_green() -> None:
-    assert _run(build_scenario(GARAGE)).verdict == Verdict.GREEN
-
-
-def test_contacto_exacto_es_context_uncertain() -> None:
-    # el auto empieza justo donde termina el rebaje (80): solape 0 → marginal
-    models = _garage_models(CarInstance(rect(40, 80, 80, 98)), 40 * 18)
-
-    result = _run(build_scenario(GARAGE), models)
-
-    assert _codes(result) == {R.CONTEXT_UNCERTAIN}
-
-
-@pytest.mark.parametrize(
-    ("t_low", "t_high", "expected"),
-    [
-        (-0.2, -0.1, set()),  # el solape (~ -0,05) llega a T_HIGH: bloquea con claridad
-        (-0.08, 0.08, {R.CONTEXT_UNCERTAIN}),  # entre los dos umbrales: dudoso
-        (0.01, 0.08, {R.CONTEXT_NOT_DETECTED}),  # bajo T_LOW: el auto no bloquea
-    ],
-)
-def test_los_dos_umbrales_de_la_rampa_deciden_el_codigo(
-    t_low: float, t_high: float, expected: set[R]
-) -> None:
-    models = _garage_models(CarInstance(rect(40, 80, 80, 98)), 40 * 18)  # solape 0
-    scenario = build_scenario(GARAGE)
-    use_case = ValidateEvidence(
-        store=scenario.store,
-        writer=FakeWriter(),
-        decryptor=scenario.decryptor,
-        decoder=scenario.decoder,
-        renderer=JpegRenderer(),
-        models=models.as_models(),
-        thresholds=replace(THRESHOLDS, ramp_t_low=t_low, ramp_t_high=t_high),
-        redaction=REDACTION,
-    )
-
-    assert _codes(use_case.execute(scenario.payload)) == expected
-
-
-def test_auto_lejos_del_rebaje_es_context_not_detected() -> None:
-    models = _garage_models(CarInstance(rect(40, 80, 90, 99)), 40 * 9)
-
-    assert _codes(_run(build_scenario(GARAGE), models)) == {R.CONTEXT_NOT_DETECTED}
-
-
-def test_sin_rebaje_es_context_not_detected() -> None:
-    models = happy_models()
-    models.curb.by_marker[CONTEXT] = (rect(80, 86, 0, 100), rect(0, 0, 0, 0))
-
-    assert _codes(_run(build_scenario(GARAGE), models)) == {R.CONTEXT_NOT_DETECTED}
-
-
-@pytest.mark.parametrize("missing", ["curb", "cars", "no_cars"])
-def test_contexto_sin_modelo_o_sin_autos_es_uncertain(missing: str) -> None:
-    models = happy_models()
-    if missing == "curb":
-        models.curb.by_marker[CONTEXT] = None
-    elif missing == "cars":
-        models.cars.by_marker[CONTEXT] = None
-    else:
-        models.cars.by_marker[CONTEXT] = []
-
-    codes = _codes(_run(build_scenario(GARAGE), models))
-
-    assert R.CONTEXT_UNCERTAIN in codes and not codes & {
-        R.NO_VEHICLE,
-        R.BURST_MISMATCH,
-        R.CONTEXT_NOT_DETECTED,
-    }
-
-
-def test_el_objetivo_es_el_auto_que_mas_se_parece_a_plate_o_general() -> None:
-    models = happy_models()
-    # El auto chico (que no bloquea) se parece más a la referencia; el grande queda lejos
-    models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(70)
-    models.embedder.by_marker_area[(CONTEXT, 400)] = vec(2)
-    models.curb.by_marker[CONTEXT] = (rect(80, 86, 0, 20) | rect(80, 86, 81, 100), rect(80, 86, 20, 81))
-    models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 30, 70)), CarInstance(rect(60, 80, 0, 20))]
-    models.embedder.by_marker_area[(CONTEXT, 20 * 20)] = vec(2)
-
-    assert _codes(_run(build_scenario(GARAGE), models)) == {R.CONTEXT_NOT_DETECTED}
-
-
-def test_mejor_coseno_bajo_reid_t_low_es_burst_mismatch_y_context_uncertain() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(85)
-    models.embedder.by_marker_area[(CONTEXT, 400)] = vec(90)
-
-    result = _run(build_scenario(GARAGE), models)
-
-    assert _codes(result) == {
-        R.CONTEXT_UNCERTAIN,
-        R.BURST_MISMATCH,
-    }  # ningún auto del contexto es el reportado
-    assert result.verdict == Verdict.RED
-
-
-def test_sin_embedder_y_mas_de_un_auto_es_context_uncertain() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area = {}
-
-    assert R.CONTEXT_UNCERTAIN in _codes(_run(build_scenario(GARAGE), models))
-
-
-def test_sin_embedder_y_un_solo_auto_se_evalua_ese_auto() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area = {}
-    models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 30, 70))]
-
-    result = _run(build_scenario(GARAGE), models)
-
-    assert R.CONTEXT_UNCERTAIN not in _codes(result)
-    assert R.CONTEXT_NOT_DETECTED not in _codes(result)
-
-
-def test_la_escala_usa_las_ruedas_dentro_del_objetivo() -> None:
-    # Solape de 1 px: con la escala de respaldo (margen 1.4 px) es marginal; con una rueda
-    # de 4 px de alto dentro del objetivo (margen 0.32 px) es bloqueo.
-    def models_with(wheel: Box | None) -> FakeModels:
-        models = happy_models()
-        models.vehicle.by_marker[CONTEXT] = [car_box(), *([wheel] if wheel else [])]
-        models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 79, 95))]
-        models.embedder.by_marker_area[(CONTEXT, 40 * 16)] = vec(5)
-        return models
-
-    wheel = Box(85, 60, 89, 64, 0.9, BoxLabel.WHEEL)
-
-    assert _codes(_run(build_scenario(GARAGE), models_with(None))) == {R.CONTEXT_UNCERTAIN}
-    assert _run(build_scenario(GARAGE), models_with(wheel)).verdict == Verdict.GREEN
-
-
-# --- evidencia ilegible -----------------------------------------------------------------
 
 
 def test_sha256_distinto_es_evidence_unreadable() -> None:
@@ -759,9 +312,6 @@ def test_evidence_unreadable_no_es_fraude() -> None:
     scenario.corrupt_sha(EvidenceRole.GENERAL)
 
     assert not is_fraud(_run(scenario).reason_codes)
-
-
-# --- errores del sistema y transitorios -------------------------------------------------
 
 
 def test_pat_enc_ia_que_no_descifra_es_error_del_sistema() -> None:
@@ -811,9 +361,6 @@ def test_la_patente_se_canonicaliza_antes_de_comparar() -> None:
     assert _run(scenario).verdict == Verdict.GREEN
 
 
-# --- privacidad en logs -----------------------------------------------------------------
-
-
 def test_los_logs_no_contienen_la_patente_ni_el_texto_del_ocr(caplog: pytest.LogCaptureFixture) -> None:
     models = happy_models()
     ocr_text = "OCRSECRET9"
@@ -843,7 +390,7 @@ def test_el_log_final_trae_los_campos_permitidos(caplog: pytest.LogCaptureFixtur
     record = next(r for r in caplog.records if r.getMessage() == "validación completada")
     assert record.__dict__["alert_id"] == scenario.alert_id
     assert record.__dict__["verdict"] == "GREEN"
-    assert set(record.__dict__["durations_ms"]) >= {"load", "burst", "plate", "context"}
+    assert set(record.__dict__["durations_ms"]) >= {"load", "vehicle", "burst", "plate"}
     assert record.__dict__["model_versions"]["detector"] == "fake-detector"
 
 
@@ -860,3 +407,275 @@ def test_objeto_que_supera_el_tope_es_evidence_unreadable_sin_correr_modelos() -
     assert models.vehicle.calls == 0
     assert result.redacted == ()
     assert not is_fraud(result.reason_codes)
+
+
+def test_las_versiones_de_modelo_viajan_en_el_resultado() -> None:
+    result = _run(build_scenario())
+
+    assert result.model_versions["detector"] == "fake-detector"
+    assert result.model_versions["ocr"] == "fake-ocr"
+
+
+def test_reprocesar_es_idempotente() -> None:
+    scenario = build_scenario(GARAGE)
+
+    assert _run(scenario) == _run(scenario)
+
+
+def test_un_none_nunca_produce_fraude() -> None:
+    models = happy_models()
+    models.vehicle.by_marker[GENERAL] = None
+
+    result = _run(build_scenario(), models)
+
+    assert not is_fraud(result.reason_codes)
+    assert result.verdict == Verdict.RED and R.REDACTION_UNAVAILABLE in result.reason_codes
+
+
+# --- verdicto GREEN/RED: reglas R1 a R5 ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("alert_type", [CRASHED, GARAGE])
+def test_caso_feliz_es_green_sin_codigos(alert_type: AlertType) -> None:
+    result = _run(build_scenario(alert_type))
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+    assert len(result.redacted) == 3
+    assert result.scores.burst_similarity is not None
+    assert result.scores.ocr_confidence == pytest.approx(0.95)
+    assert result.scores.context_confidence is None  # ya no hay chequeo de contexto ni de daño
+
+
+@pytest.mark.parametrize("alert_type", [CRASHED, GARAGE])
+def test_sin_modelos_el_unico_rojo_es_redaccion_no_disponible(alert_type: AlertType) -> None:
+    result = _run(build_scenario(alert_type), _null_models())
+
+    assert result.verdict == Verdict.RED
+    assert _codes(result) == {R.REDACTION_UNAVAILABLE}  # R4; nada de lo dudoso suma códigos
+    assert result.redacted == () and not is_fraud(result.reason_codes)
+    assert set(result.model_versions) == {"detector", "segmenter", "embedder", "ocr", "damage", "face"}
+    assert set(result.model_versions.values()) == {"null"}
+
+
+def test_los_codigos_dudosos_ya_no_existen_y_el_veredicto_nunca_es_amarillo() -> None:
+    assert {v.value for v in Verdict} == {"GREEN", "RED"}
+    models = happy_models()
+    models.plate.by_marker[PLATE] = (REPORTED_PLATE[:-1] + "9", 0.95)  # casi igual
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+# --- R1: el daño solo cuenta como presencia en DETAIL --------------------------------------------------
+
+
+def _detail_without_part(models: FakeModels, damage: float | None) -> FakeModels:
+    marker = detail_marker(0)
+    models.vehicle.by_marker[marker] = []
+    models.cars.by_marker[marker] = []
+    models.damage.by_marker[marker] = [] if damage is None else [Box(0, 0, 9, 9, damage)]
+    return models
+
+
+def test_un_detalle_sin_partes_pero_con_dano_seguro_cuenta_como_presente() -> None:
+    models = _detail_without_part(happy_models(), 0.80)  # THRESHOLDS.damage_presence_t = 0,70
+
+    assert _run(build_scenario(), models).reason_codes == ()
+
+
+def test_un_dano_poco_confiable_no_alcanza_como_presencia() -> None:
+    models = _detail_without_part(happy_models(), 0.60)
+
+    assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_el_dano_no_cuenta_como_presencia_en_plate_ni_en_general() -> None:
+    for marker in (PLATE, GENERAL):
+        models = _only(happy_models(), marker, [], [])
+        models.damage.by_marker[marker] = [Box(0, 0, 90, 90, 0.99)]
+
+        assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_el_dano_no_hace_rojo_a_un_detalle_valido_y_su_ausencia_tampoco() -> None:
+    models = happy_models()
+    models.damage.by_marker[detail_marker(0)] = []  # el problema "ausente" ya no es un veredicto
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+def test_el_detector_de_danos_sin_modelo_no_penaliza() -> None:
+    models = happy_models()
+    models.damage.by_marker[detail_marker(0)] = None
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+# --- R1: modelos que no responden ---------------------------------------------------------------------
+
+
+def test_si_ningun_modelo_responde_no_hay_no_vehicle() -> None:
+    models = _only(happy_models(), detail_marker(0), None, None)
+    models.damage.by_marker[detail_marker(0)] = None
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_si_un_modelo_falla_y_el_otro_no_ve_nada_tampoco_se_decide() -> None:
+    models = _only(happy_models(), detail_marker(0), None, [])
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_detector_sin_modelo_en_general_no_penaliza() -> None:
+    models = happy_models()
+    models.vehicle.by_marker[GENERAL] = None
+    models.cars.by_marker[GENERAL] = None
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_ningun_auto_es_no_vehicle_y_corta_la_cascada() -> None:
+    models = happy_models()
+    models.vehicle.by_marker[GENERAL] = [plate_box()]
+    models.cars.by_marker[GENERAL] = []
+
+    result = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.RED and result.reason_codes == (R.NO_VEHICLE,)
+    assert models.plate.calls == 0 and is_fraud(result.reason_codes)
+
+
+# --- R2: re-ID, solo con confirmación ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("angle", [55, 48])  # coseno 0,57 y 0,67: entre 0,50 y 0,70 (antes: dudoso)
+def test_una_similitud_intermedia_es_green(angle: float) -> None:
+    models = happy_models()
+    models.embedder.by_marker_area[(PLATE, 6400)] = vec(angle)
+
+    result = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+
+
+def test_sin_embedding_o_sin_auto_segmentado_no_se_compara_y_es_green() -> None:
+    for marker in (PLATE, GENERAL):
+        models = happy_models()
+        models.embedder.by_marker_area[(marker, 6400)] = None
+
+        assert _run(build_scenario(), models).verdict == Verdict.GREEN
+    models = happy_models()
+    models.cars.by_marker[PLATE] = []  # PLATE sin auto segmentado: no hay con qué comparar
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+def test_un_detalle_con_similitud_intermedia_es_green() -> None:
+    assert _run(build_scenario(), _detail_with_car(happy_models(), 55)).verdict == Verdict.GREEN
+
+
+def test_un_detalle_sin_embedding_o_con_segmentador_caido_es_green() -> None:
+    assert _run(build_scenario(), _detail_with_car(happy_models(), None)).verdict == Verdict.GREEN
+    models = happy_models()
+    models.cars.by_marker[detail_marker(0)] = None
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+def test_el_umbral_de_reid_es_uno_solo() -> None:
+    from dataclasses import replace
+
+    models = happy_models()
+    models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)  # coseno 0,57
+    scenario = build_scenario()
+
+    def verdict_with(t: float) -> Verdict:
+        use_case = ValidateEvidence(
+            store=scenario.store,
+            writer=FakeWriter(),
+            decryptor=scenario.decryptor,
+            decoder=scenario.decoder,
+            renderer=JpegRenderer(),
+            models=models.as_models(),
+            thresholds=replace(THRESHOLDS, reid_t=t),
+            redaction=REDACTION,
+        )
+        return use_case.execute(scenario.payload).verdict
+
+    assert verdict_with(0.50) == Verdict.GREEN and verdict_with(0.60) == Verdict.RED
+
+
+# --- R3: patente, solo una lectura segura que no coincide ---------------------------------------------
+
+
+def test_una_patente_casi_igual_es_green() -> None:
+    models = happy_models()
+    models.plate.by_marker[PLATE] = (REPORTED_PLATE[:-1] + "9", 0.95)
+
+    result = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+
+
+@pytest.mark.parametrize("read", [None, ("ZZ999ZZ", 0.30), (REPORTED_PLATE, 0.50)])
+def test_una_patente_ilegible_o_poco_segura_es_green(read: tuple[str, float] | None) -> None:
+    models = happy_models()
+    models.plate.by_marker[PLATE] = read
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+def test_sin_caja_de_patente_en_plate_es_green() -> None:
+    models = happy_models()
+    models.vehicle.by_marker[PLATE] = [car_box()]  # el auto sin ninguna patente que leer
+
+    result = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.GREEN
+    assert result.scores.ocr_confidence is None
+
+
+def test_plate_sin_auto_segmentado_no_cruza_lecturas() -> None:
+    models = happy_models()
+    models.cars.by_marker[PLATE] = []
+    models.plate.by_marker[GENERAL] = ("ZZ999ZZ", 0.95)  # antes, otra lectura en GENERAL daba BURST_MISMATCH
+
+    assert _run(build_scenario(), models).verdict == Verdict.GREEN
+
+
+def test_patente_mismatch_y_otro_auto_acumulan_codigos_de_fraude() -> None:
+    models = happy_models()
+    models.plate.by_marker[PLATE] = ("ZZ999ZZ", 0.95)
+    models.embedder.by_marker_area[(PLATE, 6400)] = vec(85)
+
+    result = _run(build_scenario(), models)
+
+    assert _codes(result) == {R.PLATE_MISMATCH, R.BURST_MISMATCH} and is_fraud(result.reason_codes)
+
+
+# --- el contexto ya no se evalúa --------------------------------------------------------------------
+
+
+def test_el_modelo_de_rebajes_no_se_consulta_ni_hace_falta() -> None:
+    models = happy_models()
+    models.curb.by_marker[CONTEXT] = None  # sin rebaje, sin modelo, o con un auto lejos: da igual
+
+    result = _run(build_scenario(GARAGE), models)
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+
+
+def test_un_contexto_con_el_auto_lejos_del_rebaje_es_green() -> None:
+    models = happy_models()
+    models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 90, 99)), CarInstance(rect(20, 40, 0, 20))]
+    models.embedder.by_marker_area[(CONTEXT, 40 * 9)] = vec(5)
+
+    assert _run(build_scenario(GARAGE), models).verdict == Verdict.GREEN
+
+
+def test_un_contexto_sin_embedder_es_green() -> None:
+    models = happy_models()
+    models.embedder.by_marker_area[(CONTEXT, 1600)] = None
+    models.embedder.by_marker_area[(CONTEXT, 400)] = None
+
+    assert _run(build_scenario(GARAGE), models).verdict == Verdict.GREEN
