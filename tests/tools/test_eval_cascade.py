@@ -183,3 +183,46 @@ def test_readable_plates_usa_la_foto_preparada(tmp_path: Path) -> None:
     )
 
     assert seen == [original] and found == [(prepared, b"AB123CD")]
+
+
+def test_el_proxy_de_rebajes_arma_un_rebaje_bajo_el_auto() -> None:
+    car = np.zeros((100, 200), bool)
+    car[20:60, 50:150] = True
+    segmenter = SimpleNamespace(cars=lambda img: [SimpleNamespace(mask=car)])
+    proxy = cascade.CurbCostProxy(segmenter)
+
+    curb, cut = proxy.curb(np.zeros((100, 200, 3), np.uint8))
+
+    assert cut[60:66, 50:150].all() and not cut[:60].any() and not cut[:, :50].any()
+    assert curb[60:66, :50].all() and not (curb & cut).any()
+
+
+def test_has_part_acepta_autos_ruedas_o_patentes_grandes_y_rechaza_el_resto() -> None:
+    image = np.zeros((100, 100, 3), np.uint8)
+
+    def models(boxes: list[Box], seg: list[int]) -> SimpleNamespace:
+        cars = [
+            SimpleNamespace(mask=np.pad(np.ones((s, s), bool), ((0, 100 - s), (0, 100 - s)))) for s in seg
+        ]
+        return SimpleNamespace(
+            vehicle=SimpleNamespace(detect=lambda img: boxes), cars=SimpleNamespace(cars=lambda img: cars)
+        )
+
+    wheel = Box(0, 0, 40, 40, 0.9, BoxLabel.WHEEL)
+    assert cascade.has_part(models([wheel], []), image, 0.05)
+    assert not cascade.has_part(models([Box(0, 0, 10, 10, 0.9, BoxLabel.WHEEL)], []), image, 0.05)  # chica
+    assert not cascade.has_part(
+        models([Box(0, 0, 40, 40, 0.3, BoxLabel.PLATE)], []), image, 0.05
+    )  # poco confiable
+    assert cascade.has_part(models([], [30]), image, 0.05)  # un auto segmentado
+
+
+def test_duration_capture_guarda_tambien_el_veredicto() -> None:
+    capture = cascade.DurationCapture()
+    logger = logging.getLogger("test_cascade_capture_verdict")
+    logger.addHandler(capture)
+    logger.setLevel(logging.INFO)
+
+    logger.info("validación", extra={"durations_ms": {"load": 1.0}, "verdict": "GREEN"})
+
+    assert capture.verdict == "GREEN"
