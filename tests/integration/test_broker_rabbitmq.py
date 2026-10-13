@@ -162,7 +162,7 @@ async def test_evento_valido_publica_el_veredicto_y_vacia_la_cola(channel: Abstr
         await consumer.stop()
 
     event: dict[str, Any] = json.loads(message.body)
-    assert message.routing_key == "ia.evidence.validated.yellow"
+    assert message.routing_key == "ia.evidence.validated.red"
     assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
     assert event["payload"]["alert_id"] == payload.alert_id
     assert event["payload"]["verdict"] == "RED"
