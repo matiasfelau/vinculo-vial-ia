@@ -230,7 +230,7 @@ def test_seleccionado_por_entorno_carga_la_sesion_y_segmenta(tmp_path: Path) -> 
 
     models = build_models({"curb": MODEL_NAME}, manifest, models_dir)
 
-    assert models.versions()["curb"] == f"{MODEL_NAME}@{hashlib.sha256(weights).hexdigest()[:12]}"
+    assert models.curb.version == f"{MODEL_NAME}@{hashlib.sha256(weights).hexdigest()[:12]}"
     result = models.curb.curb(photo(40, 60))
     assert result is not None
     curb, cut = result

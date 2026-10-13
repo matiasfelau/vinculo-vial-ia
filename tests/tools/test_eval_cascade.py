@@ -1,4 +1,4 @@
-"""tools/eval/cascade.py: armado de alertas, estadísticas, proxy de rebajes y medición con modelos falsos."""
+"""tools/eval/cascade.py: armado de alertas, estadísticas y medición con modelos falsos."""
 
 import importlib.util
 import logging
@@ -71,17 +71,6 @@ def test_photos_in_solo_toma_imagenes(tmp_path: Path) -> None:
     (tmp_path / "notas.txt").write_text("x", encoding="utf-8")
 
     assert [p.name for p in cascade.photos_in(tmp_path)] == ["a.png", "b.jpg"]
-
-
-def test_el_proxy_de_rebajes_gasta_una_pasada_y_devuelve_mascaras_vacias() -> None:
-    calls = []
-    segmenter = SimpleNamespace(cars=lambda img: calls.append(img.shape))
-    proxy = cascade.CurbCostProxy(segmenter)
-
-    curb, cut = proxy.curb(np.zeros((8, 12, 3), np.uint8))
-
-    assert calls == [(8, 12, 3)]
-    assert curb.shape == cut.shape == (8, 12) and not curb.any() and not cut.any()
 
 
 def test_duration_capture_guarda_las_ultimas_duraciones() -> None:
@@ -183,18 +172,6 @@ def test_readable_plates_usa_la_foto_preparada(tmp_path: Path) -> None:
     )
 
     assert seen == [original] and found == [(prepared, b"AB123CD")]
-
-
-def test_el_proxy_de_rebajes_arma_un_rebaje_bajo_el_auto() -> None:
-    car = np.zeros((100, 200), bool)
-    car[20:60, 50:150] = True
-    segmenter = SimpleNamespace(cars=lambda img: [SimpleNamespace(mask=car)])
-    proxy = cascade.CurbCostProxy(segmenter)
-
-    curb, cut = proxy.curb(np.zeros((100, 200, 3), np.uint8))
-
-    assert cut[60:66, 50:150].all() and not cut[:60].any() and not cut[:, :50].any()
-    assert curb[60:66, :50].all() and not (curb & cut).any()
 
 
 def test_has_part_acepta_autos_ruedas_o_patentes_grandes_y_rechaza_el_resto() -> None:

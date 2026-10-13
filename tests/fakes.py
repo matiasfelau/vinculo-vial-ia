@@ -75,16 +75,11 @@ def plate_box(conf: float = 0.9) -> Box:
 
 
 THRESHOLDS = Thresholds(
-    reid_t_low=0.50,
-    reid_t_high=0.70,
+    reid_t=0.50,
     ocr_min_conf=0.60,
-    damage_t_low=0.70,
-    damage_t_high=0.70,
+    damage_presence_t=0.70,
     presence_min_area=0.05,
     presence_plate_min_conf=0.40,
-    ramp_t_low=-0.08,
-    ramp_t_high=0.08,
-    ramp_scale_fallback=0.45,
 )
 
 

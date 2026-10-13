@@ -1,6 +1,7 @@
 """Adaptadores nulos: todos los puertos devuelven `None` ("no hay modelo").
 
-Es el único adaptador de US-08. Con ellos la cascada termina en YELLOW sin versión redactada.
+Es el único adaptador de US-08. Con ellos no hay evidencia que penalizar, pero sin redacción disponible el
+veredicto es RED (REDACTION_UNAVAILABLE).
 """
 
 from vvi_ia.domain.model import Box, CarInstance, Mask, Pixels, Vector

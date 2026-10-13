@@ -317,13 +317,8 @@ def test_con_todos_los_modelos_en_none_no_hay_version_redactada() -> None:
 
     result, writer = _run(build_scenario(), null_models)
 
-    assert result.verdict == Verdict.RED  # la cascada daba YELLOW; sin redacción no se aprueba
-    assert set(result.reason_codes) == {
-        ReasonCode.BURST_UNCERTAIN,
-        ReasonCode.PLATE_UNREADABLE,
-        ReasonCode.CONTEXT_UNCERTAIN,
-        ReasonCode.REDACTION_UNAVAILABLE,
-    }
+    assert result.verdict == Verdict.RED  # sin redacción no se aprueba
+    assert set(result.reason_codes) == {ReasonCode.REDACTION_UNAVAILABLE}
     _unavailable(result, writer)
 
 
@@ -348,13 +343,13 @@ def test_evidencia_ilegible_no_genera_version_redactada() -> None:
     _nothing_uploaded(result, writer)
 
 
-def test_yellow_si_genera_version_redactada() -> None:
+def test_una_patente_casi_igual_es_green_y_genera_version_redactada() -> None:
     models = happy_models()
-    models.plate.by_marker[PLATE] = (REPORTED_PLATE[:-1] + "9", 0.95)  # PLATE_FUZZY
+    models.plate.by_marker[PLATE] = (REPORTED_PLATE[:-1] + "9", 0.95)  # casi igual
 
     result, writer = _run(build_scenario(), models)
 
-    assert result.verdict == Verdict.YELLOW
+    assert result.verdict == Verdict.GREEN
     assert len(writer.puts) == 3
 
 
@@ -452,7 +447,7 @@ def test_sin_modelos_y_sin_redaccion_requerida_sube_todo_para_probar_el_visor() 
 
     result, writer = _run(build_scenario(), null_models, redaction=replace(REDACTION, required=False))
 
-    assert result.verdict == Verdict.YELLOW
+    assert result.verdict == Verdict.GREEN
     assert len(result.redacted) == 3
     assert len(writer.puts) == 3
 

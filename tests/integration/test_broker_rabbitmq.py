@@ -51,7 +51,7 @@ class CountingUseCase:
 
 
 def _ok(_: int) -> ValidationResult:
-    return ValidationResult(verdict=Verdict.YELLOW, reason_codes=(ReasonCode.PLATE_FUZZY,))
+    return ValidationResult(verdict=Verdict.RED, reason_codes=(ReasonCode.PLATE_MISMATCH,))
 
 
 def _always_transient(_: int) -> ValidationResult:
@@ -165,7 +165,7 @@ async def test_evento_valido_publica_el_veredicto_y_vacia_la_cola(channel: Abstr
     assert message.routing_key == "ia.evidence.validated.yellow"
     assert message.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
     assert event["payload"]["alert_id"] == payload.alert_id
-    assert event["payload"]["verdict"] == "YELLOW"
+    assert event["payload"]["verdict"] == "RED"
     assert use_case.calls == 1
     assert (await (await channel.get_queue(QUEUE)).declare()).message_count == 0
 

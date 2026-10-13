@@ -1,5 +1,9 @@
 """Caso de uso: orquesta la cascada de validación y devuelve un `ValidationResult`.
 
+El veredicto es solo GREEN o RED. RED únicamente con evidencia firme: falta el auto en alguna foto (R1), otro
+auto confirmado por la re-ID (R2), una patente leída con seguridad que no coincide (R3), evidencia ilegible o
+redacción no disponible (R4). Todo lo dudoso o que no se puede comparar es GREEN (R5).
+
 Todo el contenido sensible (patente, texto del OCR, embeddings, imágenes) vive solo en RAM
 mientras dura `execute`. Se loguean únicamente `alert_id`, veredicto, códigos, duraciones y versiones.
 """
@@ -14,7 +18,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 from vvi_ia.domain.model import (
-    AlertType,
     Box,
     BoxLabel,
     CarInstance,
@@ -38,7 +41,6 @@ from vvi_ia.domain.ports import (
     PlateReader,
     VehicleDetector,
 )
-from vvi_ia.domain.ramp import driveway_overlap, ramp_reason, wheel_diameter
 from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
 from vvi_ia.domain.reid import ReidOutcome, best_match, same_vehicle
 from vvi_ia.domain.verdict import aggregate
@@ -69,7 +71,7 @@ class Models:
 
     vehicle: VehicleDetector
     cars: CarSegmenter
-    curb: CurbSegmenter
+    curb: CurbSegmenter  # EXPERIMENTAL: fuera de la cascada; se arma solo si MODEL_CURB no está vacío
     embedder: Embedder
     plate: PlateReader
     damage: DamageDetector
@@ -83,7 +85,6 @@ class Models:
             "embedder": self.embedder.version,
             "ocr": self.plate.version,
             "damage": self.damage.version,
-            "curb": self.curb.version,
             "face": self.face.version,
         }
 
@@ -92,18 +93,13 @@ class Models:
 class Thresholds:
     """Umbrales del dominio (los de cada modelo viven en su adaptador)."""
 
-    reid_t_low: float
-    reid_t_high: float
-    ocr_min_conf: float
-    damage_t_low: float  # confianza de daño bajo la cual el daño no está (RED)
-    damage_t_high: float  # confianza desde la cual el daño está con claridad
+    reid_t: float  # coseno bajo el cual la re-ID confirma que es otro auto (BURST_MISMATCH)
+    ocr_min_conf: float  # lectura segura de patente: con menos confianza no hay veredicto de patente
+    damage_presence_t: float  # confianza de una caja de daño para contar como presencia de auto en DETAIL
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
     presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
-    ramp_t_low: float  # solape (en escalas de rueda) debajo del cual el auto no bloquea: RED
-    ramp_t_high: float  # solape desde el cual el auto bloquea con claridad: sin observación
-    ramp_scale_fallback: float
 
 
 @dataclass(frozen=True)
@@ -258,10 +254,8 @@ class ValidateEvidence:
             )
         with _timed(durations, "plate"):
             ocr_conf = self._plate(run, plate_img, reported, codes)
-        with _timed(durations, "context"):
-            context_conf = self._context(run, payload.alert_type, by_role, codes)
 
-        scores = Scores(burst_similarity=similarity, ocr_confidence=ocr_conf, context_confidence=context_conf)
+        scores = Scores(burst_similarity=similarity, ocr_confidence=ocr_conf)
         redacted: tuple[RedactedRef, ...] = ()
         if aggregate(codes) != Verdict.RED:
             with _timed(durations, "redaction"):
@@ -305,16 +299,14 @@ class ValidateEvidence:
     # --- etapas -------------------------------------------------------------------------
 
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
-        """E1. `False` si falta el auto en alguna foto (RED): el resto de la cascada no tiene sentido.
+        """R1. `False` si en alguna foto no hay evidencia de un auto (RED, fraude): se corta la cascada.
 
-        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente).
-        Si los modelos no responden no se puede decidir y la foto suma `BURST_UNCERTAIN`.
+        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente) y,
+        en DETAIL, también cuenta una caja de daño con confianza suficiente. Solo hay NO_VEHICLE si todos los
+        modelos consultados respondieron y ninguno encontró nada; si no se pudo decidir, no se penaliza.
         """
         for image in images:
-            found = self._has_car(run, image)
-            if found is None:
-                _add(codes, ReasonCode.BURST_UNCERTAIN)
-            elif not found:
+            if self._has_car(run, image) is False:
                 _add(codes, ReasonCode.NO_VEHICLE)
                 return False
         return True
@@ -322,12 +314,12 @@ class ValidateEvidence:
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
         """¿Hay un auto (o una parte, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
 
-        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, o una
-        instancia de auto del segmentador. `None` si no se pudo decidir (sin hallazgos y sin un modelo).
+        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, una
+        instancia de auto del segmentador o, en DETAIL, una caja de daño. `None` si no se pudo decidir (sin
+        hallazgos y algún modelo sin respuesta).
         """
-        labels = {BoxLabel.CAR}
-        if image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL):
-            labels |= {BoxLabel.WHEEL, BoxLabel.PLATE}
+        part = image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL)
+        labels = {BoxLabel.CAR} | ({BoxLabel.WHEEL, BoxLabel.PLATE} if part else set())
         minimum = self._t.presence_min_area * image.width * image.height
         detections = run.detect(image)
         for box in detections or ():
@@ -337,162 +329,75 @@ class ValidateEvidence:
         cars = run.segment_cars(image)
         if any(int(car.mask.sum()) >= minimum for car in cars or ()):
             return True
-        return False if detections is not None and cars is not None else None
+        answered = detections is not None and cars is not None
+        if image.role == EvidenceRole.DETAIL:
+            damage = self._models.damage.detect(image.pixels)
+            if any(box.conf >= self._t.damage_presence_t for box in damage or ()):
+                return True
+            answered = answered and damage is not None
+        return False if answered else None
 
     def _burst(
         self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage, codes: Codes
     ) -> float | None:
-        """E1b: ¿GENERAL y PLATE muestran el mismo auto? Devuelve la similitud si se calculó."""
+        """R2: ¿GENERAL y PLATE muestran el mismo auto? Devuelve la similitud si se calculó.
+
+        Solo hay BURST_MISMATCH si la re-ID confirma que es otro auto; si no se puede comparar (falta el auto
+        segmentado o el embedding), no hay código.
+        """
         general_cars = run.segment_cars(general)
         plate_cars = run.segment_cars(plate_img)
-        if not general_cars or plate_cars is None:
-            _add(codes, ReasonCode.BURST_UNCERTAIN)
-            return None
-        if not plate_cars:
-            _add_all(codes, self._burst_by_ocr(run, general, plate_img))
+        if not general_cars or not plate_cars:
             return None
         emb_general = run.embed(general, 0, largest_car(general_cars))
         emb_plate = run.embed(plate_img, 0, largest_car(plate_cars))
         run.general_embedding = emb_general
         if emb_general is None or emb_plate is None:
-            _add(codes, ReasonCode.BURST_UNCERTAIN)
             return None
         run.reference_embeddings.extend((emb_general, emb_plate))
-        result = same_vehicle(emb_general, emb_plate, self._t.reid_t_low, self._t.reid_t_high)
-        if result.outcome == ReidOutcome.UNCERTAIN:
-            _add(codes, ReasonCode.BURST_UNCERTAIN)
-        elif result.outcome == ReidOutcome.DIFFERENT:
+        result = same_vehicle(emb_general, emb_plate, self._t.reid_t, self._t.reid_t)
+        if result.outcome == ReidOutcome.DIFFERENT:
             _add(codes, ReasonCode.BURST_MISMATCH)
         return result.similarity
 
     def _reid_others(
         self, run: _Run, general: EvidenceImage, others: Sequence[EvidenceImage], codes: Codes
     ) -> None:
-        """E1c: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
+        """R2: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
 
         De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
-        segmenta ningún auto (un primer plano de la carrocería) no se puede comparar y no suma ningún código.
+        segmenta ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
         """
         if run.general_embedding is None:
             return
         for image in others:
-            cars = run.segment_cars(image)
-            if cars is None:
-                _add(codes, ReasonCode.BURST_UNCERTAIN)
-                continue
-            candidates = [run.embed(image, index, car) for index, car in enumerate(cars)]
-            if any(candidate is None for candidate in candidates):
-                _add(codes, ReasonCode.BURST_UNCERTAIN)
-                continue
-            match = best_match([c for c in candidates if c is not None], [run.general_embedding])
+            candidates = [
+                embedding
+                for index, car in enumerate(run.segment_cars(image) or ())
+                if (embedding := run.embed(image, index, car)) is not None
+            ]
+            match = best_match(candidates, [run.general_embedding])
             if match is None:
                 continue
             outcome = same_vehicle(
-                run.general_embedding,
-                [c for c in candidates if c is not None][match[0]],
-                self._t.reid_t_low,
-                self._t.reid_t_high,
+                run.general_embedding, candidates[match[0]], self._t.reid_t, self._t.reid_t
             ).outcome
             if outcome == ReidOutcome.DIFFERENT:
                 _add(codes, ReasonCode.BURST_MISMATCH)
-            elif outcome == ReidOutcome.UNCERTAIN:
-                _add(codes, ReasonCode.BURST_UNCERTAIN)
-
-    def _burst_by_ocr(self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage) -> Codes:
-        """PLATE sin auto detectable: se cruzan las lecturas de patente de ambas fotos."""
-        first, second = run.read_plate(general), run.read_plate(plate_img)
-        if first is None or second is None:
-            return [ReasonCode.BURST_UNCERTAIN]
-        text = canonicalize(first.text)
-        if not text or first.conf < self._t.ocr_min_conf:
-            return [ReasonCode.BURST_UNCERTAIN]
-        check = plate_check(text, second.text, second.conf, self._t.ocr_min_conf)
-        if check == PlateCheck.UNREADABLE:
-            return [ReasonCode.BURST_UNCERTAIN]
-        return [ReasonCode.BURST_MISMATCH] if check == PlateCheck.MISMATCH else []
 
     def _plate(self, run: _Run, plate_img: EvidenceImage, reported: str, codes: Codes) -> float | None:
-        """E2: OCR de la patente de PLATE contra la patente reportada."""
+        """R3: OCR de la patente de PLATE contra la reportada.
+
+        Solo hay PLATE_MISMATCH con una lectura segura (confianza >= OCR_MIN_CONF) que no coincide. Una
+        lectura casi igual o ilegible no penaliza.
+        """
         read = run.read_plate(plate_img)
         if read is None:
-            _add(codes, ReasonCode.PLATE_UNREADABLE)
             return None
         check = plate_check(reported, read.text, read.conf, self._t.ocr_min_conf)
-        if check == PlateCheck.FUZZY:
-            _add(codes, ReasonCode.PLATE_FUZZY)
-        elif check == PlateCheck.MISMATCH:
+        if check == PlateCheck.MISMATCH:
             _add(codes, ReasonCode.PLATE_MISMATCH)
-        elif check == PlateCheck.UNREADABLE:
-            _add(codes, ReasonCode.PLATE_UNREADABLE)
         return read.conf
-
-    def _context(
-        self,
-        run: _Run,
-        alert_type: AlertType,
-        by_role: dict[EvidenceRole, list[EvidenceImage]],
-        codes: Codes,
-    ) -> float | None:
-        """E3: el daño (CRASHED) o el auto frente al rebaje (PARKED_ON_GARAGE)."""
-        if alert_type == AlertType.CRASHED:
-            return self._damage(by_role[EvidenceRole.DETAIL], codes)
-        return self._driveway(run, by_role[EvidenceRole.CONTEXT][0], codes)
-
-    def _damage(self, details: Sequence[EvidenceImage], codes: Codes) -> float | None:
-        best: float | None = None
-        any_unavailable = False
-        for image in details:
-            boxes = self._models.damage.detect(image.pixels)
-            if boxes is None:
-                any_unavailable = True
-                continue
-            for box in boxes:
-                if box.conf >= self._t.damage_t_low and (best is None or box.conf > best):
-                    best = box.conf
-        if best is None:
-            _add(codes, ReasonCode.CONTEXT_UNCERTAIN if any_unavailable else ReasonCode.CONTEXT_NOT_DETECTED)
-        elif best < self._t.damage_t_high:
-            _add(codes, ReasonCode.CONTEXT_UNCERTAIN)  # entre los dos umbrales: dudoso
-        return best
-
-    def _driveway(self, run: _Run, context: EvidenceImage, codes: Codes) -> float | None:
-        curb = self._models.curb.curb(context.pixels)
-        cars = run.segment_cars(context)
-        if curb is None or not cars:
-            _add(codes, ReasonCode.CONTEXT_UNCERTAIN)
-            return None
-        target, similarity = self._target_car(run, context, cars)
-        if target is None:
-            _add(codes, ReasonCode.CONTEXT_UNCERTAIN)
-            return similarity
-        wheels = [box for box in run.detect(context) or () if box.label == BoxLabel.WHEEL]
-        measure = driveway_overlap(
-            curb[0],
-            curb[1],
-            target.mask,
-            wheel_diam=wheel_diameter(wheels, target.mask),
-            scale_fallback=self._t.ramp_scale_fallback,
-        )
-        reason = ramp_reason(measure, self._t.ramp_t_low, self._t.ramp_t_high)
-        if reason is not None:
-            _add(codes, reason)
-        return similarity
-
-    def _target_car(
-        self, run: _Run, context: EvidenceImage, cars: Sequence[CarInstance]
-    ) -> tuple[CarInstance | None, float | None]:
-        """Auto objetivo: la instancia con mayor coseno contra el embedding de PLATE o GENERAL."""
-        if run.reference_embeddings:
-            embeddings = [run.embed(context, index, car) for index, car in enumerate(cars)]
-            if all(embedding is not None for embedding in embeddings):
-                match = best_match([e for e in embeddings if e is not None], run.reference_embeddings)
-                if match is None:
-                    return None, None
-                index, similarity = match
-                return (cars[index] if similarity >= self._t.reid_t_low else None), similarity
-        if len(cars) == 1:
-            return cars[0], None
-        return None, None
 
     # --- redacción (paso 8) --------------------------------------------------------------
 
@@ -599,8 +504,3 @@ class ValidateEvidence:
             model_versions=versions,
             redacted=redacted,
         )
-
-
-def _add_all(codes: Codes, new: Sequence[ReasonCode]) -> None:
-    for code in new:
-        _add(codes, code)

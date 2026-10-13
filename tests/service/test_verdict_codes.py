@@ -1,7 +1,6 @@
-"""Un escenario por cada código de veredicto: qué lo produce, de qué color es y si penaliza al emisor.
+"""Un escenario por cada código de veredicto y por cada caso que ya no pesa: el veredicto es solo GREEN o RED.
 
-Es la matriz de las reglas de decisión: un caso RED no termina verde ni amarillo, un caso amarillo no termina
-verde, y un caso válido (el feliz) no termina rojo.
+RED únicamente con evidencia firme (R1 a R4); lo dudoso o lo que no se puede comparar es GREEN (R5).
 """
 
 from collections.abc import Callable
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 import pytest
 
 from tests.fakes import (
-    CONTEXT,
     GENERAL,
     PLATE,
     REDACTION,
@@ -22,14 +20,12 @@ from tests.fakes import (
     build_scenario,
     detail_marker,
     happy_models,
-    rect,
     vec,
 )
 from vvi_ia.adapters.imaging import JpegRenderer
 from vvi_ia.domain.model import (
     FRAUD_CODES,
     AlertType,
-    CarInstance,
     EvidenceRole,
     ReasonCode,
     ValidationResult,
@@ -57,14 +53,14 @@ def run(scenario: Scenario, models: FakeModels) -> ValidationResult:
     return use_case.execute(scenario.payload)
 
 
-@dataclass(frozen=True)
-class Case:
-    """Cómo provocar un código: el tipo de alerta y cómo arreglar los modelos o la evidencia."""
+Arrange = Callable[[Scenario, FakeModels], None]
 
+
+@dataclass(frozen=True)
+class Red:
     alert: AlertType
-    arrange: Callable[[Scenario, FakeModels], None]
+    arrange: Arrange
     code: ReasonCode
-    verdict: Verdict
 
 
 def _no_vehicle(_: Scenario, models: FakeModels) -> None:
@@ -84,16 +80,38 @@ def _unreadable(scenario: Scenario, _: FakeModels) -> None:
     scenario.corrupt_sha(EvidenceRole.GENERAL)
 
 
-def _context_not_detected_damage(_: Scenario, models: FakeModels) -> None:
-    models.damage.by_marker[detail_marker(0)] = []
-
-
-def _context_not_detected_ramp(_: Scenario, models: FakeModels) -> None:
-    models.curb.by_marker[CONTEXT] = (rect(80, 86, 0, 100), rect(0, 0, 0, 0))  # sin tramo rebajado
-
-
 def _redaction_unavailable(_: Scenario, models: FakeModels) -> None:
     models.face.by_marker[GENERAL] = None
+
+
+RED = {
+    "NO_VEHICLE": Red(CRASHED, _no_vehicle, R.NO_VEHICLE),
+    "NO_VEHICLE (garage)": Red(GARAGE, _no_vehicle, R.NO_VEHICLE),
+    "BURST_MISMATCH": Red(CRASHED, _burst_mismatch, R.BURST_MISMATCH),
+    "PLATE_MISMATCH": Red(CRASHED, _plate_mismatch, R.PLATE_MISMATCH),
+    "EVIDENCE_UNREADABLE": Red(CRASHED, _unreadable, R.EVIDENCE_UNREADABLE),
+    "REDACTION_UNAVAILABLE": Red(CRASHED, _redaction_unavailable, R.REDACTION_UNAVAILABLE),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RED))
+def test_cada_codigo_rojo_se_produce_y_penaliza_solo_si_es_fraude(name: str) -> None:
+    case = RED[name]
+    scenario, models = build_scenario(case.alert), happy_models()
+    case.arrange(scenario, models)
+
+    result = run(scenario, models)
+
+    assert result.reason_codes == (case.code,)
+    assert result.verdict == Verdict.RED  # un caso RED nunca termina GREEN (regla A)
+    assert is_fraud(result.reason_codes) == (case.code in FRAUD_CODES)
+
+
+def test_todos_los_codigos_tienen_un_escenario() -> None:
+    assert {case.code for case in RED.values()} == set(ReasonCode)
+
+
+# --- R5: lo dudoso o lo que no se puede comparar es GREEN ---------------------------------------------
 
 
 def _plate_fuzzy(_: Scenario, models: FakeModels) -> None:
@@ -104,89 +122,73 @@ def _plate_unreadable(_: Scenario, models: FakeModels) -> None:
     models.plate.by_marker[PLATE] = (REPORTED_PLATE, 0.2)
 
 
-def _burst_uncertain(_: Scenario, models: FakeModels) -> None:
+def _plate_without_reading(_: Scenario, models: FakeModels) -> None:
+    models.plate.by_marker[PLATE] = None
+
+
+def _burst_in_between(_: Scenario, models: FakeModels) -> None:
     models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)
 
 
-def _context_uncertain_damage(_: Scenario, models: FakeModels) -> None:
-    models.damage.by_marker[detail_marker(0)] = None  # el detector de daños no responde
+def _burst_not_comparable(_: Scenario, models: FakeModels) -> None:
+    models.embedder.by_marker_area[(PLATE, 6400)] = None
 
 
-def _context_uncertain_ramp(_: Scenario, models: FakeModels) -> None:
-    models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 80, 98)), CarInstance(rect(20, 40, 0, 20))]
-    models.embedder.by_marker_area[(CONTEXT, 40 * 18)] = vec(5)  # el auto apenas toca el rebaje
+def _no_damage(_: Scenario, models: FakeModels) -> None:
+    models.damage.by_marker[detail_marker(0)] = []
 
 
-CASES = {
-    "NO_VEHICLE": Case(CRASHED, _no_vehicle, R.NO_VEHICLE, Verdict.RED),
-    "BURST_MISMATCH": Case(CRASHED, _burst_mismatch, R.BURST_MISMATCH, Verdict.RED),
-    "PLATE_MISMATCH": Case(CRASHED, _plate_mismatch, R.PLATE_MISMATCH, Verdict.RED),
-    "EVIDENCE_UNREADABLE": Case(CRASHED, _unreadable, R.EVIDENCE_UNREADABLE, Verdict.RED),
-    "CONTEXT_NOT_DETECTED (daño)": Case(
-        CRASHED, _context_not_detected_damage, R.CONTEXT_NOT_DETECTED, Verdict.RED
-    ),
-    "CONTEXT_NOT_DETECTED (rampa)": Case(
-        GARAGE, _context_not_detected_ramp, R.CONTEXT_NOT_DETECTED, Verdict.RED
-    ),
-    "REDACTION_UNAVAILABLE": Case(CRASHED, _redaction_unavailable, R.REDACTION_UNAVAILABLE, Verdict.RED),
-    "PLATE_FUZZY": Case(CRASHED, _plate_fuzzy, R.PLATE_FUZZY, Verdict.YELLOW),
-    "PLATE_UNREADABLE": Case(CRASHED, _plate_unreadable, R.PLATE_UNREADABLE, Verdict.YELLOW),
-    "BURST_UNCERTAIN": Case(CRASHED, _burst_uncertain, R.BURST_UNCERTAIN, Verdict.YELLOW),
-    "CONTEXT_UNCERTAIN (daño)": Case(CRASHED, _context_uncertain_damage, R.CONTEXT_UNCERTAIN, Verdict.YELLOW),
-    "CONTEXT_UNCERTAIN (rampa)": Case(GARAGE, _context_uncertain_ramp, R.CONTEXT_UNCERTAIN, Verdict.YELLOW),
+def _no_curb_model(_: Scenario, models: FakeModels) -> None:
+    models.curb.by_marker.clear()
+
+
+GREEN = {
+    "PLATE_FUZZY": _plate_fuzzy,
+    "PLATE_UNREADABLE": _plate_unreadable,
+    "OCR sin lectura": _plate_without_reading,
+    "BURST_UNCERTAIN": _burst_in_between,
+    "ráfaga que no se puede comparar": _burst_not_comparable,
+    "daño ausente": _no_damage,
+    "contexto sin modelo de rebajes": _no_curb_model,
 }
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_cada_codigo_se_produce_con_su_color(name: str) -> None:
-    case = CASES[name]
-    scenario, models = build_scenario(case.alert), happy_models()
-    case.arrange(scenario, models)
+@pytest.mark.parametrize("name", sorted(GREEN))
+@pytest.mark.parametrize("alert", [CRASHED, GARAGE])
+def test_lo_dudoso_o_incomparable_es_green_sin_codigos(name: str, alert: AlertType) -> None:
+    scenario, models = build_scenario(alert), happy_models()
+    GREEN[name](scenario, models)
 
     result = run(scenario, models)
 
-    assert case.code in result.reason_codes
-    assert result.verdict == case.verdict
-    assert is_fraud(result.reason_codes) == (case.code in FRAUD_CODES)
-
-
-def test_todos_los_codigos_tienen_un_escenario() -> None:
-    assert {case.code for case in CASES.values()} == set(ReasonCode)
+    assert (
+        result.verdict == Verdict.GREEN and result.reason_codes == ()
+    )  # regla C: el caso válido no termina rojo
+    assert len(result.redacted) == 3
 
 
 @pytest.mark.parametrize("alert", [CRASHED, GARAGE])
-def test_el_caso_valido_no_termina_rojo_ni_amarillo(alert: AlertType) -> None:
+def test_el_caso_valido_es_green(alert: AlertType) -> None:
     result = run(build_scenario(alert), happy_models())
 
     assert result.verdict == Verdict.GREEN and result.reason_codes == ()
 
 
-@pytest.mark.parametrize("name", sorted(n for n, c in CASES.items() if c.verdict == Verdict.RED))
-def test_un_caso_red_nunca_termina_verde_ni_amarillo(name: str) -> None:
-    case = CASES[name]
-    scenario, models = build_scenario(case.alert), happy_models()
-    case.arrange(scenario, models)
+def test_nunca_hay_yellow() -> None:
+    assert {verdict.value for verdict in Verdict} == {"GREEN", "RED"}
+    for name, arrange in GREEN.items():
+        scenario, models = build_scenario(CRASHED), happy_models()
+        arrange(scenario, models)
 
-    assert run(scenario, models).verdict == Verdict.RED
-
-
-@pytest.mark.parametrize("name", sorted(n for n, c in CASES.items() if c.verdict == Verdict.YELLOW))
-def test_un_caso_yellow_nunca_termina_verde(name: str) -> None:
-    case = CASES[name]
-    scenario, models = build_scenario(case.alert), happy_models()
-    case.arrange(scenario, models)
-
-    assert run(scenario, models).verdict != Verdict.GREEN
+        assert run(scenario, models).verdict in (Verdict.GREEN, Verdict.RED), name
 
 
-def test_red_gana_sobre_yellow_cuando_hay_los_dos() -> None:
+def test_varios_rojos_se_acumulan_sin_perder_el_fraude() -> None:
     scenario, models = build_scenario(CRASHED), happy_models()
-    _plate_fuzzy(scenario, models)
-    _plate_mismatch(
-        scenario, models
-    )  # el último arreglo pisa al anterior: queda un mismatch y una ráfaga dudosa
-    _burst_uncertain(scenario, models)
+    _plate_mismatch(scenario, models)
+    _burst_mismatch(scenario, models)
 
     result = run(scenario, models)
 
-    assert R.BURST_UNCERTAIN in result.reason_codes and result.verdict == Verdict.RED
+    assert set(result.reason_codes) == {R.PLATE_MISMATCH, R.BURST_MISMATCH}
+    assert result.verdict == Verdict.RED and is_fraud(result.reason_codes)

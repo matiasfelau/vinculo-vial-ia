@@ -150,3 +150,20 @@ def test_la_salida_dentro_del_repo_se_rechaza(tmp_path: Path, capsys: pytest.Cap
     )
 
     assert code == 1 and "repositorio" in capsys.readouterr().err
+
+
+def test_calibrate_damage_presence_pone_el_umbral_sobre_la_peor_negativa() -> None:
+    negatives = [{"damage": [[0.20, 0.1]]}, {"damage": [[0.9692, 0.3], [0.5, 0.1]]}, {}]
+    rejected = [{"damage": [[0.99, 0.2]]}, {"damage": [[0.50, 0.2]]}, {}]
+
+    result = presence.calibrate_damage_presence(negatives, rejected)
+
+    assert result["DAMAGE_PRESENCE_T"] == 0.97
+    assert result["negativas_que_pasan"] == 0 and result["cota_95"] == 1.0
+    assert result["detalles_recuperados"] == 1 and result["detalles_rechazados_por_las_otras_reglas"] == 3
+
+
+def test_calibrate_damage_presence_si_una_negativa_llega_a_uno_no_hay_umbral() -> None:
+    result = presence.calibrate_damage_presence([{"damage": [[1.0, 0.1]]}], [])
+
+    assert result["DAMAGE_PRESENCE_T"] is None

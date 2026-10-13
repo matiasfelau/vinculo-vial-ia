@@ -1,4 +1,7 @@
-"""Chequeo de rampa o rebaje: ¿el auto bloquea el tramo rebajado del cordón?
+"""EXPERIMENTAL, EN CONSTRUCCIÓN y fuera de la cascada: ¿el auto bloquea el tramo rebajado del cordón?
+
+No lo usa `ValidateEvidence`: el chequeo de rampa se sacó del veredicto. Queda para retomarlo cuando haya un
+modelo de rebajes entrenado con fotos propias.
 
 Sin chequeo de distancia al cordón (decisión explícita: el auto de enfrente es un riesgo aceptado).
 """
@@ -11,7 +14,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from vvi_ia.domain.model import Box, Mask, ReasonCode
+from vvi_ia.domain.model import Box, Mask
 
 _KERNEL_SIZE = 3
 _FIT_LINE_EPS = 0.01
@@ -98,18 +101,25 @@ def driveway_overlap(
     return DrivewayMeasure(None, float(overlap / scale))
 
 
-def ramp_reason(measure: DrivewayMeasure, t_low: float, t_high: float) -> ReasonCode | None:
-    """Código de razón de PARKED_ON_GARAGE según el solape: `None` si el auto bloquea con claridad.
+class RampOutcome(StrEnum):
+    """Lectura del solape con dos umbrales (experimental: ya no es parte del veredicto)."""
+
+    NOT_DETECTED = "NOT_DETECTED"  # sin rebaje, o el auto claramente aparte
+    UNCERTAIN = "UNCERTAIN"  # sin auto que medir, o entre los dos umbrales
+
+
+def ramp_reason(measure: DrivewayMeasure, t_low: float, t_high: float) -> RampOutcome | None:
+    """Lectura del solape: `None` si el auto bloquea con claridad.
 
     Sin auto no se puede medir (dudoso). Sin rebaje, o con el auto claramente aparte (`score < t_low`), el
-    problema no está (RED). Entre `t_low` y `t_high` es dudoso (YELLOW).
+    problema no está. Entre `t_low` y `t_high` es dudoso.
     """
     if measure.status == DrivewayCheck.NO_CAR:
-        return ReasonCode.CONTEXT_UNCERTAIN
+        return RampOutcome.UNCERTAIN
     if measure.status == DrivewayCheck.NO_DRIVEWAY or (measure.score is not None and measure.score < t_low):
-        return ReasonCode.CONTEXT_NOT_DETECTED
+        return RampOutcome.NOT_DETECTED
     if measure.score is not None and measure.score < t_high:
-        return ReasonCode.CONTEXT_UNCERTAIN
+        return RampOutcome.UNCERTAIN
     return None
 
 

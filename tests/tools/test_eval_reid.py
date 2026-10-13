@@ -325,8 +325,7 @@ def test_el_reporte_es_serializable_y_no_nombra_fotos() -> None:
 def test_los_valores_actuales_coinciden_con_los_de_la_config() -> None:
     from vvi_ia.config import Settings
 
-    assert reid.CURRENT_T_LOW == Settings.model_fields["reid_t_low"].default
-    assert reid.CURRENT_T_HIGH == Settings.model_fields["reid_t_high"].default
+    assert reid.CURRENT_T_LOW == Settings.model_fields["reid_t"].default
 
 
 def run_main(

@@ -30,46 +30,23 @@ class EvidenceRole(StrEnum):
 
 
 class Verdict(StrEnum):
-    """Semáforo del veredicto."""
+    """Veredicto de la IA: solo GREEN o RED. RED requiere evidencia firme; lo dudoso es GREEN."""
 
     GREEN = "GREEN"
-    YELLOW = "YELLOW"
     RED = "RED"
 
 
 class ReasonCode(StrEnum):
-    """Códigos de razón del veredicto (contrato compartido)."""
+    """Códigos de razón de un veredicto RED (contrato compartido). GREEN no lleva códigos."""
 
-    NO_VEHICLE = "NO_VEHICLE"
-    BURST_MISMATCH = "BURST_MISMATCH"
-    PLATE_MISMATCH = "PLATE_MISMATCH"
-    EVIDENCE_UNREADABLE = "EVIDENCE_UNREADABLE"
-    BURST_UNCERTAIN = "BURST_UNCERTAIN"
-    PLATE_FUZZY = "PLATE_FUZZY"
-    PLATE_UNREADABLE = "PLATE_UNREADABLE"
-    CONTEXT_NOT_DETECTED = "CONTEXT_NOT_DETECTED"
-    CONTEXT_UNCERTAIN = "CONTEXT_UNCERTAIN"
-    REDACTION_UNAVAILABLE = "REDACTION_UNAVAILABLE"
+    NO_VEHICLE = "NO_VEHICLE"  # R1: en alguna foto no hay evidencia de un auto (fraude)
+    BURST_MISMATCH = "BURST_MISMATCH"  # R2: la re-ID confirma que es otro auto (fraude)
+    PLATE_MISMATCH = "PLATE_MISMATCH"  # R3: lectura segura de una patente que no coincide (fraude)
+    EVIDENCE_UNREADABLE = "EVIDENCE_UNREADABLE"  # R4: foto ilegible, alterada o demasiado grande
+    REDACTION_UNAVAILABLE = "REDACTION_UNAVAILABLE"  # R4: no se pudo redactar todas las fotos
 
 
-RED_CODES: frozenset[ReasonCode] = frozenset(
-    {
-        ReasonCode.NO_VEHICLE,
-        ReasonCode.BURST_MISMATCH,
-        ReasonCode.PLATE_MISMATCH,
-        ReasonCode.CONTEXT_NOT_DETECTED,
-        ReasonCode.EVIDENCE_UNREADABLE,
-        ReasonCode.REDACTION_UNAVAILABLE,
-    }
-)
-YELLOW_CODES: frozenset[ReasonCode] = frozenset(
-    {
-        ReasonCode.BURST_UNCERTAIN,
-        ReasonCode.PLATE_FUZZY,
-        ReasonCode.PLATE_UNREADABLE,
-        ReasonCode.CONTEXT_UNCERTAIN,
-    }
-)
+RED_CODES: frozenset[ReasonCode] = frozenset(ReasonCode)
 FRAUD_CODES: frozenset[ReasonCode] = frozenset(
     {ReasonCode.NO_VEHICLE, ReasonCode.BURST_MISMATCH, ReasonCode.PLATE_MISMATCH}
 )

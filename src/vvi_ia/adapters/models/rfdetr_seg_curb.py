@@ -1,4 +1,7 @@
-"""Segmentador de cordón y rebaje: RF-DETR-Seg entrenado con el dataset propio (`curb` y `curb_cut`).
+"""EXPERIMENTAL y EN CONSTRUCCIÓN: el chequeo de rebajes está fuera de la cascada y deshabilitado por defecto
+(`MODEL_CURB` vacío: no se cargan pesos).
+
+Segmentador de cordón y rebaje: RF-DETR-Seg entrenado con el dataset propio (`curb` y `curb_cut`).
 
 Mismo preproceso y mismo ONNX (`dets`, `labels`, `masks`) que `rfdetr_seg`. Las columnas de `labels` son
 las dos clases, en el orden de `CLASSES` (el de `tools/training/curb/prepare.py`). Cada clase se devuelve como
