@@ -649,3 +649,16 @@ def test_evaluate_reconoce_el_candidato_con_mosaico() -> None:
 
     assert report["rfdetr+mosaico"]["commercial"] == "yes"
     assert report["rfdetr+mosaico"]["nombre"].endswith("+ mosaico")
+
+
+def test_el_barrido_imprime_solo_los_umbrales_pedidos(capsys: pytest.CaptureFixture[str]) -> None:
+    truths = {1: [(0, 0, 20, 20), (100, 100, 160, 160)]}
+    report = face.evaluate(truths, {"servicio": {1: [box(0, 0, 20, 20, 0.45), box(100, 100, 160, 160, 0.9)]}})
+
+    rows = face.sweep_rows(report["servicio"]["puntos"], 0.20, 0.50)
+    face.print_sweep(report, 0.20, 0.50)
+
+    assert [r["umbral"] for r in rows] == [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]
+    assert rows[0]["recall"] == 1.0 and rows[-1]["recall"] == 0.5  # a 0,50 se pierde la cara chica de 0,45
+    shown = capsys.readouterr().out
+    assert "Barrido de servicio" in shown and shown.count("\n") == 8

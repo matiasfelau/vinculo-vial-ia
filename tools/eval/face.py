@@ -424,6 +424,25 @@ def load_truths(
     return truths, {image["id"]: image["file_name"] for image in coco["images"]}
 
 
+def sweep_rows(points: Sequence[Mapping[str, Any]], low: float, high: float) -> list[Mapping[str, Any]]:
+    """Los puntos de operación con umbral entre `low` y `high` (inclusive)."""
+    return [row for row in points if low - 1e-9 <= row["umbral"] <= high + 1e-9]
+
+
+def print_sweep(candidates: Mapping[str, Mapping[str, Any]], low: float, high: float) -> None:
+    """Barrido del umbral de confianza: recall total y por tamaño frente a falsos positivos por foto."""
+    for name, data in candidates.items():
+        print(
+            f"Barrido de {name} (umbral · recall · chicas · medianas · grandes · falsos positivos por foto):"
+        )
+        for row in sweep_rows(data["puntos"], low, high):
+            sizes = row["recall_por_tamano"]
+            print(
+                f"  {row['umbral']:<5} {row['recall']!s:>7} {sizes['chicas']!s:>7} {sizes['medianas']!s:>7} "
+                f"{sizes['grandes']!s:>7}   {row['fp_por_foto']}"
+            )
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -459,6 +478,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=tuple(CANDIDATE_INFO),
         default=[],
         help="detectores a correr también por mosaico (se suman como <nombre>+mosaico)",
+    )
+    parser.add_argument(
+        "--sweep-from", type=float, default=0.20, help="umbral inicial del barrido que se imprime"
+    )
+    parser.add_argument(
+        "--sweep-to", type=float, default=0.50, help="umbral final del barrido que se imprime"
     )
     parser.add_argument("--tile-px", type=int, default=DEFAULT_TILE_PX, help="lado de cada tile")
     parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP, help="solape entre tiles (0 a 0,9)")
@@ -576,6 +601,7 @@ def main(
             f"{small['recall_chicas'] if small else '-':>16}{data['latencia_ms_mediana']:>7}"
         )
     print(f"Caras por tamaño: {report['caras_por_tamano']}")
+    print_sweep(report["candidatos"], args.sweep_from, args.sweep_to)
     for target in FP_TARGETS:
         print(
             f"Recall por tamaño con a lo sumo {target} falsos positivos por foto (y falsos positivos reales):"

@@ -444,6 +444,34 @@ Cómo leerlo:
 El criterio de [docs/modelos.md](../../docs/modelos.md) (que RF-DETR quede cerca de RetinaFace-R50) dio
 `rfdetr_queda: false` en WIDER (RF-DETR pierde 14 puntos a 0,1 falsos positivos) y `true` en Open Images.
 
+### 5b. Validación de `scrfd_10g` con el adaptador del servicio
+
+WIDER FACE val **completo** (`face_sets.py wider --sample 4000`: 3220 fotos con caras válidas y 32 596 caras de al
+menos 8 px; 23 000 chicas, 7 753 medianas y 1 843 grandes) y Open Images (prueba), con `--service-model scrfd_10g
+--service-tiling` y el barrido de `FACE_MIN_CONF` (`--sweep-from 0.20 --sweep-to 0.50`). Recall con IoU 0,5 o más:
+
+| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | falsos positivos por foto |
+|---|---|---|---|---|---|---|---|
+| 0,20 | 0,809 | 0,746 | 0,956 | 0,983 | 4,48 | 0,867 | 1,18 |
+| 0,25 | 0,787 | 0,716 | 0,951 | 0,983 | 2,67 | 0,867 | 0,81 |
+| **0,30** | 0,760 | 0,680 | 0,947 | 0,981 | 1,66 | 0,859 | 0,61 |
+| 0,35 | 0,728 | 0,637 | 0,941 | 0,978 | 1,03 | 0,859 | 0,49 |
+| 0,40 | 0,693 | 0,590 | 0,930 | 0,974 | 0,64 | 0,859 | 0,37 |
+| 0,50 | 0,615 | 0,486 | 0,914 | 0,967 | 0,25 | 0,852 | 0,29 |
+
+Con `FACE_TILING=true` (tiles de 640 px):
+
+| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | chicas (13) |
+|---|---|---|---|---|---|---|---|
+| 0,25 | 0,885 | 0,849 | 0,966 | 0,986 | 5,93 | 0,882 | 0,769 |
+| **0,30** | 0,869 | 0,829 | 0,961 | 0,984 | 3,88 | 0,874 | 0,769 |
+| 0,40 | 0,830 | 0,777 | 0,949 | 0,979 | 1,78 | 0,859 | 0,615 |
+
+Latencia por foto en CPU (Ryzen 5 3600): 105 ms en Open Images y 164 ms (p95 262) en WIDER sin mosaico;
+575 ms (p95 1,2 s) y 1 084 ms (p95 7,0 s) con mosaico. Las caras chicas son el punto débil (0,68 en WIDER y 0,62 en
+Open Images con 0,30), y el mosaico las sube unos 15 puntos a cambio de 5 a 6 veces la latencia y del doble de
+falsos positivos (que al tapar cuestan poco). Los falsos positivos de WIDER están inflados por caras sin anotar.
+
 ### 6. Configuración de redacción (provisoria)
 
 Con estos datos quedó como configuración de `.env.example` (y `PLATE_TILING=true` como default del código),
