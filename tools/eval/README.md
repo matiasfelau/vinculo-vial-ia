@@ -599,6 +599,25 @@ a 1600 px); `plate` hace lo mismo. Las fotos de 4000 × 3000 son reescalados de 
 (20 con las de ~1000 px) los p95 son orientativos. Carga y decodificación de una foto de 12 megapíxeles: unos
 50 ms cada una.
 
+#### Con presencia de auto y re-ID en todas las fotos
+
+Misma máquina, `PLATE_TILING=true`, `scrfd_10g` para rostros, redacción activa, rebajes simulados y la
+cascada completa: presencia de auto en cada foto (`NO_VEHICLE`), re-ID de detalles y contexto contra la general,
+redacción de todas las fotos. El banco afloja los umbrales (`--real-thresholds` los deja como están) para que las
+alertas recorran todas las etapas: las 90 alertas medidas terminaron verdes salvo 1 de 10 en la de 4000 px del
+garage. Medianas por alerta, una por vez, sin otros programas abiertos:
+
+| Fotos | CRASHED de 3 fotos | CRASHED de 5 fotos | PARKED_ON_GARAGE de 3 fotos |
+|---|---|---|---|
+| ~1000 px (20 alertas) | **11,8 s** (p95 12,7) | **19,4 s** (p95 23,6) | **10,5 s** (p95 12,3) |
+| 4000 × 3000 px (10 alertas) | **15,7 s** (p95 18,0) | **24,0 s** (p95 28,1) | **16,7 s** (p95 22,2) |
+
+Por etapa, con fotos de ~1000 px y 3 fotos (CRASHED): carga 32 ms, **vehículo (presencia) 7,6 s**, ráfaga y re-ID 2,3 s,
+patente 0,1 s, daño 0,6 s y redacción 0,7 s. La presencia es la etapa cara: corre el detector con mosaico en
+**cada** foto (unos 2,5 s por foto) y, cuando el detector no ve el auto, el segmentador. Sin el mosaico de patentes
+esa etapa baja a unos 0,3 s por foto. La re-ID suma una segmentación y un embedding por cada foto de detalle
+(unos 0,4 s). Con otro programa pesado abierto (un juego) las mismas corridas dieron tiempos mucho menos estables (hasta un 30 % de diferencia entre corridas).
+
 **Lo que no mide:** la red (descarga y subida a S3) ni el descifrado HPKE, que acá son en memoria. Las fotos de
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
 También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.

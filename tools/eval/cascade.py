@@ -25,6 +25,7 @@ import statistics
 import sys
 import time
 import uuid
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +51,14 @@ SELECTION = {
     "embedder": "dinov2_vits14",
     "ocr": "parseq",
     "damage": "rfdetr_cardd",
+}
+RELAXED = {
+    "reid_t_low": -1.0,
+    "reid_t_high": -1.0,
+    "damage_t_low": 0.0,
+    "damage_t_high": 0.0,
+    "ramp_t_low": -1e9,
+    "ramp_t_high": -1e9,
 }
 PLATE_READ_CONF = 0.9  # la patente reportada tiene que ser la que lee el OCR con seguridad
 MIN_READABLE = 12
@@ -78,17 +87,33 @@ class MemoryStore:
 
 
 class CurbCostProxy:
-    """`curb` que gasta lo mismo que el modelo real (una pasada RF-DETR-Seg) y devuelve máscaras vacías."""
+    """`curb` que gasta lo mismo que el modelo real (una pasada RF-DETR-Seg) y arma un rebaje bajo el auto.
+
+    Las máscaras salen del auto más grande: un cordón de 6 px bajo él y, sobre el ancho del auto, el tramo
+    rebajado. Así el auto bloquea el rebaje y la cascada sigue por el camino verde (con la redacción).
+    """
 
     version = "curb-proxy"
+    STRIP_PX = 6
+    STRIP_FRACTION = (
+        0.02  # alto del cordón como fracción del alto de la foto (para que el rebaje no sea diminuto)
+    )
 
     def __init__(self, segmenter: Any) -> None:
         self._segmenter = segmenter
 
     def curb(self, img: Pixels) -> tuple[Any, Any] | None:
-        self._segmenter.cars(img)
-        empty = np.zeros(img.shape[:2], np.bool_)
-        return empty, empty
+        cars = self._segmenter.cars(img) or []
+        curb = np.zeros(img.shape[:2], np.bool_)
+        cut = np.zeros(img.shape[:2], np.bool_)
+        if cars:
+            ys, xs = np.nonzero(max(cars, key=lambda car: int(car.mask.sum())).mask)
+            strip = max(self.STRIP_PX, round(self.STRIP_FRACTION * img.shape[0]))
+            bottom = min(int(ys.max()) + 1, img.shape[0] - strip)
+            curb[bottom : bottom + strip, :] = True
+            cut[bottom : bottom + strip, int(xs.min()) : int(xs.max()) + 1] = True
+            curb &= ~cut
+        return curb, cut
 
 
 class DurationCapture(logging.Handler):
@@ -97,11 +122,13 @@ class DurationCapture(logging.Handler):
     def __init__(self) -> None:
         super().__init__()
         self.last: dict[str, float] = {}
+        self.verdict = ""
 
     def emit(self, record: logging.LogRecord) -> None:
         durations = getattr(record, "durations_ms", None)
         if durations is not None:
             self.last = dict(durations)
+            self.verdict = str(getattr(record, "verdict", ""))
 
 
 def resized_copy(path: Path, long_side: int, folder: Path) -> Path:
@@ -160,6 +187,19 @@ def summarize(values: Sequence[float]) -> dict[str, float]:
     }
 
 
+def has_part(models: Any, image: Pixels, min_area: float) -> bool:
+    """Lo mismo que la presencia del servicio para PLATE y DETAIL: un auto, una rueda o una patente."""
+    minimum = min_area * image.shape[0] * image.shape[1]
+    labels = {BoxLabel.CAR, BoxLabel.WHEEL, BoxLabel.PLATE}
+    boxes = models.vehicle.detect(image) or ()
+    if any(
+        b.label in labels and b.area >= minimum and (b.label != BoxLabel.PLATE or b.conf >= 0.4)
+        for b in boxes
+    ):
+        return True
+    return any(int(car.mask.sum()) >= minimum for car in models.cars.cars(image) or ())
+
+
 def readable_plates(
     models: Any,
     pool: Sequence[Path],
@@ -210,6 +250,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="PLATE_TILING (por defecto on, como el servicio)",
     )
     parser.add_argument(
+        "--real-thresholds",
+        action="store_true",
+        help="usar los umbrales reales (con fotos de prueba casi todas terminan en RED y saltan etapas)",
+    )
+    parser.add_argument(
         "--long-side",
         type=int,
         help="reescala las fotos a este lado mayor en px (p. ej. 4000 para fotos de celular de 4000 x 3000)",
@@ -240,6 +285,7 @@ def run_scenario(
     totals: list[float] = []
     stages: dict[str, list[float]] = {stage: [] for stage in STAGES}
     redacted = 0
+    verdicts: Counter[str] = Counter()
     for layout in layouts:
         payload = build_alert(alert_type, layout, store)
         start = time.perf_counter()
@@ -248,10 +294,12 @@ def run_scenario(
         for stage in STAGES:
             stages[stage].append(capture.last.get(stage, 0.0))
         redacted += "redaction" in capture.last
+        verdicts[capture.verdict] += 1
         store.objects.clear()
     return {
         "alertas": len(totals),
         "con_redaccion": redacted,
+        "veredictos": dict(verdicts),
         "ms_por_alerta": summarize(totals),
         "ms_medianos_por_etapa": {s: round(statistics.median(v)) for s, v in stages.items()},
     }
@@ -268,8 +316,11 @@ def main(argv: list[str] | None = None) -> int:
         if not pool or Path(folders[name]).resolve().is_relative_to(REPO_ROOT):
             print(f"No hay fotos de {name} en {folders[name]} (o está dentro del repo).", file=sys.stderr)
             return 1
+    # Salvo con --real-thresholds, los umbrales se aflojan para que la cascada recorra todas las etapas
+    # (incluida la redacción): se mide el camino completo, no los veredictos.
+    relaxed = {} if args.real_thresholds else RELAXED
     settings = Settings.model_construct(
-        redaction_required=not args.no_redaction, plate_tiling=args.plate_tiling == "on"
+        redaction_required=not args.no_redaction, plate_tiling=args.plate_tiling == "on", **relaxed
     )
     selection = dict(SELECTION)
     try:
@@ -293,6 +344,7 @@ def main(argv: list[str] | None = None) -> int:
         redaction=build_redaction(settings),
     )
     capture = DurationCapture()
+    decoder = CvImageDecoder()
     logging.getLogger("vvi_ia.service.validate_evidence").addHandler(capture)
     logging.getLogger("vvi_ia.service.validate_evidence").setLevel(logging.INFO)
     rng = random.Random(args.seed)  # noqa: S311 - muestreo de fotos, no criptografía
@@ -303,15 +355,29 @@ def main(argv: list[str] | None = None) -> int:
 
     readable = readable_plates(models, pools["autos"], rng, args.alerts, prepare)
 
+    present: dict[Path, bool] = {}
+
+    def shows_a_part(path: Path) -> bool:
+        """La foto de detalle pasa la presencia de auto (si no, la cascada se cortaría antes de tiempo)."""
+        if path not in present:
+            present[path] = has_part(models, decoder.decode(path.read_bytes()), settings.presence_min_area)
+        return present[path]
+
+    def pick_detail() -> Path:
+        while True:
+            path = prepare(rng.choice(pools["daños"]))
+            if shows_a_part(path):
+                return path
+
     def layouts(kind: str, details: int = 1) -> list[Layout]:
         out = []
         for _ in range(args.alerts):
             car, plate = rng.choice(readable)
             photos = {EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car]}
             if kind == "crashed":
-                photos[EvidenceRole.DETAIL] = [prepare(rng.choice(pools["daños"])) for _ in range(details)]
+                photos[EvidenceRole.DETAIL] = [pick_detail() for _ in range(details)]
             else:
-                photos[EvidenceRole.CONTEXT] = [prepare(rng.choice(pools["autos"]))]
+                photos[EvidenceRole.CONTEXT] = [car]  # el mismo auto: así la re-ID no corta la cascada
             out.append(Layout(photos, plate))
         return out
 
