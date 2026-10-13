@@ -16,6 +16,7 @@ Uso: ver `tools/eval/README.md`.
 
 import argparse
 import json
+import math
 import os
 import random
 import shutil
@@ -81,6 +82,38 @@ def propose(rows: Sequence[dict[str, float]]) -> dict[str, Any]:
         rows, key=lambda row: (row["recall_por_foto"] - row["falsos_positivos_por_foto"], -row["umbral"])
     )
     return {"DAMAGE_MIN_CONF": best["umbral"], **best}
+
+
+def calibrate(
+    clean: Sequence[float], damaged: Sequence[float], names: Sequence[str] = (), top: int = 12
+) -> dict[str, Any]:
+    """`DAMAGE_T_LOW` y `DAMAGE_T_HIGH` con las reglas A, B y C, de la mayor confianza de cada foto.
+
+    Casos RED (A): las fotos de autos sin daño; `T_LOW` queda justo sobre la mayor confianza de una de ellas,
+    así que ninguna llega a amarillo ni a verde. Válidas (C): las fotos con daño de CarDD; las que quedan
+    bajo `T_LOW` terminarían en rojo. No hay un set de casos dudosos (YELLOW), así que `T_HIGH` no se puede
+    calibrar y queda igual a `T_LOW`. `peores_negativas` son las fotos sin daño con más confianza: hay que
+    mirarlas a mano.
+    """
+    highest = max(clean, default=0.0)
+    t_low = math.ceil((highest + 1e-9) * 1000) / 1000
+    feasible = t_low <= 1.0
+    below = sum(score < t_low for score in damaged)
+    ranked = sorted(zip(clean, names or [""] * len(clean), strict=True), key=lambda item: -item[0])[:top]
+    return {
+        "negativas": len(clean),
+        "cota_95_regla_A_y_B": round(min(1.0, 3 / len(clean)), 4) if clean else None,
+        "mayor_confianza_de_una_negativa": round(highest, 4),
+        "DAMAGE_T_LOW": t_low if feasible else None,
+        "DAMAGE_T_HIGH": t_low if feasible else None,
+        "T_HIGH": "no calibrable: no hay un set de casos dudosos (YELLOW)",
+        "positivas": len(damaged),
+        "positivas_bajo_T_LOW": below if feasible else len(damaged),
+        "tasa_de_validas_en_rojo": round(below / len(damaged), 4) if damaged and feasible else 1.0,
+        "cumple_A_y_B": feasible,
+        "cumple_C": feasible and below == 0,
+        "peores_negativas": [{"foto": name, "confianza": round(score, 4)} for score, name in ranked],
+    }
 
 
 def class_thresholds(per_class: dict[str, list[dict[str, float]]], cap: float) -> dict[str, float]:
@@ -278,6 +311,7 @@ def do_run(args: argparse.Namespace, folder: Path) -> int:
         "cardd_split": args.cardd_split,
         "barrido": rows,
         "propuesta": propose(rows),
+        "calibracion": calibrate(clean_scores, overall(damaged_detail), [p.name for p in clean], args.top),
         "por_clase": by_class(clean_detail, damaged_detail, [classes[i["id"]] for i in damaged_images]),
     }
     report["umbrales_por_clase"] = {
@@ -310,7 +344,8 @@ def do_run(args: argparse.Namespace, folder: Path) -> int:
             f"{row['umbral']:>7}{int(row['fotos_sin_dano_con_caja']):>19}"
             f"{row['falsos_positivos_por_foto']:>13.1%}{row['recall_por_foto']:>17.1%}"
         )
-    print(f"Propuesta: {report['propuesta']}")
+    print(f"Propuesta (recall menos falsos positivos): {report['propuesta']}")
+    print(f"Calibración con las reglas A, B y C: {report['calibracion']}")
     print("Por clase (FP por foto sin daño / recall por foto de las que tienen esa clase):")
     print(f"{'clase':<15}" + "".join(f"{t:>12}" for t in THRESHOLDS))
     for label, class_rows in report["por_clase"].items():

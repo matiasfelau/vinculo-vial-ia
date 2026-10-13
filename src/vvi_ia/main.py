@@ -50,7 +50,7 @@ def adapter_params(settings: Settings) -> dict[str, float]:
     return {
         "segmenter_min_conf": settings.segmenter_min_conf,
         "detector_min_conf": settings.detector_min_conf,
-        "damage_min_conf": settings.damage_min_conf,
+        "damage_min_conf": settings.damage_t_low,
         "curb_min_conf": settings.curb_min_conf,
         "face_tiling": float(settings.face_tiling),
         "plate_tiling": float(settings.plate_tiling),
@@ -66,7 +66,8 @@ def build_thresholds(settings: Settings) -> Thresholds:
         reid_t_low=settings.reid_t_low,
         reid_t_high=settings.reid_t_high,
         ocr_min_conf=settings.ocr_min_conf,
-        damage_min_conf=settings.damage_min_conf,
+        damage_t_low=settings.damage_t_low,
+        damage_t_high=settings.damage_t_high,
         presence_min_area=settings.presence_min_area,
         presence_plate_min_conf=settings.detector_min_conf,
         ramp_t_low=settings.ramp_t_low,

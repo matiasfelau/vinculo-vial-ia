@@ -24,7 +24,7 @@ from vvi_ia.adapters.models.rfdetr_damage import DAMAGE_LABELS, MODEL_NAME
 from vvi_ia.domain.model import Box
 
 DATASET_NAME = "cardd-detector"
-DEFAULT_MIN_CONF = 0.70
+DEFAULT_MIN_CONF = 0.969
 CLASS_IDS = {
     name: index + 1 for index, name in enumerate(DAMAGE_LABELS[column] for column in sorted(DAMAGE_LABELS))
 }

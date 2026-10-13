@@ -427,6 +427,32 @@ def test_dano_bajo_el_umbral_es_context_not_detected() -> None:
     assert _codes(result) == {R.CONTEXT_NOT_DETECTED}
 
 
+@pytest.mark.parametrize(
+    ("confidence", "expected"),
+    [
+        (0.95, set()),  # desde T_HIGH: el daño está
+        (0.80, {R.CONTEXT_UNCERTAIN}),  # entre los dos umbrales: dudoso
+        (0.69, {R.CONTEXT_NOT_DETECTED}),  # bajo T_LOW el adaptador no devuelve nada: el daño no está
+    ],
+)
+def test_los_dos_umbrales_de_dano_deciden_el_codigo(confidence: float, expected: set[R]) -> None:
+    models = happy_models()
+    models.damage.by_marker[detail_marker(0)] = [Box(0, 0, 9, 9, confidence)]
+    scenario = build_scenario()
+    use_case = ValidateEvidence(
+        store=scenario.store,
+        writer=FakeWriter(),
+        decryptor=scenario.decryptor,
+        decoder=scenario.decoder,
+        renderer=JpegRenderer(),
+        models=models.as_models(),
+        thresholds=replace(THRESHOLDS, damage_t_low=0.70, damage_t_high=0.90),
+        redaction=REDACTION,
+    )
+
+    assert _codes(use_case.execute(scenario.payload)) == expected
+
+
 def test_sin_cajas_de_dano_es_context_not_detected() -> None:
     models = happy_models()
     models.damage.by_marker[detail_marker(0)] = []

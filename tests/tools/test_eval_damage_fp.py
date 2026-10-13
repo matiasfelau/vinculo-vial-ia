@@ -145,3 +145,30 @@ def test_select_copia_las_fotos_con_un_auto_grande(tmp_path: Path) -> None:
 
     assert fp.main(["--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "out"), "select"]) == 0
     assert (tmp_path / fp.FOLDER / "images" / "train_grande.jpg").is_file()
+
+
+def test_calibrate_pone_T_LOW_justo_sobre_la_peor_negativa() -> None:
+    clean = [0.10, 0.62, 0.95, 0.31]
+    damaged = [0.99, 0.97, 0.90, 0.50, 0.96]
+
+    result = fp.calibrate(clean, damaged, ["a", "b", "c", "d"], top=2)
+
+    assert result["DAMAGE_T_LOW"] == 0.951 and result["DAMAGE_T_HIGH"] == 0.951
+    assert result["positivas_bajo_T_LOW"] == 2 and result["tasa_de_validas_en_rojo"] == 0.4
+    assert result["cumple_A_y_B"] and not result["cumple_C"]
+    assert result["cota_95_regla_A_y_B"] == 0.75
+    assert [x["foto"] for x in result["peores_negativas"]] == ["c", "b"]
+    assert "no calibrable" in result["T_HIGH"]
+
+
+def test_calibrate_cuando_una_negativa_llega_a_uno_no_hay_umbral() -> None:
+    result = fp.calibrate([1.0, 0.2], [0.9, 0.8])
+
+    assert result["DAMAGE_T_LOW"] is None and not result["cumple_A_y_B"]
+    assert result["positivas_bajo_T_LOW"] == 2 and result["tasa_de_validas_en_rojo"] == 1.0
+
+
+def test_calibrate_sin_negativas_no_inventa_cotas() -> None:
+    result = fp.calibrate([], [0.9])
+
+    assert result["cota_95_regla_A_y_B"] is None
