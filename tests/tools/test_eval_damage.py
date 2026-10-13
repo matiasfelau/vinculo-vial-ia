@@ -143,6 +143,8 @@ def test_main_de_punta_a_punta(
             str(tmp_path / "out"),
             "--models-dir",
             str(tmp_path),
+            "--damage-min-conf",
+            "0.7",
         ]
     )
 

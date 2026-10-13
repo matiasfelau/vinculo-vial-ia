@@ -95,7 +95,8 @@ class Thresholds:
     reid_t_low: float
     reid_t_high: float
     ocr_min_conf: float
-    damage_min_conf: float
+    damage_t_low: float  # confianza de daño bajo la cual el daño no está (RED)
+    damage_t_high: float  # confianza desde la cual el daño está con claridad
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
@@ -446,10 +447,12 @@ class ValidateEvidence:
                 any_unavailable = True
                 continue
             for box in boxes:
-                if box.conf >= self._t.damage_min_conf and (best is None or box.conf > best):
+                if box.conf >= self._t.damage_t_low and (best is None or box.conf > best):
                     best = box.conf
         if best is None:
             _add(codes, ReasonCode.CONTEXT_UNCERTAIN if any_unavailable else ReasonCode.CONTEXT_NOT_DETECTED)
+        elif best < self._t.damage_t_high:
+            _add(codes, ReasonCode.CONTEXT_UNCERTAIN)  # entre los dos umbrales: dudoso
         return best
 
     def _driveway(self, run: _Run, context: EvidenceImage, codes: Codes) -> float | None:

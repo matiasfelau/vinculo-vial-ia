@@ -53,7 +53,9 @@ class Settings(BaseSettings):
     # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
     # provisorio: CarDD test y 416 autos de Open Images (damage_fp.py); revisar con fotos propias
-    damage_min_conf: float = Field(default=0.70, ge=0.0, le=1.0)
+    # provisorio: tools/eval/damage_fp.py (mayor confianza de una foto de auto sin daño); no cumple la regla C
+    damage_t_low: float = Field(default=0.969, ge=0.0, le=1.0)
+    damage_t_high: float = Field(default=0.969, ge=0.0, le=1.0)
     face_min_conf: float = Field(default=0.30, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
     # Rampa: el solape auto/rebaje se mide en escalas de rueda. < T_LOW: el auto no bloquea (RED);

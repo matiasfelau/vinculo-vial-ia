@@ -1,4 +1,4 @@
-﻿"""Lo que comparten los scripts de entrenamiento de `tools/training/`: GPU, entrenamiento y export.
+"""Lo que comparten los scripts de entrenamiento de `tools/training/`: GPU, entrenamiento y export.
 
 Reglas del proyecto: FP32 por defecto (la GTX 1660 no tiene tensor cores), lote chico con acumulación de
 gradiente, y nunca bajar de modelo ante la falta de memoria: primero se ajusta la memoria, después se

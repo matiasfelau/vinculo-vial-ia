@@ -476,7 +476,7 @@ uv run --frozen --extra dev --extra tools python tools/eval/damage.py --split te
 ```
 
 Se lee igual que la evaluación del detector de vehículos (`reales`, `recall`, `prec.`, `FP`, `chicas`,
-`rec.ch.` y `AP50`; ver arriba), con el umbral `DAMAGE_MIN_CONF` (0,70 por defecto, provisorio; o `--damage-min-conf`).
+`rec.ch.` y `AP50`; ver arriba), con el umbral `DAMAGE_T_LOW` (0,969 por defecto, provisorio; o `--damage-min-conf`).
 El AP50 se calcula con el umbral casi en cero, así que no depende de él.
 
 Para el servicio lo que importa es **si hay algún daño**, no cuál: la foto de detalle pasa si el detector
@@ -511,7 +511,16 @@ uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py run    
    `damage_fp_flagged.jpg` un sorteo de las que superan `--review-conf`: miralas para ver si son falsos
    positivos de verdad o daño que se pasó por alto al revisar.
 
-Es una propuesta: el default no cambia hasta que se apruebe. Las fotos de Open Images son de autos enteros, no de
+Es una propuesta: el default no cambia hasta que se apruebe.
+
+#### Calibración de `DAMAGE_T_LOW` y `DAMAGE_T_HIGH`
+
+El mismo comando calcula los dos umbrales con las reglas de decisión: `T_LOW` queda **justo sobre la mayor
+confianza de una foto de auto sin daño** (que ninguna negativa llegue a amarillo ni a verde, regla A), y se cuenta
+cuántas fotos con daño de CarDD quedan bajo `T_LOW` (válidos que terminarían en rojo, regla C). `T_HIGH` no se
+puede calibrar sin un set de casos dudosos y queda igual a `T_LOW`. Con 414 negativas (tras revisar a mano las 24
+con más confianza y excluir 2 con daño) `T_LOW` = 0,969 y 300 de las 374 positivas (80 %) quedan en rojo: **no
+cumple C**. Las fotos de Open Images son de autos enteros, no de
 detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 
 ## Latencia de la cascada completa (`cascade.py`)

@@ -1,4 +1,4 @@
-﻿"""Exporta PARSeq preentrenado a ONNX para el puerto `ocr`.
+"""Exporta PARSeq preentrenado a ONNX para el puerto `ocr`.
 
 Baja de GitHub el código de `baudm/parseq` (en un commit fijo, con `torch.hub`) y los pesos
 preentrenados de su release v1.0.0 (PyTorch verifica el hash del archivo). No se reentrena nada.
