@@ -54,13 +54,16 @@ class Settings(BaseSettings):
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
     # el daño solo cuenta como presencia de auto en DETAIL; ver tools/eval/presence.py
     damage_presence_t: float = Field(default=0.97, ge=0.0, le=1.0)
-    face_min_conf: float = Field(default=0.30, ge=0.0, le=1.0)
+    # provisorio: barrido con SCRFD sobre WIDER FACE val y Open Images (tools/eval/README.md)
+    face_min_conf: float = Field(default=0.25, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
     # Presencia de auto en cada foto: ocupa al menos esta fracción de la foto (tools/eval/presence.py)
     presence_min_area: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Lado mayor al que se reduce cada foto antes de los modelos; las cajas vuelven a la resolución original
+    model_max_side_px: int = Field(default=1024, ge=256)
     curb_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     # Mosaico: además de la foto completa, el detector recorre tiles para encontrar rostros o patentes chicos
     face_tiling: bool = False

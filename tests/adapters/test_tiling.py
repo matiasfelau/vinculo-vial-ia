@@ -168,7 +168,7 @@ def test_el_nucleo_con_mosaico_encuentra_la_cara_y_deja_el_auto_de_la_foto_compl
         session, "input", (16, 16), THRESHOLDS, tiling=Tiling(frozenset({FACE}), tile=640, overlap=0.25)
     )
 
-    boxes = detections.detect_all(np.zeros((1000, 1000, 3), np.uint8))
+    boxes = detections.detect_tiled(np.zeros((1000, 1000, 3), np.uint8))
 
     assert boxes is not None
     assert session.calls == 1 + len(tile_grid(1000, 1000, 640, 0.25))
@@ -180,11 +180,33 @@ def test_sin_mosaico_o_con_una_foto_chica_es_una_sola_inferencia() -> None:
     plain = TiledSession()
     RfDetrDetections(plain, "input", (16, 16), THRESHOLDS).detect_all(np.zeros((1000, 1000, 3), np.uint8))
     small = TiledSession()
-    RfDetrDetections(small, "input", (16, 16), THRESHOLDS, tiling=Tiling(frozenset({FACE}))).detect_all(
+    RfDetrDetections(small, "input", (16, 16), THRESHOLDS, tiling=Tiling(frozenset({FACE}))).detect_tiled(
         np.zeros((300, 300, 3), np.uint8)
     )
 
     assert plain.calls == 1 and small.calls == 1
+
+
+def test_detect_all_nunca_usa_mosaico_aunque_este_configurado() -> None:
+    session = TiledSession()
+    detections = RfDetrDetections(session, "input", (16, 16), THRESHOLDS, tiling=Tiling(frozenset({FACE})))
+
+    boxes = detections.detect_all(np.zeros((1000, 1000, 3), np.uint8))
+
+    assert boxes is not None and session.calls == 1
+    assert [b.label for b in boxes].count(FACE) == 0  # la cara de este modelo falso solo aparece en los tiles
+
+
+def test_el_mosaico_reutiliza_el_pase_entero_ya_hecho() -> None:
+    session = TiledSession()
+    detections = RfDetrDetections(session, "input", (16, 16), THRESHOLDS, tiling=Tiling(frozenset({FACE})))
+    image = np.zeros((1000, 1000, 3), np.uint8)
+
+    detections.detect_all(image)
+    detections.detect_tiled(image)
+    detections.detect_tiled(image)  # la segunda sale de la memoria
+
+    assert session.calls == 1 + len(tile_grid(1000, 1000, 640, 0.25))
 
 
 # --- configuración -------------------------------------------------------------------------

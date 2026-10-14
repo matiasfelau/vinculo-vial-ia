@@ -15,7 +15,13 @@ class VehicleDetector(Protocol):
 
     version: str
 
-    def detect(self, img: Pixels) -> list[Box] | None: ...
+    def detect(self, img: Pixels) -> list[Box] | None:
+        """Un solo pase sobre la foto entera: el que sirve para la presencia y la lectura de la patente."""
+        ...
+
+    def detect_plates(self, img: Pixels) -> list[Box] | None:
+        """Lo mismo, más las patentes chicas del mosaico (si está activo). Es más caro: solo para redactar."""
+        ...
 
 
 class CarSegmenter(Protocol):

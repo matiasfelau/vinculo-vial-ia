@@ -139,33 +139,54 @@ class RfDetrDetections:
         return decode_boxes(dets, labels, (img.shape[0], img.shape[1]), self._thresholds, self._names)
 
     def detect_all(self, img: Pixels) -> list[Box] | None:
+        """Un solo pase sobre la foto entera (memoria de una imagen por hilo). `None` si el modelo falla."""
         remembered = getattr(self._local, "last", None)
         if remembered is not None and remembered[0]() is img:
             return list(remembered[1])
         try:
             boxes = self._infer(img)
-            if self._tiling is not None:
-                tiled = detect_tiled(
-                    self._infer,
-                    img,
-                    self._tiling.labels,
-                    self._tiling.tile,
-                    self._tiling.overlap,
-                    self._tiling.nms_iou,
-                    full=boxes,
-                    max_side=self._tiling.max_side,
-                )
-                if tiled is None:  # no pasa: `_infer` lanza ante un error, no devuelve `None`
-                    raise ValueError("falló la inferencia por mosaico")
-                boxes = sorted(
-                    [b for b in boxes if b.label not in self._tiling.labels] + tiled, key=lambda b: -b.conf
-                )
         except Exception as exc:
             # Solo el tipo de error: el mensaje podría arrastrar contenido de la imagen.
             logger.warning("falló la inferencia del detector", extra={"error": type(exc).__name__})
             return None
         self._local.last = (weakref.ref(img), boxes)
         return list(boxes)
+
+    def detect_tiled(self, img: Pixels) -> list[Box] | None:
+        """El pase entero (reutilizado de `detect_all`) más los tiles de las clases con mosaico.
+
+        Sin mosaico configurado es lo mismo que `detect_all`. Es más caro (una inferencia por tile): sirve
+        para buscar patentes y rostros chicos al redactar, no para decidir la presencia.
+        """
+        if self._tiling is None:
+            return self.detect_all(img)
+        remembered = getattr(self._local, "last_tiled", None)
+        if remembered is not None and remembered[0]() is img:
+            return list(remembered[1])
+        boxes = self.detect_all(img)
+        if boxes is None:
+            return None
+        try:
+            tiled = detect_tiled(
+                self._infer,
+                img,
+                self._tiling.labels,
+                self._tiling.tile,
+                self._tiling.overlap,
+                self._tiling.nms_iou,
+                full=boxes,
+                max_side=self._tiling.max_side,
+            )
+            if tiled is None:  # no pasa: `_infer` lanza ante un error, no devuelve `None`
+                raise ValueError("falló la inferencia por mosaico")
+        except Exception as exc:
+            logger.warning("falló la inferencia por mosaico", extra={"error": type(exc).__name__})
+            return None
+        merged = sorted(
+            [b for b in boxes if b.label not in self._tiling.labels] + tiled, key=lambda b: -b.conf
+        )
+        self._local.last_tiled = (weakref.ref(img), merged)
+        return list(merged)
 
 
 class RfDetrVehicleDetector:
@@ -179,6 +200,11 @@ class RfDetrVehicleDetector:
         boxes = self._core.detect_all(img)
         return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
 
+    def detect_plates(self, img: Pixels) -> list[Box] | None:
+        """El pase entero más las patentes que encuentra el mosaico (solo con `PLATE_TILING`)."""
+        boxes = self._core.detect_tiled(img)
+        return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
+
 
 class RfDetrFaceDetector:
     """Implementa `FaceDetector`."""
@@ -188,7 +214,9 @@ class RfDetrFaceDetector:
         self.version = version
 
     def detect(self, img: Pixels) -> list[Box] | None:
-        boxes = self._core.detect_all(img)
+        boxes = self._core.detect_tiled(
+            img
+        )  # los rostros solo se buscan al redactar: con mosaico si está activo
         return None if boxes is None else [box for box in boxes if box.label == FACE]
 
 

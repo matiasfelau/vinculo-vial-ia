@@ -15,6 +15,9 @@ class NullVehicleDetector:
     def detect(self, img: Pixels) -> list[Box] | None:
         return None
 
+    def detect_plates(self, img: Pixels) -> list[Box] | None:
+        return None
+
 
 class NullCarSegmenter:
     version = NULL_VERSION

@@ -103,6 +103,9 @@ class EvidenceImage:
     role: EvidenceRole
     index: int
     pixels: Pixels
+    view: Pixels | None = (
+        None  # la misma foto reducida: es la que ven los modelos (los píxeles son los originales)
+    )
 
     @property
     def height(self) -> int:
@@ -111,6 +114,16 @@ class EvidenceImage:
     @property
     def width(self) -> int:
         return int(self.pixels.shape[1])
+
+    @property
+    def model_pixels(self) -> Pixels:
+        """La foto que ven los modelos: la reducida, o la original si no hizo falta reducir."""
+        return self.pixels if self.view is None else self.view
+
+    @property
+    def ratio(self) -> float:
+        """Cuántas veces es más grande la original que la reducida (para volver a sus coordenadas)."""
+        return self.width / int(self.model_pixels.shape[1])
 
 
 @dataclass(frozen=True)
