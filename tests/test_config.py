@@ -13,7 +13,7 @@ def test_carga_valida_con_valores_por_defecto(base_env: pytest.MonkeyPatch) -> N
     assert settings.input_queue == "ia.alert-evidence-uploaded.q"
     assert settings.workers == 2
     assert settings.redaction_required is True
-    assert settings.reid_t == 0.50 and settings.damage_presence_t == 0.97
+    assert settings.reid_t == 0.075 and settings.damage_presence_t == 0.97
     assert settings.model_curb == "" and settings.model_selection()["curb"] == "null"
 
 
