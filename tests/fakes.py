@@ -79,6 +79,7 @@ THRESHOLDS = Thresholds(
     ocr_min_conf=0.60,
     damage_presence_t=0.70,
     presence_min_area=0.05,
+    model_max_side_px=1024,
     presence_plate_min_conf=0.40,
 )
 
@@ -92,9 +93,14 @@ class FakeVehicleDetector:
     def __init__(self, by_marker: dict[int, list[Box] | None]) -> None:
         self.by_marker = by_marker
         self.calls = 0
+        self.plate_calls = 0
 
     def detect(self, img: Pixels) -> list[Box] | None:
         self.calls += 1
+        return self.by_marker.get(marker_of(img))
+
+    def detect_plates(self, img: Pixels) -> list[Box] | None:
+        self.plate_calls += 1
         return self.by_marker.get(marker_of(img))
 
 

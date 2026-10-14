@@ -500,3 +500,35 @@ def test_la_foto_original_en_memoria_no_se_modifica() -> None:
     general = seen[0]
     assert np.all(general[..., 1] == BRIGHT)
     assert plate_box().label == BoxLabel.PLATE
+
+
+# --- fotos planificadas en paralelo --------------------------------------------------------
+
+
+def _in_parallel(workers: int) -> RedactionSettings:
+    return RedactionSettings(
+        required=True, face_min_conf=0.30, plate_min_conf=0.20, max_side_px=1600, workers=workers
+    )
+
+
+def test_planificar_en_paralelo_sube_las_mismas_fotos_que_una_por_una() -> None:
+    def uploaded(workers: int) -> dict[str, bytes]:
+        scenario = build_scenario(AlertType.CRASHED, details=2)
+        models = _models_with_two_plates_and_a_face()
+        for marker in (PLATE, detail_marker(0), detail_marker(1)):
+            models.face.by_marker[marker] = [Box(0, 0, 20, 20, 0.9)]
+        models.damage.by_marker[detail_marker(1)] = [Box(0, 0, 9, 9, 0.8)]
+        result, writer = _run(scenario, models, redaction=_in_parallel(workers))
+        assert [(r.role, r.index) for r in result.redacted][0] == (EvidenceRole.GENERAL, 0)
+        return {key.rsplit("/", 1)[1]: body for key, (body, _) in writer.objects.items()}
+
+    assert uploaded(3) == uploaded(1)
+
+
+def test_en_paralelo_si_falla_una_sola_foto_no_se_sube_ninguna() -> None:
+    models = happy_models()
+    models.face.by_marker[detail_marker(0)] = None
+
+    result, writer = _run(build_scenario(), models, redaction=_in_parallel(3))
+
+    _unavailable(result, writer)

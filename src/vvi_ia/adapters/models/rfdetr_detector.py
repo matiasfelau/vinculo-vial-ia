@@ -64,6 +64,7 @@ BOX_VALUES = 4
 NCHW_NDIM = 4
 LOGIT_CLIP = 88.0  # evita el desborde de exp() en float32
 WARMUP_SIDE = 64
+MEMORY_CAPACITY = 32  # fotos recordadas a la vez (una alerta trae hasta ~10)
 
 
 def preprocess(img: Pixels, height: int, width: int) -> NDArray[np.float32]:
@@ -109,11 +110,38 @@ def decode_boxes(
     return sorted(boxes, key=lambda box: -box.conf)
 
 
-class RfDetrDetections:
-    """Núcleo compartido: corre el modelo y recuerda el último resultado de cada hilo.
+class _Memory:
+    """Resultados recientes por foto, compartidos entre hilos y con referencia débil al arreglo.
 
-    La memoria es de una sola imagen por hilo y se guarda con una referencia débil al arreglo: solo
-    sirve si la segunda llamada recibe **el mismo objeto** y nadie lo modificó entre las dos.
+    Solo sirve si la segunda llamada recibe **el mismo objeto** y nadie lo modificó entre las dos. Acotada:
+    descarta las fotos que ya no existen y, pasado el límite, la entrada más vieja.
+    """
+
+    def __init__(self, capacity: int = MEMORY_CAPACITY) -> None:
+        self._capacity = capacity
+        self._lock = threading.Lock()
+        self._entries: dict[int, tuple[weakref.ReferenceType[Pixels], list[Box]]] = {}
+
+    def get(self, img: Pixels) -> list[Box] | None:
+        with self._lock:
+            entry = self._entries.get(id(img))
+            if entry is None or entry[0]() is not img:
+                return None
+            return list(entry[1])
+
+    def put(self, img: Pixels, boxes: list[Box]) -> None:
+        with self._lock:
+            self._entries = {key: item for key, item in self._entries.items() if item[0]() is not None}
+            while len(self._entries) >= self._capacity:
+                del self._entries[next(iter(self._entries))]
+            self._entries[id(img)] = (weakref.ref(img), list(boxes))
+
+
+class RfDetrDetections:
+    """Núcleo compartido: corre el modelo y recuerda el resultado de las últimas fotos.
+
+    La memoria se comparte entre hilos: la redacción planifica varias fotos a la vez y reutiliza el pase que
+    ya se hizo para decidir la presencia.
     """
 
     def __init__(
@@ -131,7 +159,8 @@ class RfDetrDetections:
         self._thresholds = thresholds
         self._names = names
         self._tiling = tiling
-        self._local = threading.local()
+        self._full = _Memory()
+        self._tiled = _Memory()
 
     def _infer(self, img: Pixels) -> list[Box]:
         tensor = preprocess(img, *self._input_size)
@@ -139,33 +168,54 @@ class RfDetrDetections:
         return decode_boxes(dets, labels, (img.shape[0], img.shape[1]), self._thresholds, self._names)
 
     def detect_all(self, img: Pixels) -> list[Box] | None:
-        remembered = getattr(self._local, "last", None)
-        if remembered is not None and remembered[0]() is img:
-            return list(remembered[1])
+        """Un solo pase sobre la foto entera (memoria de una imagen por hilo). `None` si el modelo falla."""
+        remembered = self._full.get(img)
+        if remembered is not None:
+            return remembered
         try:
             boxes = self._infer(img)
-            if self._tiling is not None:
-                tiled = detect_tiled(
-                    self._infer,
-                    img,
-                    self._tiling.labels,
-                    self._tiling.tile,
-                    self._tiling.overlap,
-                    self._tiling.nms_iou,
-                    full=boxes,
-                    max_side=self._tiling.max_side,
-                )
-                if tiled is None:  # no pasa: `_infer` lanza ante un error, no devuelve `None`
-                    raise ValueError("falló la inferencia por mosaico")
-                boxes = sorted(
-                    [b for b in boxes if b.label not in self._tiling.labels] + tiled, key=lambda b: -b.conf
-                )
         except Exception as exc:
             # Solo el tipo de error: el mensaje podría arrastrar contenido de la imagen.
             logger.warning("falló la inferencia del detector", extra={"error": type(exc).__name__})
             return None
-        self._local.last = (weakref.ref(img), boxes)
+        self._full.put(img, boxes)
         return list(boxes)
+
+    def detect_tiled(self, img: Pixels) -> list[Box] | None:
+        """El pase entero (reutilizado de `detect_all`) más los tiles de las clases con mosaico.
+
+        Sin mosaico configurado es lo mismo que `detect_all`. Es más caro (una inferencia por tile): sirve
+        para buscar patentes y rostros chicos al redactar, no para decidir la presencia.
+        """
+        if self._tiling is None:
+            return self.detect_all(img)
+        remembered = self._tiled.get(img)
+        if remembered is not None:
+            return remembered
+        boxes = self.detect_all(img)
+        if boxes is None:
+            return None
+        try:
+            tiled = detect_tiled(
+                self._infer,
+                img,
+                self._tiling.labels,
+                self._tiling.tile,
+                self._tiling.overlap,
+                self._tiling.nms_iou,
+                full=boxes,
+                max_side=self._tiling.max_side,
+            )
+            if tiled is None:  # no pasa: `_infer` lanza ante un error, no devuelve `None`
+                raise ValueError("falló la inferencia por mosaico")
+        except Exception as exc:
+            logger.warning("falló la inferencia por mosaico", extra={"error": type(exc).__name__})
+            return None
+        merged = sorted(
+            [b for b in boxes if b.label not in self._tiling.labels] + tiled, key=lambda b: -b.conf
+        )
+        self._tiled.put(img, merged)
+        return list(merged)
 
 
 class RfDetrVehicleDetector:
@@ -179,6 +229,11 @@ class RfDetrVehicleDetector:
         boxes = self._core.detect_all(img)
         return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
 
+    def detect_plates(self, img: Pixels) -> list[Box] | None:
+        """El pase entero más las patentes que encuentra el mosaico (solo con `PLATE_TILING`)."""
+        boxes = self._core.detect_tiled(img)
+        return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
+
 
 class RfDetrFaceDetector:
     """Implementa `FaceDetector`."""
@@ -188,7 +243,9 @@ class RfDetrFaceDetector:
         self.version = version
 
     def detect(self, img: Pixels) -> list[Box] | None:
-        boxes = self._core.detect_all(img)
+        boxes = self._core.detect_tiled(
+            img
+        )  # los rostros solo se buscan al redactar: con mosaico si está activo
         return None if boxes is None else [box for box in boxes if box.label == FACE]
 
 

@@ -235,7 +235,7 @@ def test_la_lista_devuelta_es_una_copia() -> None:
     assert again is not None and len(again) == 3
 
 
-def test_cada_hilo_recuerda_su_propia_foto() -> None:
+def test_la_memoria_se_comparte_entre_hilos() -> None:
     session = FakeSession(outputs(*FULL))
     shared = core(session)
     img = photo()
@@ -244,14 +244,14 @@ def test_cada_hilo_recuerda_su_propia_foto() -> None:
 
     def other_thread() -> None:
         before = len(session.calls)
-        shared.detect_all(img)  # en otro hilo no hay nada recordado
+        shared.detect_all(img)  # otro hilo reutiliza el pase ya hecho
         seen.append(len(session.calls) - before)
 
     thread = threading.Thread(target=other_thread)
     thread.start()
     thread.join()
 
-    assert seen == [1]
+    assert seen == [0]
 
 
 def test_los_dos_puertos_pasan_el_tensor_con_el_nombre_de_entrada() -> None:
@@ -477,3 +477,15 @@ def test_pesos_reales_corren_sobre_una_foto_sin_nada() -> None:
     assert models.vehicle.detect(flat) == []
     assert models.face.detect(flat) == []
     assert models.versions()["detector"].startswith(f"{MODEL_NAME}@")
+
+
+def test_la_memoria_descarta_la_entrada_mas_vieja_al_llenarse() -> None:
+    from vvi_ia.adapters.models.rfdetr_detector import _Memory
+
+    memory = _Memory(capacity=2)
+    first, second, third = photo(), photo(), photo()
+    for img in (first, second, third):
+        memory.put(img, [])
+
+    assert memory.get(first) is None
+    assert memory.get(second) == [] and memory.get(third) == []

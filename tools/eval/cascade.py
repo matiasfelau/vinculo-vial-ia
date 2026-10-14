@@ -213,6 +213,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="PLATE_TILING (por defecto on, como el servicio)",
     )
     parser.add_argument(
+        "--face-tiling", choices=("on", "off"), default="on", help="FACE_TILING (por defecto on)"
+    )
+    parser.add_argument("--model-max-side", type=int, help="MODEL_MAX_SIDE_PX (por defecto el del servicio)")
+    parser.add_argument("--redact-workers", type=int, help="REDACT_WORKERS (por defecto el del servicio)")
+    parser.add_argument(
         "--real-thresholds",
         action="store_true",
         help="usar los umbrales reales (con fotos de prueba casi todas terminan en RED y saltan etapas)",
@@ -281,8 +286,15 @@ def main(argv: list[str] | None = None) -> int:
     # Salvo con --real-thresholds, los umbrales se aflojan para que la cascada recorra todas las etapas
     # (incluida la redacción): se mide el camino completo, no los veredictos.
     relaxed = {} if args.real_thresholds else RELAXED
+    if args.model_max_side:
+        relaxed = {**relaxed, "model_max_side_px": args.model_max_side}
+    if args.redact_workers:
+        relaxed = {**relaxed, "redact_workers": args.redact_workers}
     settings = Settings.model_construct(
-        redaction_required=not args.no_redaction, plate_tiling=args.plate_tiling == "on", **relaxed
+        redaction_required=not args.no_redaction,
+        plate_tiling=args.plate_tiling == "on",
+        face_tiling=args.face_tiling == "on",
+        **relaxed,
     )
     selection = dict(SELECTION)
     try:
@@ -354,6 +366,8 @@ def main(argv: list[str] | None = None) -> int:
         "hilos_onnx": args.threads,
         "redaccion": not args.no_redaction,
         "mosaico_patentes": args.plate_tiling == "on",
+        "mosaico_rostros": args.face_tiling == "on",
+        "lado_maximo_de_los_modelos_px": settings.model_max_side_px,
         "lado_mayor_px": args.long_side,
         "escenarios": {},
     }

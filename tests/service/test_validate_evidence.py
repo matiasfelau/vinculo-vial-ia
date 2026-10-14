@@ -679,3 +679,64 @@ def test_un_contexto_sin_embedder_es_green() -> None:
     models.embedder.by_marker_area[(CONTEXT, 400)] = None
 
     assert _run(build_scenario(GARAGE), models).verdict == Verdict.GREEN
+
+
+# --- latencia: un solo pase por foto, reducción y mosaico solo al redactar -----------------------------
+
+
+def test_reduce_for_models_reduce_el_lado_mayor_y_nunca_agranda() -> None:
+    import numpy as np
+
+    from vvi_ia.service.validate_evidence import reduce_for_models
+
+    big = np.zeros((300, 400, 3), np.uint8)
+
+    reduced = reduce_for_models(big, 200)
+
+    assert reduced is not None and reduced.shape == (150, 200, 3)
+    assert reduce_for_models(big, 400) is None and reduce_for_models(big, 1000) is None
+
+
+def test_los_modelos_ven_la_foto_reducida_y_las_cajas_vuelven_al_original() -> None:
+    import numpy as np
+
+    from vvi_ia.domain.model import EvidenceImage
+    from vvi_ia.service.validate_evidence import _Run, reduce_for_models
+
+    seen: list[tuple[int, ...]] = []
+    models = happy_models()
+
+    def detect(img: np.ndarray) -> list[Box]:
+        seen.append(img.shape)
+        return [Box(10, 20, 30, 40, 0.9, BoxLabel.PLATE)]
+
+    models.vehicle.detect = detect  # type: ignore[method-assign]
+    pixels = np.zeros((200, 400, 3), np.uint8)
+    image = EvidenceImage(EvidenceRole.GENERAL, 0, pixels, reduce_for_models(pixels, 100))
+
+    boxes = _Run(models=models.as_models()).detect(image)
+
+    assert seen == [(50, 100, 3)] and image.ratio == 4.0
+    assert boxes == [Box(40, 80, 120, 160, 0.9, BoxLabel.PLATE)]
+
+
+def test_el_detector_corre_un_solo_pase_por_foto_en_toda_la_cascada() -> None:
+    models = happy_models()
+
+    _run(build_scenario(), models)
+
+    assert (
+        models.vehicle.calls == 3
+    )  # general, plate y detail: presencia, lectura y redacción comparten el pase
+
+
+def test_el_mosaico_solo_corre_al_redactar_y_solo_si_el_veredicto_no_es_rojo() -> None:
+    green = happy_models()
+    _run(build_scenario(), green)
+    red = happy_models()
+    red.plate.by_marker[PLATE] = ("ZZ999ZZ", 0.95)  # PLATE_MISMATCH: no se redacta
+
+    _run(build_scenario(), red)
+
+    assert green.vehicle.plate_calls == 3  # una vez por foto
+    assert red.vehicle.plate_calls == 0

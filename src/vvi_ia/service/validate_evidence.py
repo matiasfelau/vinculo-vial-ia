@@ -14,8 +14,12 @@ import hmac
 import logging
 import time
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
 
 from vvi_ia.domain.model import (
     Box,
@@ -99,6 +103,9 @@ class Thresholds:
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
+    model_max_side_px: (
+        int  # lado mayor al que se reduce cada foto antes de los modelos (las cajas vuelven al original)
+    )
     presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
 
 
@@ -110,6 +117,7 @@ class RedactionSettings:
     face_min_conf: float
     plate_min_conf: float
     max_side_px: int
+    workers: int = 1  # fotos que se planifican a la vez (1: una por una)
 
 
 @dataclass(frozen=True)
@@ -126,6 +134,7 @@ class _Run:
 
     models: Models
     detections: dict[tuple[EvidenceRole, int], list[Box] | None] = field(default_factory=dict)
+    plate_detections: dict[tuple[EvidenceRole, int], list[Box] | None] = field(default_factory=dict)
     cars: dict[tuple[EvidenceRole, int], list[CarInstance] | None] = field(default_factory=dict)
     reads: dict[tuple[EvidenceRole, int, Box], PlateRead | None] = field(default_factory=dict)
     reference_embeddings: list[Vector] = field(default_factory=list)
@@ -133,22 +142,33 @@ class _Run:
     general_embedding: Vector | None = None
 
     def detect(self, image: EvidenceImage) -> list[Box] | None:
+        """El único pase del detector sobre la foto reducida (sin mosaico), con las cajas en la original."""
         key = (image.role, image.index)
         if key not in self.detections:
-            self.detections[key] = self.models.vehicle.detect(image.pixels)
+            self.detections[key] = to_original(self.models.vehicle.detect(image.model_pixels), image.ratio)
         return self.detections[key]
 
+    def detect_plates(self, image: EvidenceImage) -> list[Box] | None:
+        """El pase anterior más las patentes chicas del mosaico: solo para redactar."""
+        key = (image.role, image.index)
+        if key not in self.plate_detections:
+            self.plate_detections[key] = to_original(
+                self.models.vehicle.detect_plates(image.model_pixels), image.ratio
+            )
+        return self.plate_detections[key]
+
     def segment_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Los autos de la foto reducida (las máscaras son del tamaño de la reducida)."""
         key = (image.role, image.index)
         if key not in self.cars:
-            self.cars[key] = self.models.cars.cars(image.pixels)
+            self.cars[key] = self.models.cars.cars(image.model_pixels)
         return self.cars[key]
 
     def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
         """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
         key = (image.role, image.index, car_index)
         if key not in self.embeddings:
-            self.embeddings[key] = self.models.embedder.embed(image.pixels, car.mask)
+            self.embeddings[key] = self.models.embedder.embed(image.model_pixels, car.mask)
         return self.embeddings[key]
 
     def read_plate(self, image: EvidenceImage) -> PlateRead | None:
@@ -164,6 +184,25 @@ class _Run:
             read = None if crop is None else self.models.plate.read(crop)
             self.reads[key] = None if read is None else PlateRead(text=read[0], conf=read[1])
         return self.reads[key]
+
+
+def reduce_for_models(pixels: Pixels, max_side: int) -> Pixels | None:
+    """La foto reducida para que su lado mayor sea `max_side`, o `None` si ya entra (no se agranda nunca)."""
+    height, width = pixels.shape[:2]
+    if max(height, width) <= max_side:
+        return None
+    scale = max_side / max(height, width)
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return np.asarray(cv2.resize(pixels, size, interpolation=cv2.INTER_AREA), np.uint8)
+
+
+def to_original(boxes: Sequence[Box] | None, ratio: float) -> list[Box] | None:
+    """Las cajas de la foto reducida, en las coordenadas de la original."""
+    if boxes is None or ratio == 1.0:
+        return None if boxes is None else list(boxes)
+    return [
+        Box(b.x1 * ratio, b.y1 * ratio, b.x2 * ratio, b.y2 * ratio, conf=b.conf, label=b.label) for b in boxes
+    ]
 
 
 def best_plate_box(detections: Sequence[Box] | None) -> Box | None:
@@ -283,7 +322,8 @@ class ValidateEvidence:
                 pixels = self._decoder.decode(self._decryptor.open(ciphertext, info))
             except (DecryptionError, ImageDecodeError):
                 return None
-            images.append(EvidenceImage(role=item.role, index=item.index, pixels=pixels))
+            view = reduce_for_models(pixels, self._t.model_max_side_px)
+            images.append(EvidenceImage(role=item.role, index=item.index, pixels=pixels, view=view))
         return images
 
     def _reported_plate(self, payload: EvidenceUploaded) -> str:
@@ -321,17 +361,18 @@ class ValidateEvidence:
         part = image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL)
         labels = {BoxLabel.CAR} | ({BoxLabel.WHEEL, BoxLabel.PLATE} if part else set())
         minimum = self._t.presence_min_area * image.width * image.height
+        mask_minimum = self._t.presence_min_area * image.model_pixels.shape[0] * image.model_pixels.shape[1]
         detections = run.detect(image)
         for box in detections or ():
             if box.label in labels and box.area >= minimum:
                 if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
                     return True
         cars = run.segment_cars(image)
-        if any(int(car.mask.sum()) >= minimum for car in cars or ()):
+        if any(int(car.mask.sum()) >= mask_minimum for car in cars or ()):
             return True
         answered = detections is not None and cars is not None
         if image.role == EvidenceRole.DETAIL:
-            damage = self._models.damage.detect(image.pixels)
+            damage = self._models.damage.detect(image.model_pixels)
             if any(box.conf >= self._t.damage_presence_t for box in damage or ()):
                 return True
             answered = answered and damage is not None
@@ -446,18 +487,28 @@ class ValidateEvidence:
     ) -> dict[tuple[EvidenceRole, int], list[Box]] | None:
         """Plan de todas las fotos, o `None` si falta algún modelo (no se redacta ninguna)."""
         thresholds = RedactionThresholds(self._redaction.face_min_conf, self._redaction.plate_min_conf)
-        plans: dict[tuple[EvidenceRole, int], list[Box]] = {}
-        for image in images:
-            faces = self._models.face.detect(image.pixels)
-            detections = run.detect(image)
+
+        def plan_one(image: EvidenceImage) -> list[Box] | None:
+            faces = to_original(self._models.face.detect(image.model_pixels), image.ratio)
+            detections = run.detect_plates(image)
             exempt = self._matching_plates(run, image, detections, reported)
             if faces is None or detections is None:
                 return None
-            plan = plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
-            if plan is None:
-                return None
-            plans[(image.role, image.index)] = plan
-        return plans
+            return plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
+
+        workers = min(self._redaction.workers, len(images))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                found = list(pool.map(plan_one, images))
+        else:
+            found = [plan_one(image) for image in images]
+        if any(plan is None for plan in found):
+            return None
+        return {
+            (image.role, image.index): plan
+            for image, plan in zip(images, found, strict=True)
+            if plan is not None
+        }
 
     def _matching_plates(
         self, run: _Run, image: EvidenceImage, detections: Sequence[Box] | None, reported: str
