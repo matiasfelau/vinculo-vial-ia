@@ -217,14 +217,14 @@ def test_los_flags_de_mosaico_viajan_a_los_adaptadores(base_env: pytest.MonkeyPa
     from vvi_ia.main import adapter_params
 
     params = adapter_params(load_settings())
-    assert params["face_tiling"] == 0.0 and params["plate_tiling"] == 1.0  # rostros no, patentes sí
+    assert params["face_tiling"] == 1.0 and params["plate_tiling"] == 1.0  # los dos, solo al redactar
     assert params["tiling_tile_px"] == 640.0 and params["tiling_overlap"] == 0.25
 
-    base_env.setenv("FACE_TILING", "true")
+    base_env.setenv("FACE_TILING", "false")
     base_env.setenv("TILING_TILE_PX", "800")
     params = adapter_params(load_settings())
     assert (
-        params["face_tiling"] == 1.0 and params["plate_tiling"] == 1.0 and params["tiling_tile_px"] == 800.0
+        params["face_tiling"] == 0.0 and params["plate_tiling"] == 1.0 and params["tiling_tile_px"] == 800.0
     )
 
 

@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     face_min_conf: float = Field(default=0.25, ge=0.0, le=1.0)
     plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
+    redact_workers: int = Field(default=3, ge=1)  # fotos que se planifican a la vez al redactar
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
     # Presencia de auto en cada foto: ocupa al menos esta fracción de la foto (tools/eval/presence.py)
@@ -66,8 +67,10 @@ class Settings(BaseSettings):
     model_max_side_px: int = Field(default=1024, ge=256)
     curb_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
     # Mosaico: además de la foto completa, el detector recorre tiles para encontrar rostros o patentes chicos
-    face_tiling: bool = False
-    plate_tiling: bool = True  # provisorio: +7 puntos de recall de patentes por ~1,1 s más por foto
+    # provisorio: con la redacción en paralelo y el detector de un solo pase, 5 fotos de celular tardan
+    # menos de 12 s con los dos mosaicos (tools/eval/README.md)
+    face_tiling: bool = True
+    plate_tiling: bool = True
     tiling_tile_px: int = Field(default=640, ge=64)
     tiling_overlap: float = Field(default=0.25, ge=0.0, le=0.9)
 

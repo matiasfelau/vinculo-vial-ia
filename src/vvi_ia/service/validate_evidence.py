@@ -14,6 +14,7 @@ import hmac
 import logging
 import time
 from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -115,6 +116,7 @@ class RedactionSettings:
     face_min_conf: float
     plate_min_conf: float
     max_side_px: int
+    workers: int = 1  # fotos que se planifican a la vez (1: una por una)
 
 
 @dataclass(frozen=True)
@@ -485,18 +487,28 @@ class ValidateEvidence:
     ) -> dict[tuple[EvidenceRole, int], list[Box]] | None:
         """Plan de todas las fotos, o `None` si falta algún modelo (no se redacta ninguna)."""
         thresholds = RedactionThresholds(self._redaction.face_min_conf, self._redaction.plate_min_conf)
-        plans: dict[tuple[EvidenceRole, int], list[Box]] = {}
-        for image in images:
+
+        def plan_one(image: EvidenceImage) -> list[Box] | None:
             faces = to_original(self._models.face.detect(image.model_pixels), image.ratio)
             detections = run.detect_plates(image)
             exempt = self._matching_plates(run, image, detections, reported)
             if faces is None or detections is None:
                 return None
-            plan = plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
-            if plan is None:
-                return None
-            plans[(image.role, image.index)] = plan
-        return plans
+            return plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
+
+        workers = min(self._redaction.workers, len(images))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                found = list(pool.map(plan_one, images))
+        else:
+            found = [plan_one(image) for image in images]
+        if any(plan is None for plan in found):
+            return None
+        return {
+            (image.role, image.index): plan
+            for image, plan in zip(images, found, strict=True)
+            if plan is not None
+        }
 
     def _matching_plates(
         self, run: _Run, image: EvidenceImage, detections: Sequence[Box] | None, reported: str

@@ -213,9 +213,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="PLATE_TILING (por defecto on, como el servicio)",
     )
     parser.add_argument(
-        "--face-tiling", choices=("on", "off"), default="off", help="FACE_TILING (por defecto off)"
+        "--face-tiling", choices=("on", "off"), default="on", help="FACE_TILING (por defecto on)"
     )
     parser.add_argument("--model-max-side", type=int, help="MODEL_MAX_SIDE_PX (por defecto el del servicio)")
+    parser.add_argument("--redact-workers", type=int, help="REDACT_WORKERS (por defecto el del servicio)")
     parser.add_argument(
         "--real-thresholds",
         action="store_true",
@@ -287,6 +288,8 @@ def main(argv: list[str] | None = None) -> int:
     relaxed = {} if args.real_thresholds else RELAXED
     if args.model_max_side:
         relaxed = {**relaxed, "model_max_side_px": args.model_max_side}
+    if args.redact_workers:
+        relaxed = {**relaxed, "redact_workers": args.redact_workers}
     settings = Settings.model_construct(
         redaction_required=not args.no_redaction,
         plate_tiling=args.plate_tiling == "on",

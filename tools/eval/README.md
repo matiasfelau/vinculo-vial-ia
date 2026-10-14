@@ -491,7 +491,7 @@ MODEL_DETECTOR=rfdetr_openimages   # autos, ruedas y patentes
 MODEL_FACE=scrfd_10g               # rostros: mejor recall, sobre todo en caras chicas, y 3 veces más rápido
 FACE_MIN_CONF=0.30                 # con SCRFD son unos 0,8 falsos positivos por foto en Open Images
 PLATE_REDACT_MIN_CONF=0.20
-FACE_TILING=false                  # sin evidencia de mejora en fotos parecidas a las del servicio; cuesta 5 veces la latencia
+FACE_TILING=true                   # +15 puntos de recall en caras chicas; entra en los 12 s solo porque la redacción va en paralelo (ver la cascada)
 PLATE_TILING=true                  # +7 puntos de recall de patentes; cuesta ~3,5 s más por alerta de 3 fotos (ver la tabla de la cascada)
 ```
 
@@ -581,6 +581,9 @@ uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --curb-pr
 | `--curb-proxy` | Mientras no haya modelo de rebajes, simula su costo corriendo el segmentador de autos (misma arquitectura). Sin esto `curb` es `null` y los escenarios de rebaje cortan antes. |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
 | `--plate-tiling on\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
+| `--face-tiling on\|off` | `FACE_TILING` (por defecto `on`, como el servicio). |
+| `--redact-workers N` | `REDACT_WORKERS`: fotos que se planifican a la vez al redactar (por defecto el del servicio, 3). |
+| `--model-max-side N` | `MODEL_MAX_SIDE_PX`: lado mayor al que se reduce la foto antes de los modelos (1024). |
 | `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
 | `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
 
@@ -626,6 +629,40 @@ patente 0,1 s, daño 0,6 s y redacción 0,7 s. La presencia es la etapa cara: co
 **cada** foto (unos 2,5 s por foto) y, cuando el detector no ve el auto, el segmentador. Sin el mosaico de patentes
 esa etapa baja a unos 0,3 s por foto. La re-ID suma una segmentación y un embedding por cada foto de detalle
 (unos 0,4 s). Con otro programa pesado abierto (un juego) las mismas corridas dieron tiempos mucho menos estables (hasta un 30 % de diferencia entre corridas).
+
+#### Un solo pase del detector, fotos reducidas y redacción en paralelo (meta: 5 fotos en 12 s)
+
+Cambios que bajan la latencia sin tocar el veredicto: el detector corre **un pase por foto** (sobre la foto
+reducida a `MODEL_MAX_SIDE_PX`=1024) y lo reutiliza la presencia, la lectura de la patente y la redacción; el
+mosaico (`FACE_TILING`, `PLATE_TILING`) solo corre al redactar, es decir, nunca si el veredicto ya es RED; y la
+redacción planifica hasta `REDACT_WORKERS`=3 fotos a la vez (con la memoria del detector compartida entre hilos).
+Las cajas vuelven a las coordenadas de la foto original antes de tapar.
+
+Mismas condiciones que arriba (Ryzen 5 3600, una alerta por vez, sin otros programas abiertos, fotos de
+4000 × 3000 px, 8 alertas por escenario, umbrales aflojados para recorrer todas las etapas). Medianas en ms:
+
+| Configuración | Escenario | Total | p95 | load | vehicle | burst | plate | redaction |
+|---|---|---|---|---|---|---|---|---|
+| Una foto a la vez, mosaico de patentes | CRASHED de 3 fotos | 7 808 | 8 857 | 180 | 910 | 1 355 | 54 | 5 258 |
+| | **CRASHED de 5 fotos** | **13 017** | 15 156 | 306 | 1 587 | 2 344 | 61 | 8 710 |
+| | PARKED_ON_GARAGE de 3 | 8 099 | 8 896 | 189 | 928 | 1 475 | 61 | 5 484 |
+| Una foto a la vez, mosaicos de patentes y rostros | CRASHED de 3 fotos | 9 086 | 9 745 | 183 | 934 | 1 409 | 58 | 6 474 |
+| | **CRASHED de 5 fotos** | **14 674** | 15 864 | 298 | 1 514 | 2 445 | 64 | 10 634 |
+| | PARKED_ON_GARAGE de 3 | 9 183 | 9 800 | 180 | 907 | 1 429 | 52 | 6 501 |
+| 3 fotos a la vez, mosaico de patentes | CRASHED de 3 fotos | 5 383 | 5 773 | 179 | 934 | 1 445 | 60 | 2 809 |
+| | **CRASHED de 5 fotos** | **8 894** | 9 367 | 304 | 1 582 | 2 250 | 62 | 4 730 |
+| | PARKED_ON_GARAGE de 3 | 5 353 | 5 951 | 181 | 899 | 1 460 | 51 | 2 768 |
+| **3 fotos a la vez, mosaicos de patentes y rostros (default)** | CRASHED de 3 fotos | 5 926 | 6 244 | 189 | 883 | 1 367 | 52 | 3 433 |
+| | **CRASHED de 5 fotos** | **9 880** | **10 609** | 292 | 1 465 | 2 136 | 51 | 5 942 |
+| | PARKED_ON_GARAGE de 3 | 5 901 | 6 521 | 183 | 871 | 1 422 | 54 | 3 400 |
+
+Con el default, la alerta de 5 fotos (la peor) tarda 9,9 s de mediana y 10,6 s de p95, bajo los 12 s. Una sola foto cuesta
+unos 320 ms el pase completo, 1,3 s el mosaico de patentes (4 tiles de 640 px sobre la foto reducida) y 0,1 s
+(0,6 s con mosaico) los rostros; el render es de unos 35 ms. El paralelismo es el que cierra la cuenta: con 3 hilos el
+tiempo de planificar 5 fotos pasa de unos 10 s a unos 6,5 s. No es lineal porque ONNX Runtime ya usa varios núcleos por
+inferencia.
+Medido en una sola máquina de escritorio, sin red ni HPKE: en otra CPU hay que volver a medir. Si se corren varias
+alertas a la vez (`WORKERS` > 1) cada una usa hasta `REDACT_WORKERS` hilos más, y conviene bajar este último.
 
 **Lo que no mide:** la red (descarga y subida a S3) ni el descifrado HPKE, que acá son en memoria. Las fotos de
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.

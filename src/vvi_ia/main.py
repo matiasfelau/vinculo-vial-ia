@@ -78,6 +78,7 @@ def build_redaction(settings: Settings) -> RedactionSettings:
         face_min_conf=settings.face_min_conf,
         plate_min_conf=settings.plate_redact_min_conf,
         max_side_px=settings.redact_max_side_px,
+        workers=settings.redact_workers,
     )
 
 
