@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 
 import cv2
+import numpy as np
 
 from vvi_ia.domain.model import (
     Box,
@@ -192,8 +193,7 @@ def reduce_for_models(pixels: Pixels, max_side: int) -> Pixels | None:
         return None
     scale = max_side / max(height, width)
     size = (max(1, round(width * scale)), max(1, round(height * scale)))
-    reduced: Pixels = cv2.resize(pixels, size, interpolation=cv2.INTER_AREA)
-    return reduced
+    return np.asarray(cv2.resize(pixels, size, interpolation=cv2.INTER_AREA), np.uint8)
 
 
 def to_original(boxes: Sequence[Box] | None, ratio: float) -> list[Box] | None:
