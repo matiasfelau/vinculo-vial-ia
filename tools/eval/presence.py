@@ -45,6 +45,15 @@ RULES: Mapping[str, tuple[str, ...]] = {
 DEFAULT_THRESHOLDS = {"car": 0.40, "wheel": 0.40, "plate": 0.40, "seg": 0.50, "damage": 0.70}
 AREA_SWEEP = (0.0, 0.005, 0.01, 0.02, 0.05, 0.10)  # fracción mínima de la foto que ocupa la señal
 SETS = ("general", "plate", "detail", "negativas")
+# La regla R1 del servicio, por rol (`_has_car`): GENERAL y CONTEXT piden un auto (detector o
+# segmentador); PLATE y DETAIL aceptan también una rueda o una patente; DETAIL suma una caja de daño con
+# `DAMAGE_PRESENCE_T` (sin área mínima). El área mínima es `PRESENCE_MIN_AREA`.
+SERVICE_RULE: Mapping[str, tuple[str, ...]] = {
+    "general": ("car", "seg"),
+    "plate": ("car", "wheel", "plate", "seg"),
+    "detail": ("car", "wheel", "plate", "seg"),
+}
+SERVICE_MIN_AREA = 0.05
 OPEN_IMAGES = "openimages-detector"
 NEGATIVE_EXCLUDED = ("car", "plate", "wheel")  # la foto no puede tener ninguna de estas clases anotadas
 
@@ -108,6 +117,36 @@ def calibrate_damage_presence(
         "detalles_rechazados_por_las_otras_reglas": len(rejected_details),
         "detalles_recuperados": sum(best(s) >= threshold for s in rejected_details),
     }
+
+
+def service_rule(
+    scores: Mapping[str, Sequence[Signals]],
+    damage_t: float,
+    thresholds: Mapping[str, float] = DEFAULT_THRESHOLDS,
+    min_area: float = SERVICE_MIN_AREA,
+) -> dict[str, Any]:
+    """R1 tal como la aplica el servicio, por rol: fotos válidas rechazadas (C) y negativas que pasan (A)."""
+
+    def accepts(role: str, signals: Signals) -> bool:
+        if passes(signals, SERVICE_RULE[role], thresholds, min_area):
+            return True
+        return role == "detail" and any(conf >= damage_t for conf, _ in signals.get("damage", ()))
+
+    negatives = scores.get("negativas", ())
+    out: dict[str, Any] = {}
+    for role in SERVICE_RULE:
+        rows = scores.get(role, ())
+        rejected = sum(not accepts(role, signals) for signals in rows)
+        passing = sum(accepts(role, signals) for signals in negatives)
+        out[role] = {
+            "fotos": len(rows),
+            "rechazadas": rejected,
+            "tasa_de_rechazo": round(rejected / len(rows), 4) if rows else None,
+            "negativas": len(negatives),
+            "negativas_que_pasan": passing,
+            "cota_95_negativas": bound(len(negatives)) if passing == 0 else None,
+        }
+    return out
 
 
 def verdict(table: Mapping[str, Any]) -> dict[str, Any]:
@@ -253,12 +292,14 @@ def main(argv: list[str] | None = None) -> int:
     rejected = [s for s in scores["detail"] if not passes(s, RULES["R2"], DEFAULT_THRESHOLDS, 0.05)]
     damage_presence = calibrate_damage_presence(scores["negativas"], rejected)
     sweep = {str(area): rates(scores, min_area=area) for area in AREA_SWEEP}
+    service = service_rule(scores, damage_presence["DAMAGE_PRESENCE_T"] or 1.0)
     report = {
         "umbrales": DEFAULT_THRESHOLDS,
         "tabla": table,
         "reglas": verdict(table),
         "barrido_de_area": {area: {"tabla": rows, "reglas": verdict(rows)} for area, rows in sweep.items()},
         "presencia_por_dano": damage_presence,
+        "regla_del_servicio": {"DAMAGE_PRESENCE_T": damage_presence["DAMAGE_PRESENCE_T"], "por_rol": service},
         "senales": scores,
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -271,6 +312,12 @@ def main(argv: list[str] | None = None) -> int:
     for rule, row in report["reglas"].items():
         print(f"{rule}: {row}")
     print(f"Presencia por daño en DETAIL: {damage_presence}")
+    print("R1 del servicio por rol (área >= 5 %, daño >= DAMAGE_PRESENCE_T en DETAIL):")
+    for role, row in service.items():
+        print(
+            f"  {role:<8} válidas rechazadas {row['rechazadas']}/{row['fotos']} · "
+            f"negativas que pasan {row['negativas_que_pasan']}/{row['negativas']}"
+        )
     print("Barrido del área mínima (fracción de la foto): negativas que pasan / válidas rechazadas")
     for area, rows in sweep.items():
         verdicts = verdict(rows)

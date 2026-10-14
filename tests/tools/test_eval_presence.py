@@ -167,3 +167,24 @@ def test_calibrate_damage_presence_si_una_negativa_llega_a_uno_no_hay_umbral() -
     result = presence.calibrate_damage_presence([{"damage": [[1.0, 0.1]]}], [])
 
     assert result["DAMAGE_PRESENCE_T"] is None
+
+
+def test_service_rule_aplica_la_regla_de_cada_rol_con_area_y_dano() -> None:
+    car = {"car": [[0.9, 0.30]]}
+    small_car = {"car": [[0.9, 0.02]]}
+    wheel = {"wheel": [[0.9, 0.30]]}
+    damage = {"damage": [[0.98, 0.01]]}
+    scores = {
+        "general": [car, small_car, wheel],  # la rueda sola no es un auto entero
+        "plate": [wheel, small_car],
+        "detail": [wheel, damage, {"damage": [[0.9, 0.5]]}],
+        "negativas": [{}, damage],
+    }
+
+    out = presence.service_rule(scores, damage_t=0.97)
+
+    assert (out["general"]["fotos"], out["general"]["rechazadas"]) == (3, 2)
+    assert out["plate"]["rechazadas"] == 1
+    assert out["detail"]["rechazadas"] == 1  # el daño de 0,90 no llega a 0,97
+    assert out["detail"]["negativas_que_pasan"] == 1  # el daño sin auto pasa en DETAIL
+    assert out["general"]["negativas_que_pasan"] == 0 and out["general"]["cota_95_negativas"] == 1.0
