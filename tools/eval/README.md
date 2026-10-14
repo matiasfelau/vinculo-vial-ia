@@ -704,6 +704,21 @@ foto dejan de pasar. **El detector de daños no sirve para esto** (con 0,70 disp
 auto). Los primeros planos de la carrocería que no muestran ninguna parte reconocible (21 de 374) se rechazan:
 la regla A gana sobre la C.
 
+### R1 tal como la aplica el servicio, por rol
+
+`presence.py` también mide la regla que corre en `_has_car`, con el área mínima de 5 % y `DAMAGE_PRESENCE_T` = 0,97
+(el daño solo cuenta en DETAIL y no pide área): GENERAL y CONTEXT piden un auto (detector o segmentador); PLATE y DETAIL
+también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y negativas que pasan (regla A):
+
+| Rol | Conjunto | Válidas rechazadas | Antes (R2 sin daño) | Negativas que pasan (de 489) |
+|---|---|---|---|---|
+| GENERAL (y CONTEXT) | 417 fotos de Open Images | **2** (0,5 %) | 2 (0,5 %) | 0 |
+| PLATE | 137 recortes de Roboflow | **1** (0,7 %) | 1 (0,7 %) | 0 |
+| DETAIL | 374 fotos de prueba de CarDD | **16** (4,3 %) | 21 (5,6 %) | 0 |
+
+Con 0 negativas que pasan, la cota del 95 % es 3/489 = 0,6 %. El daño recupera 5 de los 21 primeros planos de
+CarDD que se rechazaban sin él. Las rechazadas siguen siendo fotos sin ninguna parte reconocible.
+
 ## Veredicto de la IA: solo GREEN o RED
 
 La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
