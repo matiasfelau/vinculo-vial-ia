@@ -765,6 +765,69 @@ también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y 
 Con 0 negativas que pasan, la cota del 95 % es 3/489 = 0,6 %. El daño recupera 5 de los 21 primeros planos de
 CarDD que se rechazaban sin él. Las rechazadas siguen siendo fotos sin ninguna parte reconocible.
 
+## Calibración de `REID_T` con VeRi-776 (`reid_veri.py`)
+
+R2 (`BURST_MISMATCH`) pide **0 pares del mismo auto por debajo de `REID_T`** (cota del 95 % = 3/N). Se calibra con
+VeRi-776, solo para **validar**: no se entrena nada y no se copia nada al repo (su licencia es solo de investigación,
+sin uso comercial). Para cada recorte de `image_test` (los 1 678 de `image_query` están dentro) corre lo mismo que la
+cascada: segmenta los autos, toma el más grande y embebe su máscara (`rfdetr_seg_coco` + `dinov2_vits14`).
+
+```powershell
+$env:VERI_DIR = "D:\vv-eval\veri\VeRi"; $env:EVAL_OUT = "D:\vv-eval\out\reid-veri"; $env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/reid_veri.py
+```
+
+Opciones: `--per-track N` (recortes por auto y cámara, 3), `--workers N` (recortes embebidos a la vez, 4), `--limit N`
+(para probar) y `--max-false-red` (tasa de pares del mismo auto debajo del umbral propuesto, 0,1 %).
+
+- **Mismo auto**: mismo ID y cámaras distintas. **Autos distintos**: IDs distintos; aparte los **difíciles**, con el
+  mismo color y el mismo tipo según `test_label.xml`.
+- Un recorte donde el segmentador no encuentra ningún auto **no es comparable** (en la cascada R2 no decide: GREEN).
+
+Resultado (5 011 recortes elegidos, 198 autos y 19 cámaras):
+
+| Dato | Valor |
+|---|---|
+| Recortes comparables | 4 010 de 5 011; 1 001 (20 %) sin auto segmentado |
+| Pares del mismo auto (N) | 48 437 |
+| Pares de autos distintos / difíciles | 7 985 843 / 902 906 |
+| Coseno medio: mismo auto / distintos / difíciles | 0,654 / 0,557 / 0,632 |
+| AUC (1,0 = se separan del todo): todos / difíciles | 0,664 / 0,548 |
+| **Umbral exacto** (0 pares del mismo auto debajo) | **−0,037**, cota del 95 % = 3/48 437 = 0,006 % |
+| Autos distintos que detecta con el exacto (todos / difíciles) | 0,004 % / 0 % (**inútil**) |
+| **`REID_T` propuesto** | **0,075**: 48 pares del mismo auto debajo (0,10 %), repartidos en 12 de 198 autos |
+| Autos distintos que salen `BURST_MISMATCH` con 0,075 (todos / difíciles) | 0,55 % / 0,03 % |
+
+Curva (falso rojo = par del mismo auto por debajo del umbral; detectados = autos distintos que salen `BURST_MISMATCH`):
+
+| `REID_T` | Pares del mismo auto debajo (falsos rojos) | Autos distintos detectados | Difíciles detectados |
+|---|---|---|---|
+| 0,05 | 22 (0,05 %) | 0,26 % | 0,01 % |
+| **0,075** | **48 (0,10 %)** | **0,55 %** | **0,03 %** |
+| 0,10 | 86 (0,18 %) | 1,01 % | 0,05 % |
+| 0,20 | 303 (0,63 %) | 4,21 % | 0,35 % |
+| 0,30 | 902 (1,86 %) | 8,33 % | 1,51 % |
+| 0,40 | 2 413 (4,98 %) | 15,8 % | 5,02 % |
+| 0,50 (valor anterior) | 6 770 (13,98 %) | 31,3 % | 15,6 % |
+
+Los histogramas de similitud se solapan casi por completo: los pares del mismo auto se concentran entre 0,50 y 0,80
+y los de autos distintos entre 0,45 y 0,75. **En VeRi la re-ID no separa lo suficiente** para acusar fraude sin falsos
+rojos: con 0,50 (el valor anterior) el 14 % de los pares del mismo auto se marcaría como otro auto. Con 0,075 el falso
+rojo cae al 0,1 %, pero R2 casi no se dispara (detecta 0,55 % de los autos distintos): solo salta ante recortes
+groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto con estos datos.
+
+**Limitaciones**
+
+- **Dominio distinto.** VeRi son recortes de cámaras de vigilancia de baja resolución, con cámaras y luz distintas
+  entre fotos del mismo auto. Las fotos de la app son de celular, de la misma escena y en segundos: lo esperable es
+  que el mismo auto se parezca **más** y que 0,075 sea demasiado bajo. Hay que medirlo con fotos propias (pares
+  general–patente del mismo auto y de autos distintos) antes de subirlo.
+- **`REID_T` queda provisorio** hasta esa validación (`.env.example`, `config.py`).
+- Los pares no son independientes (200 autos, unos 24 recortes por auto): la cota 3/N con N = 48 437 es optimista; el
+  tamaño efectivo está más cerca de la cantidad de autos y de pares de cámaras.
+- El 20 % de los recortes sin auto segmentado es por la baja resolución; en fotos de celular no se espera.
+- Se usan hasta 3 recortes por auto y cámara (5 011 de los 11 579) para acotar el costo (unos 40 minutos en CPU).
+
 ## Veredicto de la IA: solo GREEN o RED
 
 La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
@@ -772,7 +835,7 @@ La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
 | Regla | Código | Cuándo |
 |---|---|---|
 | R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay evidencia de un auto: GENERAL y CONTEXT, un auto; PLATE, un auto, una parte o una patente; DETAIL, lo mismo o una caja de daño de confianza `DAMAGE_PRESENCE_T`. |
-| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`). Dudoso o no comparable: GREEN. |
+| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,075 con VeRi). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
 | R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE` | Sin fraude: foto ilegible o no se pudo redactar todas las fotos. |
 | R5 | (sin códigos) | Todo lo demás: GREEN. |

@@ -49,7 +49,8 @@ class Settings(BaseSettings):
 
     # Umbrales del dominio
     # coseno bajo el cual la re-ID confirma que es otro auto. SIN CALIBRAR: falta VeRi-776
-    reid_t: float = Field(default=0.50, ge=0.0, le=1.0)
+    # provisorio: calibrado con VeRi-776 (tools/eval/README.md), que no es el dominio de las fotos de celular
+    reid_t: float = Field(default=0.075, ge=0.0, le=1.0)
     # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
     # el daño solo cuenta como presencia de auto en DETAIL; ver tools/eval/presence.py

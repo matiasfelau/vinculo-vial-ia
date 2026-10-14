@@ -318,7 +318,7 @@ def test_el_reporte_es_serializable_y_no_nombra_fotos() -> None:
     assert report["auc"] == 1.0
     assert "auto-secreto" not in text and "otro" not in text
     assert (
-        report["valores_actuales"]["REID_T_LOW"] == 0.5 and report["valores_actuales"]["REID_T_HIGH"] == 0.7
+        report["valores_actuales"]["REID_T_LOW"] == 0.075 and report["valores_actuales"]["REID_T_HIGH"] == 0.7
     )
 
 
