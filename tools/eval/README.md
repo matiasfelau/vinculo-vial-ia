@@ -668,6 +668,52 @@ alertas a la vez (`WORKERS` > 1) cada una usa hasta `REDACT_WORKERS` hilos más,
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
 También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.
 
+### Producción: hilos por alerta y concurrencia del consumer
+
+Tres perillas multiplican el uso de CPU de **una** instancia del servicio:
+
+| Variable | Qué controla | Por defecto |
+|---|---|---|
+| `WORKERS` | Alertas que se procesan a la vez. Es el tamaño del pool de inferencia **y** el `prefetch` del consumer de RabbitMQ: el broker no entrega más de `WORKERS` mensajes sin confirmar a la instancia. | 2 |
+| `REDACT_WORKERS` | Fotos que **cada alerta** planifica a la vez al redactar (rostros, patentes y OCR). Se acota a la cantidad de fotos de la alerta (3 a 5). | 3 |
+| `ONNX_INTRA_OP_THREADS` | Hilos de ONNX Runtime **por inferencia**. Con 0 cada inferencia usa todos los núcleos. | 0 |
+
+`REDACT_WORKERS` **multiplica** los hilos de cada alerta, y `WORKERS` multiplica ese resultado:
+
+```
+inferencias simultáneas  ≈ WORKERS × REDACT_WORKERS         (solo durante la redacción)
+hilos de cálculo         ≈ WORKERS × REDACT_WORKERS × ONNX_INTRA_OP_THREADS
+```
+
+Con los valores por defecto hay hasta 2 × 3 = 6 inferencias a la vez y, con `ONNX_INTRA_OP_THREADS=0`, cada una
+intenta usar todos los núcleos: el sistema se sobrecarga y cada alerta tarda **más** que con menos paralelismo
+(los 9,9 s de la alerta de 5 fotos se midieron con `WORKERS` = 1, una alerta por vez, en 6 núcleos físicos).
+La regla para no saturar la CPU es:
+
+```
+WORKERS × REDACT_WORKERS × ONNX_INTRA_OP_THREADS  ≤  núcleos físicos del contenedor
+```
+
+La regla es conservadora: con `WORKERS=1` lo medido (abajo) la supera y rinde, porque una inferencia sola no ocupa
+todos los núcleos (por eso 3 fotos a la vez son más rápidas que una por una). Úsala como tope cuando hay varias alertas
+a la vez. Si hay varias réplicas del servicio en el mismo nodo, el tope es el de **todas** juntas. Puntos de partida (hay que
+validarlos con `tools/eval/cascade.py --redact-workers N --threads M` en el hardware real):
+
+| Núcleos físicos | `WORKERS` | `REDACT_WORKERS` | `ONNX_INTRA_OP_THREADS` | Para qué |
+|---|---|---|---|---|
+| 4 | 1 | 2 | 2 | Una alerta por vez, lo más rápida posible. |
+| 4 | 2 | 1 | 2 | Dos alertas a la vez, cada una más lenta. |
+| 8 | 2 | 2 | 2 | Término medio. |
+| 6 (Ryzen 5 3600) | 1 | 3 | 0 | Lo medido: 9,9 s con 5 fotos de 4000 × 3000 px. |
+
+- **Latencia de una alerta** (la que tiene meta de 12 s): conviene `WORKERS` bajo y `REDACT_WORKERS` alto.
+- **Cantidad de alertas por minuto**: conviene `WORKERS` más alto y `REDACT_WORKERS` bajo. El paralelismo entre fotos
+  ya se aprovecha dentro de cada alerta, así que subir ambos a la vez no suma: compite por los mismos núcleos.
+- Más `WORKERS` también significa más fotos descifradas y decodificadas en RAM a la vez (cada foto de 12 megapíxeles
+  ocupa unos 36 MB sin comprimir); el límite de memoria del contenedor tiene que cubrir `WORKERS` alertas de 5 fotos.
+- Si la cola crece, es preferible agregar réplicas (cada una con su propio `prefetch`) y repartir los núcleos entre
+  ellas, no subir `WORKERS` por encima de los núcleos disponibles.
+
 ## Presencia de auto en todas las fotos (`presence.py`)
 
 Mide qué regla decide bien que en una foto hay un auto (o, en PLATE y DETAIL, una parte). Corre el detector, el
