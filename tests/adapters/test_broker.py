@@ -16,12 +16,14 @@ from tests.fakes import REDACTION, THRESHOLDS, FakeWriter, build_scenario, happy
 from vvi_ia.adapters.breaker import CircuitBreaker
 from vvi_ia.adapters.broker import (
     DISCARD_REASON_HEADER,
+    EVENT_ID_NAMESPACE,
     EVENT_TYPE_IN,
     AmqpPublisher,
     EvidenceMessageHandler,
     InvalidEnvelopeError,
     PublishFailedError,
     build_validated_event,
+    build_validation_failed_event,
     death_count,
     parse_envelope,
 )
@@ -35,6 +37,7 @@ from vvi_ia.domain.model import (
     ValidationResult,
     Verdict,
 )
+from vvi_ia.domain.verdict import is_fraud
 from vvi_ia.logging_setup import JsonFormatter
 from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import ObjectNotFoundError, SystemDecryptionError, TransientError
@@ -72,12 +75,17 @@ class FakePublisher:
         self.events: list[tuple[str, bytes, str, str | None]] = []
         self.dlq: list[tuple[str, bytes, str]] = []
         self.fail_events = False
+        self.event_failures = 0  # las próximas N publicaciones de eventos no se confirman
+        self.event_error: Exception | None = None  # una excepción que no es PublishFailedError
         self.fail_dlq = False
 
     async def publish_event(
         self, routing_key: str, body: bytes, message_id: str, correlation_id: str | None
     ) -> None:
-        if self.fail_events:
+        if self.event_error is not None:
+            raise self.event_error
+        if self.fail_events or self.event_failures > 0:
+            self.event_failures = max(0, self.event_failures - 1)
             raise PublishFailedError("sin confirm")
         self.order.append("publish_event")
         self.events.append((routing_key, body, message_id, correlation_id))
@@ -168,6 +176,40 @@ def _x_death(count: int, queue: str = QUEUE) -> dict[str, Any]:
     return {
         "x-death": [{"queue": queue, "count": count, "reason": "rejected", "exchange": "vvi.topic.exchange"}]
     }
+
+
+def _causation(msg: FakeMessage) -> uuid.UUID:
+    return uuid.UUID(json.loads(msg.body)["eventId"])
+
+
+def _tampered(
+    rig: Rig, mutate: Callable[[dict[str, Any]], object], event_id: uuid.UUID | None = None
+) -> bytes:
+    """El evento válido con el payload alterado por `mutate`: el sobre sigue siendo válido."""
+    envelope = json.loads(_envelope_body(rig.payload, event_id))
+    mutate(envelope["payload"])
+    return json.dumps(envelope).encode()
+
+
+def _only_validation_failed(rig: Rig, causation: uuid.UUID) -> dict[str, Any]:
+    """El único evento publicado es el RED `VALIDATION_FAILED` de esta alerta y no lleva nada más."""
+    ((routing_key, body, message_id, _),) = rig.publisher.events
+    event: dict[str, Any] = json.loads(body)
+    assert routing_key == "ia.evidence.validated.red"
+    assert message_id == event["eventId"] == str(uuid.uuid5(EVENT_ID_NAMESPACE, str(causation)))
+    assert event["eventType"] == "ia.evidence.validated"
+    assert event["actor"] is None
+    assert event["payload"] == {
+        "alert_id": rig.payload.alert_id,
+        "causation_event_id": str(causation),
+        "verdict": "RED",
+        "reason_codes": ["VALIDATION_FAILED"],
+        "scores": {},
+        "model_versions": {},
+        "redacted": [],
+    }
+    assert not is_fraud(ReasonCode(code) for code in event["payload"]["reason_codes"])
+    return event
 
 
 # --- camino feliz: ack solo después del confirm ----------------------------------------
@@ -292,7 +334,8 @@ async def test_al_superar_max_retries_va_a_la_dlq_con_la_cola_de_trabajo_y_luego
 
     await rig.handler.handle(msg)
 
-    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]  # primero el aviso de validación fallida
+    _only_validation_failed(rig, _causation(msg))
     queue, body, reason = rig.publisher.dlq[0]
     assert queue == QUEUE  # routing key = nombre de la cola de trabajo, no la del evento
     assert body == msg.body
@@ -381,7 +424,7 @@ async def test_payload_de_otro_bucket_va_a_la_dlq() -> None:
 
     await rig.handler.handle(rig.message(json.dumps(tampered).encode()))
 
-    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]  # el alert_id es legible: se avisa antes
     assert rig.use_case.calls == []
 
 
@@ -416,9 +459,9 @@ async def test_error_del_sistema_va_a_la_dlq_sin_reintento(error: Exception) -> 
 
     await rig.handler.handle(msg)
 
-    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]
     assert rig.publisher.dlq[0][2] == f"system_error:{type(error).__name__}"
-    assert rig.publisher.events == []
+    _only_validation_failed(rig, _causation(msg))
 
 
 async def test_un_error_inesperado_no_termina_el_consumidor_y_va_a_la_dlq() -> None:
@@ -427,8 +470,9 @@ async def test_un_error_inesperado_no_termina_el_consumidor_y_va_a_la_dlq() -> N
 
     await rig.handler.handle(msg)  # no lanza
 
-    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]
     assert rig.publisher.dlq[0][2] == "unexpected_error:RuntimeError"
+    _only_validation_failed(rig, _causation(msg))
 
 
 async def test_si_el_ack_falla_no_se_propaga_la_excepcion(caplog: pytest.LogCaptureFixture) -> None:
@@ -444,6 +488,249 @@ async def test_si_el_ack_falla_no_se_propaga_la_excepcion(caplog: pytest.LogCapt
         await rig.handler.handle(msg)
 
     assert any("no se pudo confirmar" in r.getMessage() for r in caplog.records)
+
+
+# --- VALIDATION_FAILED: el aviso a Alert antes de derivar a la DLQ ------------------------
+
+
+def _only_alert_id(payload: dict[str, Any]) -> None:
+    for key in [k for k in payload if k != "alert_id"]:
+        del payload[key]
+
+
+def _uppercase_alert_id_and_other_bucket(payload: dict[str, Any]) -> None:
+    payload["alert_id"] = payload["alert_id"].upper()
+    payload["bucket"] = "otro-bucket"
+
+
+INVALID_PAYLOADS = [
+    pytest.param(lambda p: p.update(bucket="otro-bucket"), id="otro bucket"),
+    pytest.param(lambda p: p.pop("evidence"), id="sin evidencia"),
+    pytest.param(lambda p: p["evidence"][0].update(sha256="ABC"), id="sha256 inválido"),
+    pytest.param(lambda p: p.update(pat_enc_ia="valor-secreto-no-base64!!"), id="pat_enc_ia no es base64"),
+    pytest.param(lambda p: p.update(alert_type="PARKED_TOO_CLOSE"), id="tipo deshabilitado"),
+    pytest.param(_only_alert_id, id="solo el alert_id"),
+    pytest.param(_uppercase_alert_id_and_other_bucket, id="alert_id en mayúsculas"),
+]
+
+ILLEGIBLE_ALERT_IDS = [
+    pytest.param(lambda p: p.pop("alert_id"), id="falta"),
+    pytest.param(lambda p: p.update(alert_id=None), id="nulo"),
+    pytest.param(lambda p: p.update(alert_id=""), id="vacío"),
+    pytest.param(lambda p: p.update(alert_id="x"), id="no es un uuid"),
+    pytest.param(lambda p: p.update(alert_id=12345), id="número"),
+    pytest.param(lambda p: p.update(alert_id=["a"]), id="lista"),
+]
+
+DOOMED = ["payload inválido", "error del sistema", "error inesperado"]
+
+
+def _doomed(kind: str) -> tuple[Rig, bytes]:
+    """Un mensaje con alert_id legible que va a terminar en la DLQ por `kind`."""
+    if kind == "payload inválido":
+        rig = Rig()
+        return rig, _tampered(rig, lambda p: p.update(bucket="otro-bucket"))
+    rig = Rig(SystemDecryptionError("x") if kind == "error del sistema" else RuntimeError("bug"))
+    return rig, _envelope_body(rig.payload)
+
+
+@pytest.mark.parametrize("mutate", INVALID_PAYLOADS)
+async def test_payload_invalido_con_alert_id_avisa_validation_failed_y_recien_despues_va_a_la_dlq(
+    mutate: Callable[[dict[str, Any]], object],
+) -> None:
+    rig = Rig()
+    causation = uuid.uuid4()
+    msg = rig.message(_tampered(rig, mutate, causation), correlation_id="corr-9")
+
+    await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]
+    _only_validation_failed(rig, causation)  # incluso con el alert_id en mayúsculas: sale canónico
+    assert rig.publisher.events[0][3] == "corr-9"
+    queue, body, reason = rig.publisher.dlq[0]
+    assert (queue, body) == (QUEUE, msg.body)
+    assert reason.startswith("invalid_payload")
+    assert rig.use_case.calls == []
+
+
+@pytest.mark.parametrize("mutate", ILLEGIBLE_ALERT_IDS)
+async def test_sin_alert_id_legible_va_solo_a_la_dlq(mutate: Callable[[dict[str, Any]], object]) -> None:
+    rig = Rig()
+    msg = rig.message(_tampered(rig, mutate))
+
+    await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.publisher.events == []
+    assert rig.publisher.dlq[0][1] == msg.body
+    assert rig.publisher.dlq[0][2].startswith("invalid_payload")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"eventId": "no-uuid"}, {"eventType": "otro.evento"}, {"timestamp": "ayer"}, {"producer": None}],
+)
+async def test_sobre_invalido_va_solo_a_la_dlq_aunque_el_cuerpo_tenga_un_alert_id(
+    overrides: dict[str, Any],
+) -> None:
+    rig = Rig()
+    msg = rig.message(_envelope_body(rig.payload, **overrides))
+
+    await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.publisher.events == []
+    assert rig.publisher.dlq[0][2].startswith("invalid_envelope")
+
+
+async def test_reintentos_agotados_por_publicacion_fallida_avisan_si_el_broker_se_recupero() -> None:
+    rig = Rig()
+    rig.publisher.event_failures = 1  # solo falla la publicación del veredicto, no la del aviso
+    msg = rig.message(headers=_x_death(MAX_RETRIES))
+
+    await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]
+    _only_validation_failed(rig, _causation(msg))
+    assert rig.publisher.dlq[0][2] == "max_retries_exceeded:publish_failed"
+
+
+@pytest.mark.parametrize("kind", DOOMED)
+async def test_si_el_aviso_no_se_confirma_se_reintenta_sin_derivar_a_la_dlq(kind: str) -> None:
+    rig, body = _doomed(kind)
+    rig.publisher.fail_events = True
+    msg = rig.message(body, headers=_x_death(0))
+
+    await rig.handler.handle(msg)
+
+    assert msg.log == ["nack"]
+    assert msg.nack_requeue is False  # a la cola .retry, por la vía normal
+    assert rig.publisher.dlq == []
+    assert rig.publisher.events == []
+
+    rig.publisher.fail_events = False  # el broker se recupera: la siguiente entrega sí avisa
+    again = rig.message(body, headers=_x_death(1))
+    await rig.handler.handle(again)
+
+    assert again.log == ["ack"]
+    assert [event[0] for event in rig.publisher.events] == ["ia.evidence.validated.red"]
+    assert len(rig.publisher.dlq) == 1
+
+
+@pytest.mark.parametrize("kind", DOOMED)
+async def test_agotados_los_reintentos_sin_poder_avisar_va_a_la_dlq_sin_aviso(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig, body = _doomed(kind)
+    rig.publisher.fail_events = True
+    msg = rig.message(body, headers=_x_death(MAX_RETRIES))
+
+    with caplog.at_level(logging.ERROR):
+        await rig.handler.handle(msg)
+
+    assert rig.order == ["publish_dlq", "ack"]  # no queda en un ciclo: la DLQ es la salida
+    assert rig.publisher.events == []
+    assert rig.publisher.dlq[0][1] == body
+    assert any("sin poder avisar VALIDATION_FAILED" in r.getMessage() for r in caplog.records)
+
+
+async def test_si_la_dlq_no_confirma_despues_del_aviso_se_reintenta_y_el_aviso_se_repite_igual() -> None:
+    rig = Rig(SystemDecryptionError("x"))
+    rig.publisher.fail_dlq = True
+    body = _envelope_body(rig.payload)
+    msg = rig.message(body, headers=_x_death(0))
+
+    await rig.handler.handle(msg)
+
+    assert msg.log == ["nack"]
+    assert len(rig.publisher.events) == 1
+    assert rig.publisher.dlq == []
+
+    rig.publisher.fail_dlq = False
+    await rig.handler.handle(rig.message(body, headers=_x_death(1)))
+
+    first, second = rig.publisher.events
+    assert first[1] == second[1]  # mismo eventId y mismo cuerpo: Alert deduplica
+    assert len(rig.publisher.dlq) == 1
+
+
+async def test_una_excepcion_inesperada_al_avisar_no_escapa_y_cuenta_como_aviso_no_confirmado(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rig = Rig(SystemDecryptionError("x"))
+    rig.publisher.event_error = RuntimeError("detalle-interno-sensible")
+    msg = rig.message(headers=_x_death(0))
+
+    with caplog.at_level(logging.DEBUG):
+        await rig.handler.handle(msg)  # no lanza
+
+    assert msg.log == ["nack"]
+    assert rig.publisher.dlq == []
+    output = "\n".join(JsonFormatter().format(r) for r in caplog.records)
+    assert "RuntimeError" in output  # solo el tipo del error
+    assert "detalle-interno-sensible" not in output
+
+
+@pytest.mark.parametrize("kind", DOOMED)
+async def test_el_aviso_y_los_logs_no_contienen_el_criptograma_ni_datos_de_la_evidencia(
+    kind: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    rig, body = _doomed(kind)
+    msg = rig.message(body, headers=_x_death(0))
+
+    with caplog.at_level(logging.DEBUG):
+        await rig.handler.handle(msg)
+        rig.publisher.fail_events = True
+        await rig.handler.handle(rig.message(body, headers=_x_death(0)))  # también cuando el aviso falla
+
+    output = "\n".join(JsonFormatter().format(r) for r in caplog.records)
+    sent = rig.publisher.events[0][1].decode()
+    reason = rig.publisher.dlq[0][2]
+    secrets = [
+        rig.payload.pat_enc_ia,
+        "valor-secreto",
+        rig.payload.evidence[0].key,
+        rig.payload.evidence[0].sha256,
+    ]
+    assert caplog.records
+    for text in (output, sent, reason):
+        for secret in secrets:
+            assert secret not in text
+
+
+async def test_el_secreto_de_un_payload_invalido_no_llega_ni_al_aviso_ni_a_los_logs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rig = Rig()
+    secret = "valor-secreto-no-base64!!"
+    msg = rig.message(_tampered(rig, lambda p: p.update(pat_enc_ia=secret)))
+
+    with caplog.at_level(logging.DEBUG):
+        await rig.handler.handle(msg)
+
+    output = "\n".join(JsonFormatter().format(r) for r in caplog.records)
+    assert secret not in output
+    assert secret not in rig.publisher.events[0][1].decode()
+    assert secret not in rig.publisher.dlq[0][2]
+
+
+def test_el_evento_validation_failed_respeta_el_contrato_y_es_determinista() -> None:
+    rig = Rig()
+    alert_id, causation = rig.payload.alert_id, uuid.uuid4()
+
+    routing_key, body, event_id = build_validation_failed_event(alert_id, causation, NOW)
+
+    assert (routing_key, body, event_id) == build_validation_failed_event(alert_id, causation, NOW)
+    event = json.loads(body)
+    assert routing_key == "ia.evidence.validated.red"
+    assert set(event) == {"eventId", "eventType", "timestamp", "producer", "actor", "payload"}
+    assert event["eventId"] == str(event_id) == str(uuid.uuid5(EVENT_ID_NAMESPACE, str(causation)))
+    assert event["timestamp"] == "2026-10-07T12:00:00Z"
+    assert event["producer"] == "vinculo-vial-ia"
+    # Mismo contrato que el veredicto de la cascada, y el mismo eventId para el mismo evento de entrada.
+    _, normal_body, normal_id = build_validated_event(rig.payload, _result(), causation, NOW)
+    assert set(event["payload"]) == set(json.loads(normal_body)["payload"])
+    assert normal_id == event_id
 
 
 # --- actor ------------------------------------------------------------------------------
@@ -637,8 +924,8 @@ async def test_no_such_key_de_un_original_va_directo_a_la_dlq_sin_reintentos() -
 
     await rig.handler.handle(msg)
 
-    assert rig.order == ["publish_dlq", "ack"]
+    assert rig.order == ["publish_event", "publish_dlq", "ack"]
     assert rig.publisher.dlq[0][0] == QUEUE
     assert rig.publisher.dlq[0][2] == "system_error:ObjectNotFoundError"
-    assert rig.publisher.events == []
+    _only_validation_failed(rig, _causation(msg))
     assert msg.nack_requeue is None  # nunca se rechazó para reintentar

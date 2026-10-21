@@ -6,6 +6,7 @@ producción declara solo `vinculo-vial-core` (misma forma que `internal/topology
 
 import asyncio
 import json
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -186,6 +187,8 @@ async def test_mensaje_invalido_va_a_la_dlq_con_la_cola_de_trabajo_como_routing_
     assert message.body == b"no es json"
     assert message.headers["x-discard-reason"].startswith("invalid_envelope")
     assert use_case.calls == 0
+    # Sin sobre válido no hay alert_id legible: solo DLQ, ningún aviso.
+    assert (await (await channel.get_queue(CAPTURE)).declare()).message_count == 0
 
 
 async def test_falla_transitoria_reintenta_por_la_cola_retry_y_termina_en_la_dlq(
@@ -203,6 +206,72 @@ async def test_falla_transitoria_reintenta_por_la_cola_retry_y_termina_en_la_dlq
 
     assert use_case.calls == MAX_RETRIES + 1  # el intento original más MAX_RETRIES reintentos
     assert message.headers["x-discard-reason"].startswith("max_retries_exceeded")
+    # Antes de la DLQ se avisó a Alert que la validación falló (sin fraude).
+    notice = await _get(channel, CAPTURE)
+    assert notice.routing_key == "ia.evidence.validated.red"
+    assert json.loads(notice.body)["payload"]["reason_codes"] == ["VALIDATION_FAILED"]
+    assert json.loads(notice.body)["payload"]["alert_id"] == payload.alert_id
+
+
+async def test_payload_invalido_con_alert_id_publica_validation_failed_y_va_a_la_dlq(
+    channel: AbstractChannel,
+) -> None:
+    payload = build_scenario().payload
+    use_case = CountingUseCase(_ok)
+    consumer = _consumer(use_case, payload.bucket)
+    envelope = json.loads(_event(payload))
+    envelope["payload"]["evidence"] = []  # payload inválido con alert_id legible
+    body = json.dumps(envelope).encode()
+    await consumer.start()
+    try:
+        await _publish(channel, body)
+        dead = await _get(channel, f"{QUEUE}.dlq")
+        notice = await _get(channel, CAPTURE)
+    finally:
+        await consumer.stop()
+
+    event: dict[str, Any] = json.loads(notice.body)
+    assert notice.routing_key == "ia.evidence.validated.red"
+    assert notice.delivery_mode == aio_pika.DeliveryMode.PERSISTENT
+    assert event["payload"] == {
+        "alert_id": payload.alert_id,
+        "causation_event_id": envelope["eventId"],
+        "verdict": "RED",
+        "reason_codes": ["VALIDATION_FAILED"],
+        "scores": {},
+        "model_versions": {},
+        "redacted": [],
+    }
+    assert dead.body == body
+    assert dead.headers["x-discard-reason"].startswith("invalid_payload")
+    assert use_case.calls == 0
+    assert (await (await channel.get_queue(QUEUE)).declare()).message_count == 0
+
+
+async def test_si_el_aviso_no_tiene_ruta_reintenta_por_la_cola_retry_y_termina_en_la_dlq_sin_aviso(
+    channel: AbstractChannel, caplog: pytest.LogCaptureFixture
+) -> None:
+    payload = build_scenario().payload
+    use_case = CountingUseCase(_ok)
+    consumer = _consumer(use_case, payload.bucket)
+    envelope = json.loads(_event(payload))
+    envelope["payload"]["evidence"] = []
+    body = json.dumps(envelope).encode()
+    # Sin el binding de `ia.evidence.validated.*` el aviso vuelve como mandatory: no se confirma.
+    await (await channel.get_queue(CAPTURE)).unbind(MAIN, "ia.evidence.validated.*")
+    await consumer.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            await _publish(channel, body)
+            dead = await _get(channel, f"{QUEUE}.dlq")
+    finally:
+        await consumer.stop()
+
+    attempts = [r for r in caplog.records if "no se pudo publicar VALIDATION_FAILED" in r.getMessage()]
+    assert len(attempts) == MAX_RETRIES + 1  # el intento original más MAX_RETRIES reintentos
+    assert dead.body == body
+    assert dead.headers["x-discard-reason"].startswith("invalid_payload")
+    assert (await (await channel.get_queue(CAPTURE)).declare()).message_count == 0
 
 
 async def test_publicar_sin_ruta_falla_porque_mandatory_devuelve_el_mensaje(

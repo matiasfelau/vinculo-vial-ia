@@ -19,13 +19,14 @@ def test_cualquier_codigo_da_red(code: ReasonCode) -> None:
     assert aggregate([code]) == Verdict.RED
 
 
-def test_los_codigos_son_exactamente_los_cinco_de_red() -> None:
+def test_los_codigos_son_exactamente_los_seis_de_red() -> None:
     assert set(ReasonCode) == {
         R.NO_VEHICLE,
         R.BURST_MISMATCH,
         R.PLATE_MISMATCH,
         R.EVIDENCE_UNREADABLE,
         R.REDACTION_UNAVAILABLE,
+        R.VALIDATION_FAILED,
     }
     assert RED_CODES == set(ReasonCode)
 
@@ -42,7 +43,7 @@ def test_fraude_son_exactamente_tres_codigos() -> None:
     assert FRAUD_CODES <= RED_CODES
 
 
-@pytest.mark.parametrize("code", [R.EVIDENCE_UNREADABLE, R.REDACTION_UNAVAILABLE])
+@pytest.mark.parametrize("code", [R.EVIDENCE_UNREADABLE, R.REDACTION_UNAVAILABLE, R.VALIDATION_FAILED])
 def test_los_rojos_que_no_son_fraude_no_penalizan(code: ReasonCode) -> None:
     assert aggregate([code]) == Verdict.RED
     assert not is_fraud([code])

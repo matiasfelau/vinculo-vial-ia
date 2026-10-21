@@ -3,6 +3,11 @@
 La topología (exchanges, colas `.retry` y `.dlq`) la declara solo `vinculo-vial-core`; acá solo se
 consume y se publica sobre topología existente. El retry y la DLQ se rutean por el **nombre de la
 cola de trabajo**, nunca por la routing key del evento.
+
+Cuando un mensaje termina en la DLQ y su `alert_id` es legible (payload inválido, error del sistema,
+reintentos agotados o error inesperado), antes de derivarlo se publica `ia.evidence.validated.red` con el
+código `VALIDATION_FAILED` (sin fraude) para que Alert no espere el timeout de `PENDING_VALIDATION`. Si el
+sobre es inválido o no tiene `alert_id` legible, va solo a la DLQ.
 """
 
 import asyncio
@@ -10,6 +15,7 @@ import json
 import logging
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol, TypeVar
@@ -20,8 +26,14 @@ from aio_pika.abc import AbstractChannel, AbstractExchange, AbstractRobustConnec
 from aiormq.exceptions import AMQPError, ChannelInvalidStateError, DeliveryError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from vvi_ia.domain.model import ValidationResult
-from vvi_ia.service.payload import EvidenceUploaded, InvalidPayloadError, parse_evidence_uploaded
+from vvi_ia.domain.model import ReasonCode, ValidationResult, Verdict
+from vvi_ia.domain.verdict import aggregate
+from vvi_ia.service.payload import (
+    EvidenceUploaded,
+    InvalidPayloadError,
+    parse_evidence_uploaded,
+    readable_alert_id,
+)
 from vvi_ia.service.ports import ObjectNotFoundError, SystemDecryptionError, TransientError
 
 logger = logging.getLogger(__name__)
@@ -100,13 +112,17 @@ def death_count(headers: Mapping[str, Any] | None, queue: str) -> int:
     return count
 
 
-def build_validated_event(
-    payload: EvidenceUploaded,
-    result: ValidationResult,
+def _validated_event(
+    alert_id: str,
     causation_event_id: uuid.UUID,
     now: datetime,
+    verdict: Verdict,
+    details: Mapping[str, Any],
 ) -> tuple[str, bytes, uuid.UUID]:
-    """Arma `ia.evidence.validated.<verdict>`: (routing key, cuerpo JSON, eventId)."""
+    """Sobre `ia.evidence.validated.<verdict>`: (routing key, cuerpo JSON, eventId).
+
+    El eventId se deriva del evento de entrada: un reintento o una redelivery emite el mismo eventId.
+    """
     event_id = uuid.uuid5(EVENT_ID_NAMESPACE, str(causation_event_id))
     envelope = {
         "eventId": str(event_id),
@@ -115,9 +131,29 @@ def build_validated_event(
         "producer": PRODUCER,
         "actor": None,
         "payload": {
-            "alert_id": payload.alert_id,
+            "alert_id": alert_id,
             "causation_event_id": str(causation_event_id),
-            "verdict": result.verdict.value,
+            "verdict": verdict.value,
+            **details,
+        },
+    }
+    routing_key = ROUTING_KEY_PREFIX + verdict.value.lower()
+    return routing_key, json.dumps(envelope, separators=(",", ":")).encode(), event_id
+
+
+def build_validated_event(
+    payload: EvidenceUploaded,
+    result: ValidationResult,
+    causation_event_id: uuid.UUID,
+    now: datetime,
+) -> tuple[str, bytes, uuid.UUID]:
+    """Arma `ia.evidence.validated.<verdict>` con el resultado de la cascada."""
+    return _validated_event(
+        payload.alert_id,
+        causation_event_id,
+        now,
+        result.verdict,
+        {
             "reason_codes": [code.value for code in result.reason_codes],
             "scores": {
                 "burst_similarity": result.scores.burst_similarity,
@@ -129,9 +165,29 @@ def build_validated_event(
                 {"role": ref.role.value, "index": ref.index, "key": ref.key} for ref in result.redacted
             ],
         },
-    }
-    routing_key = ROUTING_KEY_PREFIX + result.verdict.value.lower()
-    return routing_key, json.dumps(envelope, separators=(",", ":")).encode(), event_id
+    )
+
+
+def build_validation_failed_event(
+    alert_id: str, causation_event_id: uuid.UUID, now: datetime
+) -> tuple[str, bytes, uuid.UUID]:
+    """Arma el RED `VALIDATION_FAILED` (sin fraude) que se publica antes de derivar un mensaje a la DLQ.
+
+    La cascada no llegó a un veredicto: va sin scores, sin versiones de modelo y sin fotos redactadas.
+    """
+    codes = (ReasonCode.VALIDATION_FAILED,)
+    return _validated_event(
+        alert_id,
+        causation_event_id,
+        now,
+        aggregate(codes),
+        {
+            "reason_codes": [code.value for code in codes],
+            "scores": {},
+            "model_versions": {},
+            "redacted": [],
+        },
+    )
 
 
 class IncomingLike(Protocol):
@@ -230,8 +286,20 @@ def _delivery_detail(exc: DeliveryError) -> str:
     return str(args[0]) if args and isinstance(args[0], str) else type(exc).__name__
 
 
+@dataclass
+class _Delivery:
+    """Lo que se sabe de un mensaje mientras se procesa: con eso se avisa a Alert si termina en la DLQ."""
+
+    correlation_id: str
+    event_id: uuid.UUID | None = None  # eventId del sobre, una vez que el sobre es válido
+    alert_id: str | None = None  # alert_id legible del payload, aunque el resto del payload sea inválido
+
+
 class EvidenceMessageHandler:
-    """Procesa un mensaje: valida, corre la cascada en el pool, publica con confirm y recién ahí hace ack."""
+    """Procesa un mensaje: valida, corre la cascada en el pool, publica con confirm y recién ahí hace ack.
+
+    Si el mensaje termina en la DLQ con un `alert_id` legible, antes publica RED `VALIDATION_FAILED`.
+    """
 
     def __init__(
         self,
@@ -254,18 +322,16 @@ class EvidenceMessageHandler:
 
     async def handle(self, message: IncomingLike) -> None:
         """Nunca lanza: un error inesperado deriva el mensaje a la DLQ."""
-        correlation_id = message.correlation_id or str(uuid.uuid4())
+        delivery = _Delivery(correlation_id=message.correlation_id or str(uuid.uuid4()))
         try:
-            outcome = await self._process(message, correlation_id)
+            outcome = await self._process(message, delivery)
         except Exception as exc:  # noqa: BLE001 - el consumidor nunca debe terminar por un mensaje
             logger.error(
                 "error inesperado procesando el mensaje",
-                extra={"correlation_id": correlation_id, "error": type(exc).__name__},
+                extra={"correlation_id": delivery.correlation_id, "error": type(exc).__name__},
             )
-            outcome = await self._dead_letter(
-                message, f"unexpected_error:{type(exc).__name__}", correlation_id
-            )
-        await self._settle(message, outcome, correlation_id)
+            outcome = await self._dead_letter(message, f"unexpected_error:{type(exc).__name__}", delivery)
+        await self._settle(message, outcome, delivery.correlation_id)
 
     async def _settle(self, message: IncomingLike, outcome: Outcome, correlation_id: str) -> None:
         try:
@@ -283,11 +349,14 @@ class EvidenceMessageHandler:
                 },
             )
 
-    async def _process(self, message: IncomingLike, correlation_id: str) -> Outcome:
+    async def _process(self, message: IncomingLike, delivery: _Delivery) -> Outcome:
+        correlation_id = delivery.correlation_id
         try:
             envelope = parse_envelope(message.body)
         except InvalidEnvelopeError as exc:
-            return await self._dead_letter(message, f"invalid_envelope: {exc}", correlation_id)
+            return await self._dead_letter(message, f"invalid_envelope: {exc}", delivery)
+        delivery.event_id = envelope.eventId
+        delivery.alert_id = readable_alert_id(envelope.payload)
         if envelope.actor is not None:
             # IA nunca recibe identificadores de usuario: se ignora el valor (y no se loguea).
             logger.warning(
@@ -297,7 +366,7 @@ class EvidenceMessageHandler:
         try:
             payload = parse_evidence_uploaded(envelope.payload, self._bucket)
         except InvalidPayloadError as exc:
-            return await self._dead_letter(message, f"invalid_payload: {exc}", correlation_id)
+            return await self._dead_letter(message, f"invalid_payload: {exc}", delivery)
 
         try:
             result = await self._run_blocking(lambda: self._use_case.execute(payload))
@@ -310,7 +379,7 @@ class EvidenceMessageHandler:
                     "error": type(exc).__name__,
                 },
             )
-            return await self._retry_or_dead_letter(message, "transient_error", correlation_id)
+            return await self._retry_or_dead_letter(message, "transient_error", delivery)
         except (SystemDecryptionError, ObjectNotFoundError) as exc:
             logger.error(
                 "error del sistema procesando la evidencia",
@@ -320,13 +389,13 @@ class EvidenceMessageHandler:
                     "error": type(exc).__name__,
                 },
             )
-            return await self._dead_letter(message, f"system_error:{type(exc).__name__}", correlation_id)
+            return await self._dead_letter(message, f"system_error:{type(exc).__name__}", delivery)
 
         routing_key, body, event_id = build_validated_event(payload, result, envelope.eventId, self._clock())
         try:
             await self._publisher.publish_event(routing_key, body, str(event_id), correlation_id)
         except PublishFailedError:
-            return await self._retry_or_dead_letter(message, "publish_failed", correlation_id)
+            return await self._retry_or_dead_letter(message, "publish_failed", delivery)
         logger.info(
             "veredicto publicado",
             extra={
@@ -338,27 +407,74 @@ class EvidenceMessageHandler:
         )
         return Outcome.ACK
 
-    async def _retry_or_dead_letter(self, message: IncomingLike, reason: str, correlation_id: str) -> Outcome:
+    async def _retry_or_dead_letter(self, message: IncomingLike, reason: str, delivery: _Delivery) -> Outcome:
         retries = death_count(message.headers, self._queue)
         if retries >= self._max_retries:
             logger.error(
                 "se superó MAX_RETRIES; el mensaje va a la DLQ",
-                extra={"max_retries": self._max_retries, "correlation_id": correlation_id, "reason": reason},
+                extra={
+                    "max_retries": self._max_retries,
+                    "correlation_id": delivery.correlation_id,
+                    "reason": reason,
+                },
             )
-            return await self._dead_letter(message, f"max_retries_exceeded:{reason}", correlation_id)
+            return await self._dead_letter(message, f"max_retries_exceeded:{reason}", delivery)
         return Outcome.RETRY
 
-    async def _dead_letter(self, message: IncomingLike, reason: str, correlation_id: str) -> Outcome:
-        """Publica en la DLQ con la cola de trabajo como routing key; ack solo tras el confirm."""
+    async def _dead_letter(self, message: IncomingLike, reason: str, delivery: _Delivery) -> Outcome:
+        """Deriva el mensaje a la DLQ (routing key = cola de trabajo); ack solo tras el confirm.
+
+        Con `alert_id` legible, antes publica RED `VALIDATION_FAILED` con confirm. Si ese aviso no se
+        confirma, todavía no se deriva: se reintenta por la vía normal (`.retry`). Agotados los reintentos
+        el mensaje va a la DLQ sin aviso, para no quedar en un ciclo; el timeout de Alert lo expira.
+        """
+        if delivery.alert_id is not None and delivery.event_id is not None:
+            notified = await self._publish_validation_failed(
+                delivery.alert_id, delivery.event_id, delivery.correlation_id
+            )
+            if not notified and death_count(message.headers, self._queue) < self._max_retries:
+                return Outcome.RETRY
+            if not notified:
+                logger.error(
+                    "se agotaron los reintentos sin poder avisar VALIDATION_FAILED; va a la DLQ sin aviso",
+                    extra={"alert_id": delivery.alert_id, "correlation_id": delivery.correlation_id},
+                )
         logger.error(
             "mensaje derivado a la DLQ",
-            extra={"queue": self._queue, "reason": reason, "correlation_id": correlation_id},
+            extra={"queue": self._queue, "reason": reason, "correlation_id": delivery.correlation_id},
         )
         try:
             await self._publisher.publish_dlq(self._queue, message.body, reason)
         except PublishFailedError:
             return Outcome.RETRY
         return Outcome.ACK
+
+    async def _publish_validation_failed(
+        self, alert_id: str, causation_event_id: uuid.UUID, correlation_id: str
+    ) -> bool:
+        """Publica RED `VALIDATION_FAILED` con confirm. `False` si no se confirmó; nunca lanza."""
+        try:
+            routing_key, body, event_id = build_validation_failed_event(
+                alert_id, causation_event_id, self._clock()
+            )
+            await self._publisher.publish_event(routing_key, body, str(event_id), correlation_id)
+        except Exception as exc:  # noqa: BLE001 - se llama desde el manejo de errores: no puede lanzar
+            # Solo el tipo de error: nunca el mensaje ni el payload.
+            logger.warning(
+                "no se pudo publicar VALIDATION_FAILED",
+                extra={"alert_id": alert_id, "correlation_id": correlation_id, "error": type(exc).__name__},
+            )
+            return False
+        logger.info(
+            "aviso de validación fallida publicado",
+            extra={
+                "alert_id": alert_id,
+                "verdict": Verdict.RED.value,
+                "reason_codes": [ReasonCode.VALIDATION_FAILED.value],
+                "correlation_id": correlation_id,
+            },
+        )
+        return True
 
 
 class EvidenceConsumer:
