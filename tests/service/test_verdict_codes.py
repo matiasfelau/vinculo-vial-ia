@@ -107,8 +107,13 @@ def test_cada_codigo_rojo_se_produce_y_penaliza_solo_si_es_fraude(name: str) -> 
     assert is_fraud(result.reason_codes) == (case.code in FRAUD_CODES)
 
 
-def test_todos_los_codigos_tienen_un_escenario() -> None:
-    assert {case.code for case in RED.values()} == set(ReasonCode)
+# VALIDATION_FAILED no sale de la cascada: lo publica el consumidor al derivar un mensaje a la DLQ
+# (tests/adapters/test_broker.py).
+NOT_FROM_THE_CASCADE = {R.VALIDATION_FAILED}
+
+
+def test_todos_los_codigos_de_la_cascada_tienen_un_escenario() -> None:
+    assert {case.code for case in RED.values()} == set(ReasonCode) - NOT_FROM_THE_CASCADE
 
 
 # --- R5: lo dudoso o lo que no se puede comparar es GREEN ---------------------------------------------

@@ -837,8 +837,20 @@ La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
 | R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay evidencia de un auto: GENERAL y CONTEXT, un auto; PLATE, un auto, una parte o una patente; DETAIL, lo mismo o una caja de daño de confianza `DAMAGE_PRESENCE_T`. |
 | R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,075 con VeRi). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
-| R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE` | Sin fraude: foto ilegible o no se pudo redactar todas las fotos. |
+| R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE`, `VALIDATION_FAILED` | Sin fraude: foto ilegible, no se pudo redactar todas las fotos, o el mensaje terminó en la DLQ sin veredicto (`VALIDATION_FAILED`, ver abajo). |
 | R5 | (sin códigos) | Todo lo demás: GREEN. |
+
+`VALIDATION_FAILED` no sale de la cascada: lo publica el consumidor. Cuando un mensaje termina en la DLQ y su `alert_id`
+es legible, antes de derivarlo publica `ia.evidence.validated.red` con `reason_codes: ["VALIDATION_FAILED"]`, `scores` y
+`model_versions` vacíos y `redacted: []`, con publisher confirm, para que Alert no espere el timeout de
+`PENDING_VALIDATION`. Pasa con payload inválido (`invalid_payload`), error del sistema (`system_error`), reintentos
+agotados (`max_retries_exceeded`) y error inesperado (`unexpected_error`). El `eventId` se deriva del evento de entrada,
+como en cualquier veredicto: una redelivery repite el mismo aviso y Alert lo deduplica.
+
+- Un sobre inválido, o sin `alert_id` legible (un UUID), va solo a la DLQ, como antes.
+- Si el aviso no se confirma, el mensaje todavía no se deriva: se reintenta por la vía normal (`.retry`). Agotados los
+  `MAX_RETRIES` va a la DLQ sin aviso, para no quedar en un ciclo, y Alert lo expira por su timeout.
+- El aviso lleva solo el `alert_id`, el `eventId` de causa y el código; nunca se loguea el payload ni `pat_enc_ia`.
 
 Salieron de la cascada el chequeo de **rebajes** (experimental y en construcción: `MODEL_CURB` vacío, sin pesos) y el
 chequeo de **daño** (solo queda como prueba de presencia en DETAIL). `presence.py` calibra `DAMAGE_PRESENCE_T`: el primer

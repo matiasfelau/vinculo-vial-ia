@@ -44,6 +44,8 @@ class ReasonCode(StrEnum):
     PLATE_MISMATCH = "PLATE_MISMATCH"  # R3: lectura segura de una patente que no coincide (fraude)
     EVIDENCE_UNREADABLE = "EVIDENCE_UNREADABLE"  # R4: foto ilegible, alterada o demasiado grande
     REDACTION_UNAVAILABLE = "REDACTION_UNAVAILABLE"  # R4: no se pudo redactar todas las fotos
+    # R4: el mensaje terminó en la DLQ sin veredicto de la cascada (sin fraude); lo emite el consumidor
+    VALIDATION_FAILED = "VALIDATION_FAILED"
 
 
 RED_CODES: frozenset[ReasonCode] = frozenset(ReasonCode)

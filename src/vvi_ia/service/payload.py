@@ -103,6 +103,20 @@ class EvidenceUploaded(BaseModel):
         return sorted((item for item in self.evidence if item.role == role), key=lambda i: i.index)
 
 
+def readable_alert_id(raw: Mapping[str, Any]) -> str | None:
+    """`alert_id` del payload en forma canónica, aunque el resto del payload sea inválido.
+
+    `None` si falta o no es un UUID: sin él no hay a quién avisar. No mira (ni devuelve) nada más del payload.
+    """
+    value = raw.get("alert_id")
+    if not isinstance(value, str):
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return None
+
+
 def parse_evidence_uploaded(raw: Mapping[str, Any], expected_bucket: str) -> EvidenceUploaded:
     """Valida el payload y que apunte al bucket configurado (lista de permitidos).
 

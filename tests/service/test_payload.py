@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from vvi_ia.domain.model import AlertType, EvidenceRole
-from vvi_ia.service.payload import InvalidPayloadError, parse_evidence_uploaded
+from vvi_ia.service.payload import InvalidPayloadError, parse_evidence_uploaded, readable_alert_id
 
 BUCKET = "bucket-de-prueba"
 
@@ -137,3 +137,30 @@ def test_el_error_no_filtra_los_valores_recibidos() -> None:
         _parse(raw)
 
     assert "valor-secreto" not in str(exc.value)
+
+
+def test_readable_alert_id_devuelve_el_uuid_canonico_aunque_el_resto_sea_invalido() -> None:
+    alert_id = uuid.uuid4()
+
+    assert readable_alert_id({"alert_id": str(alert_id)}) == str(alert_id)
+    assert readable_alert_id({"alert_id": str(alert_id).upper(), "bucket": 3, "evidence": "x"}) == str(
+        alert_id
+    )
+    assert readable_alert_id({"alert_id": alert_id.hex}) == str(alert_id)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {},
+        {"alert_id": None},
+        {"alert_id": ""},
+        {"alert_id": "x"},
+        {"alert_id": 123},
+        {"alert_id": ["a"]},
+        {"alert_id": {"a": 1}},
+        {"alert_id": str(uuid.uuid4())[:-1]},
+    ],
+)
+def test_readable_alert_id_es_none_si_falta_o_no_es_un_uuid(raw: dict[str, Any]) -> None:
+    assert readable_alert_id(raw) is None
