@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "models": [
+    {
+      "name": "rfdetr_cardd",
+      "version": "rf-detr-small@cardd",
+      "ports": ["damage"],
+      "file": "rfdetr_cardd.onnx",
+      "sha256": "0610aa3a7f529d141dc98b0023f30e2cb07d003e44397696b0d882e6e83ceaca",
+      "license": "Apache-2.0 (modelo); los pesos heredan las condiciones de CarDD",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "RF-DETR Small ajustado con CarDD (PIC Lab, CAS; Wang, Li y Wu, IEEE T-ITS 24(7):7202-7214, 2023) con tools/training/damage/train.py y exportado con export.py",
+      "commercial": "escalable",
+      "notes": "CarDD sirve para investigacion con consentimiento previo del PIC Lab; el uso comercial, incluido probar sistemas comerciales, requiere su autorizacion previa. El dataset no se redistribuye y este archivo no se publica ni se redistribuye. Clases en el orden dent, scratch, crack, glass_shatter, lamp_broken, tire_flat. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels."
+    },
+    {
+      "name": "rfdetr_openimages",
+      "version": "rf-detr-small@openimages-v7",
+      "ports": ["detector", "face"],
+      "file": "rfdetr_openimages.onnx",
+      "sha256": "85169d8f980dabbeb5d4463dcfa25ed065c9a4b5152b329cc3347a5d11c1f9e2",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "RF-DETR Small ajustado a car, wheel, plate y face con un subconjunto de Open Images V7 (anotaciones CC BY 4.0, imágenes CC BY 2.0), con tools/training/detector/train.py y exportado con export.py",
+      "commercial": "yes",
+      "notes": "Un solo modelo para los puertos detector (car, wheel, plate) y face. Columnas de labels en el orden car, wheel, plate, face. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels. Nunca XL ni 2XL (PML 1.0). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
+    },
+    {
+      "name": "parseq",
+      "version": "parseq-bb5792a6@1902db043c02",
+      "ports": ["ocr"],
+      "file": "parseq.onnx",
+      "sha256": "7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991",
+      "license": "Apache-2.0 (código); los pesos no declaran licencia",
+      "paper": {
+        "title": "Scene Text Recognition with Permuted Autoregressive Sequence Models",
+        "venue": "ECCV",
+        "year": 2022
+      },
+      "source": "https://github.com/baudm/parseq (commit 1902db043c029a7e03a3818c616c06600af574be), pesos de la release v1.0.0 (parseq-bb5792a6.pt), exportado a ONNX con tools/export/parseq.py",
+      "commercial": "escalable",
+      "notes": "PARSeq base preentrenado, sin reentrenar. Antes de un uso comercial hay que confirmar con los autores la licencia de los pesos. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
+    },
+    {
+      "name": "rfdetr_seg_coco",
+      "version": "rf-detr-seg-small@coco",
+      "ports": ["segmenter"],
+      "file": "rfdetr_seg_coco.onnx",
+      "sha256": "202b2050c1776e7cc5b08e0632b7fee1b5fc52cb6fcc4bbcd56d36973351a335",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "https://storage.googleapis.com/rfdetr/rf-detr-seg-s-ft.pth (pesos de Roboflow entrenados con COCO, MD5 0a2a3006381d0c42853907e700eadd08), exportado a ONNX con tools/export/rfdetr_seg.py",
+      "commercial": "yes",
+      "notes": "RF-DETR-Seg Small sin reentrenar. Entrada fija 1x3x384x384, FP32, opset 17. Salidas dets, labels (91 columnas, indexadas por id de COCO: car = 3) y masks. Nunca XL ni 2XL (PML 1.0)."
+    },
+    {
+      "name": "dinov2_vits14",
+      "version": "facebook/dinov2-small@ed25f3a31f01",
+      "ports": ["embedder"],
+      "file": "dinov2_vits14.onnx",
+      "sha256": "0ada57dd13c4e98d025aeefe3cc181dd0c76a9016d939cc9d7d3814557c416d9",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "DINOv2: Learning Robust Visual Features without Supervision",
+        "venue": "TMLR",
+        "year": 2024
+      },
+      "source": "https://huggingface.co/facebook/dinov2-small, exportado a ONNX con tools/export/dinov2.py",
+      "commercial": "yes",
+      "notes": "Pesos de Meta sin entrenar ni ajustar. Entrada fija 1x3x224x224, FP32, opset 17."
+    },
+    {
+      "name": "scrfd_10g",
+      "version": "scrfd-10g-bnkps@insightface-buffalo_l",
+      "ports": ["face"],
+      "file": "scrfd_10g.onnx",
+      "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
+      "license": "InsightFace: pesos para investigación (datos WIDER FACE, CC BY-NC-ND); uso comercial con licencia de InsightFace",
+      "paper": {
+        "title": "Sample and Computation Redistribution for Efficient Face Detection",
+        "venue": "ICLR",
+        "year": 2022
+      },
+      "source": "det_10g.onnx del paquete buffalo_l de InsightFace (SCRFD-10G con puntos de la cara), copiado de https://huggingface.co/public-data/insightface; sin reentrenar ni modificar",
+      "commercial": "escalable",
+      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. El uso comercial requiere la licencia de InsightFace; el puerto face admite commercial = no por excepción de privacidad."
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+
+# Reglas de plataforma y del repo: no se versionan
+.clauderules
+CLAUDE.md
+
+# Pesos de modelos: nunca en git
+*.onnx
+*.pt
+*.pth
+*.safetensors
+*.engine
+*.tflite
+models/weights/

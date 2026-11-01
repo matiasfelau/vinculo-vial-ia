@@ -1,0 +1,84 @@
+[project]
+name = "vvi-ia"
+version = "0.1.0"
+description = "Perito stateless de evidencia fotográfica de Vínculo Vial"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "aio-pika>=9.4,<10",
+    "aiohttp>=3.10,<4",
+    "boto3>=1.35,<2",
+    "numpy>=2.0,<3",
+    "onnxruntime>=1.20,<2",
+    "opencv-python-headless>=4.10,<5",
+    "pydantic>=2.8,<3",
+    "pydantic-settings>=2.4,<3",
+    "pyhpke>=0.6,<0.7",
+    "rapidfuzz>=3.9,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "boto3-stubs[s3]>=1.35,<2",
+    "mypy>=1.11,<2",
+    "onnx>=1.17,<2",
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.24,<2",
+    "ruff>=0.6,<1",
+]
+# Export, etiquetado, entrenamiento y evaluación: corre fuera de Docker y nunca entra en la imagen.
+tools = [
+    "fiftyone>=1.0,<2",
+    "nltk>=3.9,<4",
+    "onnx>=1.17,<2",
+    "pytorch-lightning>=2.6,<3",
+    "rfdetr[train,augment]>=1.11,<2",
+    "timm>=1.0,<2",
+    "torch>=2.14,<3",
+    "torchvision>=0.29,<1",
+    "transformers>=5.19,<6",
+]
+
+# En Windows el torch de PyPI no trae CUDA: se toma del índice de PyTorch. En Linux (Colab) sí la trae.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vvi_ia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "models: integración con pesos reales; requiere MODELS_DIR y se omite si no está definido",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "ASYNC"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/vvi_ia/domain", "src/vvi_ia/service"]
+mypy_path = "src"
+plugins = ["pydantic.mypy"]

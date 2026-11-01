@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar uv
+        run: pip install uv==0.12.23
+      - name: Instalar dependencias
+        run: uv sync --frozen --extra dev
+      - name: Lint
+        run: uv run ruff check .
+      - name: Tipos (dominio y servicio)
+        run: uv run mypy src/vvi_ia/domain src/vvi_ia/service
+      - name: Tests
+        run: uv run pytest
