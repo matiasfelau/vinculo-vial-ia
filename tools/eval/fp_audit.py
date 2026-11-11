@@ -91,6 +91,10 @@ def summarize(
         "precision_corregida_con_dudosos": round(
             (tp + counts[REAL] + counts[DOUBT]) / (tp + false_positives), 4
         ),
+        # Para v2, camión, van y colectivo son clases de presencia (cuentan como auto): son aciertos.
+        "precision_corregida_otros_vehiculos_son_aciertos": round(
+            (tp + counts[REAL] + counts[OTHER]) / (tp + false_positives), 4
+        ),
     }
 
 
@@ -100,12 +104,14 @@ def combine(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     fp = sum(r["falsos_positivos"] for r in rows)
     real = sum(r["por_categoria"][REAL] for r in rows)
     doubt = sum(r["por_categoria"][DOUBT] for r in rows)
+    other = sum(r["por_categoria"].get(OTHER, 0) for r in rows)
     return {
         "aciertos": tp,
         "falsos_positivos": fp,
         "precision_oficial": round(tp / (tp + fp), 4),
         "precision_corregida": round((tp + real) / (tp + fp), 4),
         "precision_corregida_con_dudosos": round((tp + real + doubt) / (tp + fp), 4),
+        "precision_corregida_otros_vehiculos_son_aciertos": round((tp + real + other) / (tp + fp), 4),
     }
 
 

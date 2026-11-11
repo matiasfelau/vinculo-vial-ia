@@ -615,3 +615,18 @@ def test_v2_sin_clases_de_auto_en_el_manifest_no_arranca(tmp_path: Path) -> None
 
     with pytest.raises(ModelSetupError):
         build_models({"detector": MODEL_NAME_V2}, manifest, models_dir)
+
+
+def test_el_manifest_del_repo_declara_v2_sin_activarlo_y_deja_v1_intacto() -> None:
+    manifest = load_manifest(REPO_ROOT / "models" / "manifest.json")
+    v1, v2 = manifest.get(MODEL_NAME), manifest.get(MODEL_NAME_V2)
+
+    assert v1 is not None and v2 is not None
+    assert v1.sha256 == "85169d8f980dabbeb5d4463dcfa25ed065c9a4b5152b329cc3347a5d11c1f9e2"
+    assert v1.ports == ("detector", "face") and v1.classes is None  # v1 usa las clases de su adaptador
+    assert v2.ports == ("detector",) and v2.sha256 is not None and v2.file == f"{MODEL_NAME_V2}.onnx"
+    assert v2.classes is not None and v2.classes[:5] == ("car", "truck", "van", "bus", "plate")
+    assert not {"face", "wheel"} & set(v2.classes)
+    assert "rfdetr_openimages_v2" not in (REPO_ROOT / ".env.example").read_text(
+        encoding="utf-8"
+    )  # no se activa por defecto

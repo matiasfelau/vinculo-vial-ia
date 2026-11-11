@@ -326,6 +326,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--out-dir", type=Path, default=os.environ.get("EVAL_OUT"), help="salida (EVAL_OUT)")
     parser.add_argument("--models-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="MODELS_DIR")
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / "models" / "manifest.json")
+    parser.add_argument("--detector", default="rfdetr_openimages", help="modelo del puerto detector (v1 o v2)")
     parser.add_argument("--limit", type=int, help="fotos por conjunto (para probar rápido)")
     parser.add_argument(
         "--model-max-side",
@@ -358,7 +359,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     try:
         models = build_models(
-            {"detector": "rfdetr_openimages", "segmenter": "rfdetr_seg_coco", "damage": "rfdetr_cardd"},
+            {"detector": args.detector, "segmenter": "rfdetr_seg_coco", "damage": "rfdetr_cardd"},
             args.manifest,
             args.models_dir,
             params={
