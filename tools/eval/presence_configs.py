@@ -46,9 +46,15 @@ def thresholds_with(wheel: float) -> dict[str, float]:
 def run_config(
     scores: Mapping[str, Sequence[presence.Signals]], *, segmenter: bool, wheel: bool, wheel_t: float
 ) -> dict[str, Any]:
-    """R1 del servicio sin la caja de daño, con las opciones dadas."""
+    """R1 sin la caja de daño y con la patente en DETAIL, como en las tablas a, b, c1 y c2."""
     roles = presence.service_rule(
-        scores, 1.0, thresholds_with(wheel_t), segmenter=segmenter, damage=False, wheel=wheel
+        scores,
+        1.0,
+        thresholds_with(wheel_t),
+        segmenter=segmenter,
+        damage=False,
+        wheel=wheel,
+        detail_plate=True,
     )
     rejected = sum(roles[r]["rechazadas"] for r in CLOSE_UPS)
     total = sum(roles[r]["fotos"] for r in CLOSE_UPS)
@@ -56,7 +62,7 @@ def run_config(
         "segmentador": segmenter,
         "rueda": wheel,
         "umbral_rueda": wheel_t if wheel else None,
-        "reglas": {role: list(rule) for role, rule in presence.service_rules(segmenter, wheel).items()},
+        "reglas": {role: list(rule) for role, rule in presence.service_rules(segmenter, wheel, True).items()},
         "roles": roles,
         "U3": {
             "rechazadas": rejected,

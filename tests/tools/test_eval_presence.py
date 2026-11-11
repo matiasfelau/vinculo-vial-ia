@@ -187,6 +187,19 @@ def test_service_rule_aplica_la_regla_de_cada_rol_con_area_y_dano() -> None:
     assert out["plate"]["rechazadas"] == 2  # la rueda ya no cuenta como presencia
     assert out["detail"]["rechazadas"] == 2  # la rueda y el daño de 0,90, que no llega a 0,97
     assert presence.service_rule(scores, damage_t=0.97, wheel=True)["plate"]["rechazadas"] == 1
+    plate_only = {
+        "general": [{"plate": [[0.9, 0.3]]}],
+        "plate": [{"plate": [[0.9, 0.3]]}],
+        "detail": [{"plate": [[0.9, 0.3]]}],
+    }
+    now = presence.service_rule(plate_only, damage_t=1.0)
+    before = presence.service_rule(plate_only, damage_t=1.0, detail_plate=True)
+    assert (now["general"]["rechazadas"], now["plate"]["rechazadas"], now["detail"]["rechazadas"]) == (
+        1,
+        0,
+        1,
+    )
+    assert before["detail"]["rechazadas"] == 0  # antes una patente sola alcanzaba en DETAIL
     assert out["detail"]["negativas_que_pasan"] == 1  # el daño sin auto pasa en DETAIL
     assert out["general"]["negativas_que_pasan"] == 0 and out["general"]["cota_95_negativas"] == 1.0
 
@@ -197,8 +210,9 @@ def test_service_rules_sin_segmentador_quita_solo_esa_senal() -> None:
 
     assert all("seg" in rule for rule in with_seg.values())
     assert all("seg" not in rule for rule in without.values())
-    assert without["general"] == ("car",) and without["detail"] == ("car", "plate")
-    anterior = presence.service_rules(segmenter=False, wheel=True)  # la regla con la rueda
+    assert without["general"] == ("car",) and without["detail"] == ("car",)  # la patente no cuenta en DETAIL
+    assert without["plate"] == ("car", "plate")
+    anterior = presence.service_rules(segmenter=False, wheel=True, detail_plate=True)  # la regla anterior
     assert anterior["detail"] == ("car", "wheel", "plate")
 
 

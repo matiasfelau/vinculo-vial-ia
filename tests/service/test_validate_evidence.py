@@ -131,18 +131,32 @@ def test_el_mismo_defecto_en_cualquiera_de_los_detalles_alcanza() -> None:
 @pytest.mark.parametrize(
     ("boxes", "cars"),
     [
-        ([plate_box(0.95)], []),  # una patente
         ([], [CarInstance(rect(0, 60, 0, 60))]),  # un auto segmentado
         ([Box(0, 0, 90, 90, 0.9, BoxLabel.CAR)], None),  # un auto detectado, el segmentador sin modelo
     ],
 )
 @pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
-def test_en_plate_y_detail_basta_un_auto_o_una_patente(
+def test_en_plate_y_detail_basta_un_auto(
     boxes: list[Box], cars: list[CarInstance] | None, role_marker: int
 ) -> None:
     models = _only(happy_models(), role_marker, boxes, cars)
 
     assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_en_plate_una_patente_sola_alcanza() -> None:
+    models = _only(happy_models(), PLATE, [plate_box(0.95)], [])
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_en_detail_una_patente_sola_no_alcanza() -> None:
+    """Una patente arrancada o impresa haría pasar cualquier imagen: en DETAIL no cuenta como presencia."""
+    models = _only(happy_models(), detail_marker(0), [plate_box(0.95)], [])
+
+    result = _run(build_scenario(), models)
+
+    assert result.reason_codes == (R.NO_VEHICLE,) and is_fraud(result.reason_codes)
 
 
 @pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
@@ -506,7 +520,7 @@ def test_el_dano_no_cuenta_como_presencia_en_plate_ni_en_general() -> None:
 
 
 def test_el_dano_no_hace_rojo_a_un_detalle_valido_y_su_ausencia_tampoco() -> None:
-    models = happy_models()
+    models = _detail_with_car(happy_models(), 5)  # el auto da la presencia; la patente sola ya no alcanza
     models.damage.by_marker[detail_marker(0)] = []  # el problema "ausente" ya no es un veredicto
 
     assert _run(build_scenario(), models).verdict == Verdict.GREEN

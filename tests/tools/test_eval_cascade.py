@@ -174,7 +174,7 @@ def test_readable_plates_usa_la_foto_preparada(tmp_path: Path) -> None:
     assert seen == [original] and found == [(prepared, b"AB123CD")]
 
 
-def test_has_part_acepta_autos_o_patentes_grandes_y_rechaza_el_resto() -> None:
+def test_has_part_acepta_autos_y_rechaza_patentes_ruedas_y_el_resto() -> None:
     image = np.zeros((100, 100, 3), np.uint8)
 
     def models(boxes: list[Box], seg: list[int]) -> SimpleNamespace:
@@ -187,11 +187,11 @@ def test_has_part_acepta_autos_o_patentes_grandes_y_rechaza_el_resto() -> None:
 
     wheel = Box(0, 0, 40, 40, 0.9, BoxLabel.WHEEL)
     assert not cascade.has_part(models([wheel], []), image, 0.05)  # la rueda ya no cuenta
-    assert cascade.has_part(models([Box(0, 0, 40, 40, 0.9, BoxLabel.PLATE)], []), image, 0.05)
-    assert not cascade.has_part(models([Box(0, 0, 10, 10, 0.9, BoxLabel.PLATE)], []), image, 0.05)  # chica
     assert not cascade.has_part(
-        models([Box(0, 0, 40, 40, 0.3, BoxLabel.PLATE)], []), image, 0.05
-    )  # poco confiable
+        models([Box(0, 0, 40, 40, 0.9, BoxLabel.PLATE)], []), image, 0.05
+    )  # patente sola
+    assert cascade.has_part(models([Box(0, 0, 40, 40, 0.9, BoxLabel.CAR)], []), image, 0.05)
+    assert not cascade.has_part(models([Box(0, 0, 10, 10, 0.9, BoxLabel.CAR)], []), image, 0.05)  # chica
     assert cascade.has_part(models([], [30]), image, 0.05)  # un auto segmentado
 
 

@@ -1095,6 +1095,120 @@ mismas corridas limpias de arriba (`cascade.py --long-side 4000`, 20 alertas por
 
 Con 20 alertas el p95 es casi el máximo y varía de una corrida limpia a otra: conviene mirar la mediana.
 
+### R1 con la patente que ya no valida sola: P1 contra P2, por zoom (`plate_zoom.py`, `plate_rule.py`)
+
+**Decisión (11/11/2026):** una patente sola **no valida** una foto, porque alcanza con una patente arrancada o
+impresa para hacer pasar cualquier imagen. En GENERAL y DETAIL la patente **dejó de contar** como presencia
+(`_has_car`: solo `car` del detector, auto del segmentador y, en DETAIL, daño). En PLATE hay dos variantes, que
+se miden acá sin aplicar ninguna (el servicio sigue con P1):
+
+- **P1** (la actual): un auto **o** una patente.
+- **P2**: una patente **y** un auto (det ∨ seg), con el umbral de auto en barrido desde 0,30.
+
+**Cómo se armó el set de primeros planos realistas** (`plate_zoom.py`). Los recortes de siempre (137, de
+`presence.py`) llevan medio ancho de margen: la patente ocupa el 50 % del ancho, mucho más ajustado que lo que
+saca la app. El set nuevo sale de **imágenes completas**: las del dataset de Roboflow "patentes" (todas sus
+particiones, 135 imágenes) y las fotos con patente de la **partición de prueba de Open Images** de v1 (204 fotos).
+De cada patente anotada (lado menor ≥ 16 px: 252 en total) se recorta, **en memoria**, una ventana **4:3
+horizontal centrada en la patente** cuyo ancho es `ancho_de_la_patente / zoom`, con zoom 25 %, 40 % y 60 % (la
+patente ocupa ese porcentaje del ancho de la foto). Si la ventana se sale de la imagen se la corre hasta que
+entre; si no cabe, o queda de menos de 128 px de ancho, esa patente no entra. **Se usan solo las patentes que
+admiten los tres zooms**, para que la comparación entre niveles sea sobre las mismas: **151 patentes** (84 de
+Roboflow y 67 de Open Images), 151 fotos por zoom. Los identificadores no llevan nombres de archivo. Límites: 151
+patentes dan cotas anchas (de 5 a 9 puntos), las fotos de 128 a 400 px de ancho son de menor resolución que las
+de la app, y la ventana siempre es 4:3 horizontal y centrada: una app real puede inclinar, descentrar y variar.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:EVAL_DATA_DIR = "D:\vv-eval"; $env:MODELS_DIR = "models\weights"
+$env:EVAL_OUT = "D:\vv-eval\out\zoom-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_zoom.py   # ~8 min con v1; --detector <modelo> para otro
+$env:EVAL_OUT = "D:\vv-eval\out\r1-regla-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_rule.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --zoom-report D:\vv-eval\out\zoom-v1\plate_zoom_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas
+```
+
+`plate_rule.py` no vuelve a inferir: barre decisor (`det`, `seg`, `det ∨ seg`, `det ∧ seg`), variante y umbrales
+de auto, patente y segmentador de 0,30 a 0,95 (11 760 configuraciones). Son umbrales **solo de la medición**:
+ninguno se aplica. El área mínima de cada hallazgo es la del servicio (5 % de la foto).
+
+#### Rechazo de válidas por tipo y zoom (umbrales actuales 0,40 / 0,40 / 0,50; entre paréntesis la cota del 95 %)
+
+| Decisor | Regla | GENERAL (de 417) | PLATE 50 % (de 137) | PLATE 25 % (de 151) | PLATE 40 % (de 151) | PLATE 60 % (de 151) | DETAIL (de 374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 1 (≤ 3,4 %) | 8 (≤ 9,4 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 109 (≤ 85,1 %) | 129 (≤ 89,9 %) | 47 (≤ 37,9 %) | 99 (≤ 72,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 2 (≤ 1,5 %) | 1 (≤ 3,4 %) | 3 (≤ 5,1 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 21 (≤ 8,0 %) |
+| det ∨ seg | P2 | 2 (≤ 1,5 %) | 96 (≤ 76,5 %) | 128 (≤ 89,4 %) | 33 (≤ 28,1 %) | 85 (≤ 63,1 %) | 21 (≤ 8,0 %) |
+
+- **P2 rechaza casi todos los primeros planos de patente**, y por dos motivos distintos. En los **ajustados (50 %)
+  y en el 60 %** no hay auto que ver: el detector no encuentra un auto en una foto que es casi solo la patente
+  (96 y 85 de 151 con det ∨ seg). En el **25 %** sí hay auto, pero la patente ocupa cerca del **3 % del área** de
+  la foto y el mínimo del servicio es **5 %**: no cuenta (128 de 151). Con un mínimo de 1 % para la patente, P2 en
+  el 25 % baja de 128 a 13 rechazadas (última tabla), pero eso es otro cambio que nadie pidió. P2 solo anda bien
+  en el término medio (40 %: 33 de 151).
+- **P1** rechaza entre 1 y 4 de 151 con det ∨ seg a cualquier zoom, porque la patente sola (o el auto solo)
+  alcanza.
+
+#### Fotos sin auto aceptadas y U3 por alerta (mismos umbrales)
+
+La columna "nuevas" cuenta las aceptadas de 1 200 en GENERAL / PLATE / DETAIL (cada foto evaluada como si se
+hubiera enviado en ese rol); "sin las 3" las cuenta sin las 3 que tienen un auto real al fondo (de 1 197); en las
+489 vistas, 0 en todas. **U3 por alerta** = `1 - (1 - pG)(1 - pP)(1 - pD)` con una foto de cada rol (GENERAL +
+PLATE + un DETAIL; una alerta `PARKED_ON_GARAGE` trae CONTEXT en vez de DETAIL y no está medida), con la PLATE del
+zoom indicado.
+
+| Decisor | Regla | nuevas G / P / D | sin las 3 | U3 por alerta (PLATE 25 / 40 / 60 %) | S1 ≤ 5 |
+|---|---|---|---|---|---|
+| det | P1 | 15 / 20 / 15 | 12 / 17 / 12 | 13,9 % · 10,9 % · 11,5 % | no |
+| det | P2 | 15 / 0 / 15 | 12 / 0 / 12 | 86,8 % · 37,4 % · 68,7 % | no |
+| det ∨ seg | P1 | 15 / 20 / 15 | 12 / 17 / 12 | 7,9 % · 7,9 % · 8,6 % | no |
+| det ∨ seg | P2 | 15 / 0 / 15 | 12 / 0 / 12 | 85,7 % · 26,6 % · 58,9 % | no |
+
+**El supuesto de U3.** Se supone que las fotos de una misma alerta **fallan de forma independiente**. Es una
+estimación, no una medición: no hay alertas reales (las tres fotos salen de conjuntos distintos), y en la
+práctica las fallas de una alerta pueden estar correlacionadas (mismo auto, misma luz), lo que haría la unión
+real **menor**. La cota usa las cotas de cada foto en la misma fórmula: es conservadora, no un intervalo exacto.
+
+#### Configuraciones que cumplen S1 (≤ 5 de 1 200 en cada rol) y su costo
+
+La mejor de cada decisor y variante: la que minimiza el U3 medio de los tres zooms entre las que cumplen S1
+(optimizar un zoom solo mueve un umbral; todas están en `plate_rule.json`). Umbrales `car` / `plate` / `seg`.
+Columnas de rechazo: rechazadas de 417 / 137 / 151 / 151 / 151 / 374.
+
+| Decisor | Regla | Umbrales | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,55 / 0,80 / – | 19 | 14 | 17 | 19 | 27 | 53 | 5 / 5 / 5 | 27,3 · 28,4 · 32,7 % |
+| det | P2 | 0,55 / 0,30 / – | 19 | 119 | 130 | 65 | 116 | 53 | 5 / 0 / 5 | 88,6 · 53,3 · 81,0 % |
+| det ∨ seg | P1 | 0,55 / 0,80 / 0,30 | 4 | 10 | 6 | 6 | 18 | 27 | 5 / 5 / 5 | **11,8 · 11,8 · 19,1 %** |
+| det ∨ seg | P2 | 0,55 / 0,30 / 0,30 | 4 | 81 | 127 | 29 | 74 | 27 | 5 / 0 / 5 | 85,4 · 25,8 · 53,1 % |
+
+En las 489 vistas, 0 aceptadas. Sin las 3 con auto real al fondo (≤ 5 de 1 197) la mejor es det ∨ seg con P1 y
+0,55 / 0,65 / 0,30: rechaza 4 / 5 / 4 / 3 / 8 / 27 y da un U3 de 10,5 · 9,9 · 13,0 %. Notas:
+
+- **Costo de cumplir S1, contra el punto actual (det ∨ seg, P1):** el U3 por alerta pasa de ~8 % a ~12 % (zoom 25
+  y 40 %) o 19 % (60 %), y DETAIL de 21 a 27 rechazadas de 374. Con det solo (sin segmentador) el costo es mucho
+  mayor: 27 a 33 % por alerta.
+- **P2 no se recupera con ningún umbral:** cumple S1 sin esfuerzo (0 negativas aceptadas en PLATE) pero rechaza el
+  85 % de las alertas con un PLATE al 25 % y la mitad al 60 %, porque el costo no viene del umbral sino de que el
+  auto no está en la foto (o de que la patente es chica para el mínimo de área).
+- El umbral de segmentador 0,30 que eligen las mejores configuraciones está **por debajo del 0,50 vigente**: es la
+  primera vez que se barre por debajo. El segmentador no se enciende solo en ninguna negativa (ver arriba), así
+  que bajar su umbral casi no cuesta falsos de S1.
+- El criterio S1 ≤ 5 y la lectura de U3 son mi interpretación (ver más arriba). Los umbrales se eligieron sobre
+  las mismas negativas con las que se cuentan: es una cota optimista de lo que daría con fotos nuevas.
+
+#### Sensibilidad del área mínima de la patente (det ∨ seg, umbrales actuales; rechazadas de 137 / 151)
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 1 | 3 | 3 | 4 |
+| 5 % (servicio) | P2 | 96 | 128 | 33 | 85 |
+| 1 % | P1 | 1 | 1 | 2 | 4 |
+| 1 % | P2 | 96 | 13 | 30 | 85 |
+| 0 % | P1 | 1 | 1 | 2 | 4 |
+| 0 % | P2 | 96 | 12 | 30 | 85 |
+
+Es un diagnóstico para explicar por qué P2 rechaza el 25 %; no se propone cambiar `PRESENCE_MIN_AREA`.
+
 ### Precisión corregida del detector, por revisión manual de un solo revisor (`fp_audit.py`)
 
 Open Images no anota todo lo que se ve, así que parte de los "falsos positivos" son autos o patentes reales sin anotar.
@@ -1303,6 +1417,11 @@ valor sobre la mayor confianza de daño de una de las 489 fotos sin auto de Open
 95 % = 0,6 %), que recupera 5 de los 21 primeros planos de CarDD que las otras reglas rechazaban.
 
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
+
+> **Congelado y experimental, atado al detector v1 (decisión del 11/11/2026).** Es lo único que sigue usando
+> la clase `wheel` (`domain/ramp.py::wheel_diameter` mide la rueda para la escala del rebaje) y esa clase
+> existe solo en los pesos de v1 (`rfdetr_openimages`). El detector v2 no la tiene: con v2 no hay diámetro de
+> rueda y se usa la escala de respaldo. No se modifica ni se mantiene hasta que se retome el rebaje.
 
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
 del dataset propio (`EVAL_DATA_DIR\curb\dataset\test`, que arma `tools/training/curb/prepare.py` y no cambia).
