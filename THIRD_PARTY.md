@@ -79,7 +79,9 @@ No van al servicio. Se usan para preetiquetar o como referencia en las evaluacio
 ### Open Images V7
 
 - **Uso:** entrenamiento de `detector` y `face` con las clases Car, Wheel, Vehicle registration
-  plate y Human face.
+  plate y Human face (v1), y del detector v2 (`rfdetr_openimages_v2`, solo `detector`) con Car, Limousine, Taxi,
+  Truck, Van, Ambulance, Bus, Vehicle registration plate y las confusoras Airplane, Boat (y Barge, Gondola, Canoe),
+  Bicycle, Motorcycle, Wheelchair, Traffic sign (y Stop sign) y Clock (y sus variantes), más fotos de fondo.
 - **Licencia:** anotaciones CC BY 4.0. Las imágenes figuran con licencia CC BY 2.0.
 - **Cita:** Kuznetsova et al. *The Open Images Dataset V4: Unified image classification, object
   detection, and visual relationship detection at scale*. IJCV, 2020.

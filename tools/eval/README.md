@@ -1209,6 +1209,250 @@ En las 489 vistas, 0 aceptadas. Sin las 3 con auto real al fondo (≤ 5 de 1 197
 
 Es un diagnóstico para explicar por qué P2 rechaza el 25 %; no se propone cambiar `PRESENCE_MIN_AREA`.
 
+### Detector v2 contra v1
+
+El detector v2 (`rfdetr_openimages_v2`, ver [tools/training/detector_v2/README.md](../training/detector_v2/README.md)) se
+compara con v1 sobre **la prueba de v1**: las 204 fotos del split `test` de Open Images que ninguno de los dos vio. Mismas
+condiciones que arriba: el adaptador real, los umbrales del servicio (autos 0,40, patentes 0,20), cada foto reducida a
+1 024 px, IoU 0,5. Las cuatro corridas (v1 y v2, con y sin `PLATE_TILING`) se hicieron seguidas, una por vez, con la PC
+sin otras cargas.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\cmp-v2-sin"
+uv run --frozen --extra dev --extra tools python tools/eval/detector.py --split test --model rfdetr_openimages_v2 --dump-fp
+# con mosaico: --plate-tiling (EVAL_OUT distinto). Para v1: --model rfdetr_openimages
+```
+
+**Cómo leerla.** La verdad de la prueba solo anota `Car`, no `Truck`, `Bus` ni `Van`: v2 detecta esas clases como `car`
+(son presencia), así que sus camiones, vans y colectivos cuentan como falsos positivos de la precisión **oficial**. Por eso
+se da también la precisión corregida (abajo). v2 no tiene rueda ni rostro: solo se comparan autos y patentes.
+
+| Métrica | v1, sin mosaico | v2, sin mosaico | v1, con mosaico | v2, con mosaico |
+|---|---|---|---|---|
+| **Auto**: recall | 0,898 | 0,881 | 0,898 | 0,881 |
+| Auto: precisión oficial | 0,747 | 0,754 | 0,747 | 0,754 |
+| Auto: AP50 | 0,897 | 0,873 | 0,897 | 0,873 |
+| Auto: recall en chicos (< 32 px) | 0,333 (6 cajas) | 0,167 | 0,333 | 0,167 |
+| **Patente**: recall | 0,830 | 0,807 | 0,904 | 0,874 |
+| Patente: precisión oficial | 0,737 | 0,727 | 0,632 | 0,634 |
+| Patente: AP50 | 0,787 | 0,809 | 0,831 | 0,835 |
+| Patente: recall en chicas | 0,608 | 0,627 | 0,765 | 0,745 |
+| **Auto + patente (micro)**: recall | 0,873 | 0,855 | 0,900 | 0,879 |
+| Auto + patente: precisión oficial | 0,744 | 0,745 | 0,702 | 0,707 |
+| Auto + patente: AP50 | 0,851 | 0,832 | 0,866 | 0,852 |
+| Falsos positivos (auto / patente) | 74 / 40 | 70 / 41 | 74 / 71 | 70 / 68 |
+| **Latencia por foto** (media · mediana · p95, ms) | 324 · 315 · 394 | 334 · 317 · 430 | 1 569 · 1 616 · 1 800 | 1 620 · 1 675 · 1 864 |
+
+(Cajas reales: 244 autos y 135 patentes; el auto no cambia con el mosaico, que solo afecta a las patentes. Latencia en
+CPU, ONNX Runtime, AMD Ryzen 5 3600; sin contar decodificación ni reducción.)
+
+**Precisión corregida, por revisión manual de un solo revisor** (`fp_audit.py`, junto a la oficial, que no se
+reemplaza). La corregida de v1 es la ya revisada. Para v2 **reutilicé la revisión de v1** en cada falso positivo que
+coincide (misma foto, misma clase, IoU ≥ 0,5: 73 de 111 sin mosaico y 88 de 138 con mosaico) y **revisé a mano los
+nuevos** (38 y 50, con las cajas en hojas de contacto). La corregida cuenta como acierto un auto o patente real que el
+dataset no anotó; para v2 se da además una columna donde los camiones, vans y colectivos (`otro_vehiculo`) cuentan como
+acierto, porque en v2 son presencia de vehículo.
+
+| Auto + patente (micro) | Oficial | Corregida | Corregida con los dudosos | Corregida con otros vehículos como acierto |
+|---|---|---|---|---|
+| v1, sin mosaico | 0,744 | 0,888 | 0,924 | 0,910 |
+| v2, sin mosaico | 0,745 | 0,874 | 0,906 | **0,906** |
+| v1, con mosaico | 0,702 | 0,844 | 0,889 | 0,864 |
+| v2, con mosaico | 0,707 | 0,843 | 0,900 | **0,873** |
+
+Por clase, sin mosaico: **auto** corregida 0,904 (v1) y 0,902 (v2); con otros vehículos como acierto 0,939 y **0,951**.
+**Patente** corregida 0,855 (v1) y 0,820 (v2).
+
+Límites: es **un solo revisor**, y los veredictos de v2 no son idénticos en criterio a los de v1: sobre los mismos tipos
+de caja marqué más "dudosos" (9 contra 5 patentes sin mosaico; 22 contra 11 con mosaico), así que la cifra "con dudosos"
+es la más comparable. Los falsos positivos que heredé de v1 conservan su veredicto aunque v2 los hubiera visto distinto.
+Las diferencias de unas décimas entre v1 y v2 están dentro de lo que mueve esa revisión.
+
+**Lectura.** v2 es **un poco peor que v1 en recall** (auto 0,881 contra 0,898, patente 0,807 contra 0,830; micro 0,855
+contra 0,873) y en AP50 de auto (0,873 contra 0,897), y **un poco mejor en AP50 de patente** (0,809 contra 0,787). Su
+precisión oficial es igual (0,745 contra 0,744) y con camiones, vans y colectivos como aciertos la corregida de auto sube
+(0,951 contra 0,939). El recall de autos chicos baja de 0,33 a 0,17, pero son 6 cajas. La latencia es la misma
+(334 contra 324 ms; 1 620 contra 1 569 ms con mosaico). Estas diferencias son chicas para 204 fotos y 379 cajas; no
+alcanzan para decir que uno detecta mejor que el otro en esta prueba. Lo que v2 agrega no se ve acá: autos que no son
+`Car` (camiones, vans, colectivos) y las confusoras. Eso se mide en R1, abajo.
+
+### R1 con el detector v2: la regla de patente, v1 y v2 lado a lado
+
+Misma medición que la sección anterior (`presence.py`, `plate_zoom.py` y `plate_rule.py`, una por vez), repetida con
+`--detector rfdetr_openimages_v2`. En v2 **"auto" es cualquier clase de presencia** (`car`, `truck`, `van`, `bus`: el
+adaptador devuelve una caja `car`); v2 no tiene rueda, así que R1 nunca la usó. Las señales de v2 están en
+`D:\vv-eval\out\presence-v2` y `zoom-v2`, el análisis en `r1-regla-v2`.
+
+```powershell
+$env:EVAL_OUT = "D:\vv-eval\out\presence-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/presence.py --detector rfdetr_openimages_v2 --fresh-negatives D:\vv-eval\presence-negativas-nuevas --fresh-limit 1200   # ~1 h
+$env:EVAL_OUT = "D:\vv-eval\out\zoom-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_zoom.py --detector rfdetr_openimages_v2
+$env:EVAL_OUT = "D:\vv-eval\out\r1-regla-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_rule.py --report D:\vv-eval\out\presence-v2\presence_report.json --zoom-report D:\vv-eval\out\zoom-v2\plate_zoom_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas --exclude-negatives D:\vv-eval\out\neg-v2\vehiculos_reales.json
+```
+
+#### Las "negativas" de v2 no son todas sin vehículo (revisión a mano)
+
+Las negativas (489 vistas y 1 200 nuevas) son fotos de Open Images **sin `Car`, `Wheel` ni patente anotados**. No excluyen
+`Truck`, `Bus` ni `Van`, que para v2 **sí son presencia**. Con los umbrales actuales v2 acepta 16 de las 1 200 (v1, 15) y 3
+de las 489 (v1, 0). Revisé a mano las **22 fotos** donde v2 ve un auto con confianza ≥ 0,30 (área ≥ 5 %), con la misma
+regla que usé para los falsos positivos (un solo revisor):
+
+| Qué hay en la foto | Fotos |
+|---|---|
+| **Un vehículo real** (camión, colectivo, van, ambulancia, auto parcial o al fondo) | 11 |
+| Dudoso (una mujer dentro de un auto, gente arriba de un colectivo de dos pisos, un auto de carrera, un quitanieves con un auto cubierto de nieve al fondo) | 4 |
+| Error de v2 (un vehículo de nieve, un blindado, un autoelevador, una topadora, un flipper, un avión, una escalera caracol) | 7 |
+
+Las 11 con un vehículo real **dejan de ser "sin auto"**: v2 hace bien en aceptarlas. Se excluyen de las columnas "sin las
+excluidas" (que para v1 ya excluían las 3 con un auto real al fondo, dentro de estas 11) y de `cumple_s1_sin_fondo`. Las 4
+dudosas y las 7 errores **se siguen contando** como aceptadas. **Esta exclusión es una decisión mía sobre 11 fotos, de un
+solo revisor**, y favorece a v2: sin ella, v2 no cumple S1 con ninguna configuración razonable (abajo, "S1 literal").
+La lista (`vehiculos_reales.json`) queda fuera del repo con las fotos. Se aplica igual a v1, que acepta solo 4 de
+esas 11: v1 hoy **rechaza** como `NO_VEHICLE` la mayoría de los camiones, vans y colectivos reales.
+
+#### Rechazo de válidas por tipo y zoom (umbrales actuales 0,40 / 0,40 / 0,50; cota del 95 % entre paréntesis)
+
+**v1** (`rfdetr_openimages`):
+
+| Decisor | Regla | GENERAL (417) | PLATE 50 % (137) | PLATE 25 % (151) | PLATE 40 % (151) | PLATE 60 % (151) | DETAIL (374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 1 (≤ 3,4 %) | 8 (≤ 9,4 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 109 (≤ 85,1 %) | 129 (≤ 89,9 %) | 47 (≤ 37,9 %) | 99 (≤ 72,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 2 (≤ 1,5 %) | 1 (≤ 3,4 %) | 3 (≤ 5,1 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 21 (≤ 8,0 %) |
+| det ∨ seg | P2 | 2 (≤ 1,5 %) | 96 (≤ 76,5 %) | 128 (≤ 89,4 %) | 33 (≤ 28,1 %) | 85 (≤ 63,1 %) | 21 (≤ 8,0 %) |
+
+**v2** (`rfdetr_openimages_v2`):
+
+| Decisor | Regla | GENERAL (417) | PLATE 50 % (137) | PLATE 25 % (151) | PLATE 40 % (151) | PLATE 60 % (151) | DETAIL (374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 9 (≤ 11,2 %) | 4 (≤ 6,0 %) | 7 (≤ 8,5 %) | 13 (≤ 13,3 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 91 (≤ 73,1 %) | 129 (≤ 89,9 %) | 48 (≤ 38,6 %) | 88 (≤ 65,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 3 (≤ 1,8 %) | 9 (≤ 11,2 %) | 4 (≤ 6,0 %) | 6 (≤ 7,7 %) | 12 (≤ 12,6 %) | 22 (≤ 8,3 %) |
+| det ∨ seg | P2 | 3 (≤ 1,8 %) | 85 (≤ 69,0 %) | 129 (≤ 89,9 %) | 40 (≤ 33,1 %) | 81 (≤ 60,6 %) | 22 (≤ 8,3 %) |
+
+P2 sigue rechazando casi todos los primeros planos con v2, por las mismas razones que con v1 (no hay auto en una foto que
+es la patente, y la patente al 25 % no llega al 5 % del área). **v2 con P1 rechaza más primeros planos de patente
+ajustados que v1** (9 contra 1 de 137 al 50 %; 12 contra 4 de 151 al 60 %): le cuesta más encontrar una patente cuando casi
+llena la foto (no investigué la causa). En GENERAL rechaza 3 contra 2 de 417 y en DETAIL
+22 contra 21 de 374: iguales.
+
+#### Fotos sin auto aceptadas y U3 por alerta (mismos umbrales)
+
+**v1:**
+
+| Decisor | Regla | nuevas G / P / D (de 1 200) | sin las excluidas | vistas (de 489) | U3 por alerta, PLATE 25 / 40 / 60 % |
+|---|---|---|---|---|---|
+| det | P1 | 15 / 20 / 15 | 11 / 16 / 11 | 0 / 0 / 0 | 13,9 · 10,9 · 11,5 % |
+| det | P2 | 15 / 0 / 15 | 11 / 0 / 11 | 0 / 0 / 0 | 86,8 · 37,4 · 68,7 % |
+| det ∨ seg | P1 | 15 / 20 / 15 | 11 / 16 / 11 | 0 / 0 / 0 | 7,9 · 7,9 · 8,6 % |
+| det ∨ seg | P2 | 15 / 0 / 15 | 11 / 0 / 11 | 0 / 0 / 0 | 85,7 · 26,6 · 58,9 % |
+
+**v2:**
+
+| Decisor | Regla | nuevas G / P / D (de 1 200) | sin las excluidas | vistas (de 489) | U3 por alerta, PLATE 25 / 40 / 60 % |
+|---|---|---|---|---|---|
+| det | P1 | 16 / 16 / 16 | 7 / 7 / 7 | 3 / 3 / 3 | 11,5 · 13,3 · 17,0 % |
+| det | P2 | 16 / 0 / 16 | 7 / 0 / 7 | 3 / 0 / 3 | 86,8 · 38,0 · 62,1 % |
+| det ∨ seg | P1 | 16 / 16 / 16 | 7 / 7 / 7 | 3 / 3 / 3 | 9,0 · 10,3 · 14,0 % |
+| det ∨ seg | P2 | 16 / 0 / 16 | 7 / 0 / 7 | 3 / 0 / 3 | 86,4 · 31,3 · 56,7 % |
+
+(Columna "sin las excluidas": sin las 11 fotos con un vehículo real. U3 por alerta: GENERAL + PLATE + un DETAIL, con
+independencia entre fotos; es una estimación, ver el supuesto arriba.)
+
+#### Configuraciones que cumplen S1 (≤ 5 de 1 200 sin las excluidas) y su costo
+
+La mejor de cada decisor y variante: la que minimiza el U3 medio de los tres zooms (las demás están en `plate_rule.json`).
+Columnas de rechazo: rechazadas de 417 / 137 / 151 / 151 / 151 / 374.
+
+**v1:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,50 / 0,75 / – | 12 | 9 | 15 | 10 | 18 | 43 | 4 / 5 / 4 | 22,6 · 19,7 · 24,3 % |
+| det | P2 | 0,50 / 0,30 / – | 12 | 114 | 128 | 60 | 109 | 43 | 4 / 0 / 4 | 86,9 · 48,2 · 76,1 % |
+| det ∨ seg | P1 | 0,55 / 0,65 / 0,30 | 4 | 5 | 4 | 3 | 8 | 27 | 3 / 5 / 3 | 10,5 · 9,9 · 13,0 % |
+| det ∨ seg | P2 | 0,50 / 0,30 / 0,30 | 4 | 80 | 127 | 27 | 72 | 24 | 4 / 0 / 4 | 85,3 · 23,9 · 51,5 % |
+
+**v2:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,45 / 0,30 / – | 6 | 4 | 4 | 5 | 9 | 31 | 5 / 5 / 5 | 12,0 · 12,6 · 15,0 % |
+| det | P2 | 0,45 / 0,30 / – | 6 | 94 | 130 | 48 | 87 | 31 | 5 / 0 / 5 | 87,4 · 38,3 · 61,7 % |
+| det ∨ seg | P1 | 0,45 / 0,30 / 0,30 | 1 | 4 | 4 | 3 | 8 | 19 | 5 / 5 / 5 | 7,8 · 7,2 · 10,3 % |
+| det ∨ seg | P2 | 0,45 / 0,30 / 0,30 | 1 | 73 | 129 | 36 | 68 | 19 | 5 / 0 / 5 | 86,2 · 27,9 · 47,9 % |
+
+- **La mejor configuración de cada detector, det ∨ seg con P1, da un U3 por alerta de 10,5 · 9,9 · 13,0 % con v1 y de
+  7,8 · 7,2 · 10,3 % con v2** (zoom 25 · 40 · 60 %). Con v2 alcanza con `car` ≥ 0,45, `plate` ≥ 0,30 y `seg` ≥ 0,30 (v1
+  pide 0,55 / 0,65 / 0,30). Es una mejora de ~3 puntos que sale de rechazar menos GENERAL (1 contra 4 de 417) y menos
+  DETAIL (19 contra 27 de 374), y se apoya en la exclusión de 11 fotos y en umbrales elegidos sobre las mismas negativas
+  con las que se miden: es una cota optimista, no una promesa.
+- **Sin segmentador (solo det)**: v2 da 12,0 · 12,6 · 15,0 % y v1 22,6 · 19,7 · 24,3 %. Ahí la diferencia es más grande:
+  v2 rechaza 6 contra 12 de GENERAL y 31 contra 43 de DETAIL.
+- **P2 no cumple en la práctica con ningún detector**: cumple S1 (0 negativas aceptadas en PLATE) pero rechaza 85 a 87 % de
+  las alertas con una PLATE al 25 %, 24 a 48 % al 40 % y 48 a 76 % al 60 %.
+- El umbral de segmentador de 0,30 está por debajo del 0,50 vigente (ver la sección anterior).
+
+**S1 literal (≤ 5 de 1 200 contando todas, también las de vehículo real).** Para ver cuánto depende v2 de la revisión:
+
+**v1:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,55 / 0,80 / – | 19 | 14 | 17 | 19 | 27 | 53 | 5 / 5 / 5 | 27,3 · 28,4 · 32,7 % |
+| det | P2 | 0,55 / 0,30 / – | 19 | 119 | 130 | 65 | 116 | 53 | 5 / 0 / 5 | 88,6 · 53,3 · 81,0 % |
+| det ∨ seg | P1 | 0,55 / 0,80 / 0,30 | 4 | 10 | 6 | 6 | 18 | 27 | 5 / 5 / 5 | 11,8 · 11,8 · 19,1 % |
+| det ∨ seg | P2 | 0,55 / 0,30 / 0,30 | 4 | 81 | 127 | 29 | 74 | 27 | 5 / 0 / 5 | 85,4 · 25,8 · 53,1 % |
+
+**v2:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,90 / 0,30 / – | 398 | 5 | 126 | 19 | 14 | 368 | 2 / 2 / 2 | 100,0 · 99,9 · 99,9 % |
+| det | P2 | 0,90 / 0,30 / – | 398 | 137 | 151 | 151 | 151 | 368 | 2 / 0 / 2 | 100,0 · 100,0 · 100,0 % |
+| det ∨ seg | P1 | 0,90 / 0,30 / 0,30 | 11 | 4 | 11 | 3 | 9 | 47 | 4 / 4 / 4 | 21,1 · 16,6 · 20,0 % |
+| det ∨ seg | P2 | 0,90 / 0,30 / 0,30 | 11 | 83 | 130 | 42 | 76 | 47 | 4 / 0 / 4 | 88,2 · 38,6 · 57,7 % |
+
+Con v2 y sin la exclusión, S1 solo se cumple con `car` ≥ 0,90: ahí rechaza 11 de 417 GENERAL y 47 de 374 DETAIL con
+det ∨ seg (U3 por alerta de 16,6 a 21,1 %), y con det solo rechaza casi todo. Esos altos umbrales existen porque
+camiones y colectivos reales salen con confianza 0,97: no son errores del detector.
+
+#### Sensibilidad del área mínima de la patente (det ∨ seg, umbrales actuales; rechazadas de 137 / 151)
+
+**v1:**
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 1 | 3 | 3 | 4 |
+| 5 % (servicio) | P2 | 96 | 128 | 33 | 85 |
+| 1 % | P1 | 1 | 1 | 2 | 4 |
+| 1 % | P2 | 96 | 13 | 30 | 85 |
+| 0 % | P1 | 1 | 1 | 2 | 4 |
+| 0 % | P2 | 96 | 12 | 30 | 85 |
+
+**v2:**
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 9 | 4 | 6 | 12 |
+| 5 % (servicio) | P2 | 85 | 129 | 40 | 81 |
+| 1 % | P1 | 9 | 3 | 5 | 12 |
+| 1 % | P2 | 85 | 22 | 34 | 81 |
+| 0 % | P1 | 9 | 3 | 5 | 12 |
+| 0 % | P2 | 85 | 21 | 34 | 81 |
+
+Es un diagnóstico; no se propone cambiar `PRESENCE_MIN_AREA`.
+
+#### Lo que esta medición no mide
+
+- Fotos válidas de **camiones, vans y colectivos**: no hay un set de reportes válidos de esos vehículos. v1 los rechaza como
+  `NO_VEHICLE` (las negativas que acepta v2 lo muestran) y v2 los acepta, pero cuánto cambia el rechazo de reportes
+  válidos no está medido.
+- El costo de latencia por alerta: v1 y v2 son iguales (ver "Detector v2 contra v1"). Cualquier ganancia de v2 en el rechazo
+  viene del modelo, no de la regla.
+
 ### Precisión corregida del detector, por revisión manual de un solo revisor (`fp_audit.py`)
 
 Open Images no anota todo lo que se ve, así que parte de los "falsos positivos" son autos o patentes reales sin anotar.

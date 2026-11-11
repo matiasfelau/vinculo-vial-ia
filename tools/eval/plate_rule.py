@@ -27,7 +27,7 @@ import itertools
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +90,7 @@ def evaluate(
     decider: str,
     rule: str,
     point: tuple[float, float, float],
-    background: NDArray[Any],
+    excluded: Mapping[str, NDArray[Any]],
 ) -> dict[str, Any]:
     """Rechazo de válidas por tipo y zoom, negativas aceptadas por rol y U3 por alerta, con cotas."""
     t_car, t_plate, t_seg = point
@@ -107,7 +107,8 @@ def evaluate(
         accepted[role] = {
             "vistas": int(seen.sum()),
             "nuevas": int(fresh.sum()),
-            "nuevas_sin_fondo": int((fresh & ~background).sum()),
+            "vistas_sin_excluidas": int((seen & ~excluded["negativas"]).sum()),
+            "nuevas_sin_fondo": int((fresh & ~excluded["negativas_nuevas"]).sum()),  # sin las excluidas
         }
     rates = {n: rejected[n] / totals[n] for n in rejected}
     bounds = {n: grid.bound(rejected[n], totals[n]) or 0.0 for n in rejected}
@@ -138,21 +139,28 @@ def sweep(
     scores: Mapping[str, Sequence[presence.Signals]],
     zoom_scores: Mapping[str, Sequence[presence.Signals]],
     names: Mapping[str, Sequence[str]],
+    excluded_stems: Collection[str] = grid.BACKGROUND_CAR,
 ) -> list[dict[str, Any]]:
+    """Todas las combinaciones.
+
+    `excluded_stems`: fotos "sin auto" que en verdad muestran un vehículo (revisadas a mano):
+    `nuevas_sin_fondo`, `vistas_sin_excluidas` y `cumple_s1_sin_fondo` las dejan afuera.
+    """
     valid = {"general": grid.features(scores["general"]), "detail": grid.features(scores["detail"])}
     valid["plate_tight"] = grid.features(scores["plate"])
     for key in ZOOM_SETS:
         if key in zoom_scores:
             valid[key] = grid.features(zoom_scores[key])
     negatives = {group: grid.features(scores[group]) for group in NEGATIVES}
-    background = np.array(
-        [Path(n).stem in grid.BACKGROUND_CAR for n in names["negativas_nuevas"]], dtype=bool
-    )
+    banned = set(excluded_stems)
+    excluded = {
+        group: np.array([Path(n).stem in banned for n in names[group]], dtype=bool) for group in NEGATIVES
+    }
     rows = []
     for decider, rule in itertools.product(DECIDERS, RULES):
         for point in grid_points(decider):
             rows.append(
-                evaluate(valid, negatives, decider=decider, rule=rule, point=point, background=background)
+                evaluate(valid, negatives, decider=decider, rule=rule, point=point, excluded=excluded)
             )
     return rows
 
@@ -242,6 +250,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--data-dir", type=Path, default=os.environ.get("TRAIN_DATA_DIR"))
     parser.add_argument("--fresh-negatives", type=Path, required=True)
+    parser.add_argument(
+        "--exclude-negatives",
+        type=Path,
+        help="JSON: lista de identificadores de fotos 'sin auto' que muestran un vehículo (revisadas a mano)",
+    )
     parser.add_argument("--out-dir", type=Path, default=os.environ.get("EVAL_OUT"))
     args = parser.parse_args(argv)
     for flag, value in (("--data-dir", args.data_dir), ("--out-dir", args.out_dir)):
@@ -266,12 +279,17 @@ def main(argv: list[str] | None = None) -> int:
     scores = report["senales"]
     zoom_scores = zoom_report["senales"]
     names = presence_configs.reconstruct_names(scores, Path(args.data_dir), args.fresh_negatives)
-    rows = sweep(scores, zoom_scores, names)
+    extra = (
+        json.loads(Path(args.exclude_negatives).read_text(encoding="utf-8")) if args.exclude_negatives else []
+    )
+    excluded_stems = sorted({*grid.BACKGROUND_CAR, *extra})
+    rows = sweep(scores, zoom_scores, names, excluded_stems)
     out.mkdir(parents=True, exist_ok=True)
     summary = {
         "detector": zoom_report.get("detector"),
         "configuraciones": len(rows),
         "patentes_por_zoom": {k: len(v) for k, v in zoom_scores.items()},
+        "negativas_excluidas": excluded_stems,
         "punto_actual": [r for r in rows if is_current(r)],
         "mejor_que_cumple_s1": best_table(rows, "cumple_s1"),
         "mejor_que_cumple_s1_sin_fondo": best_table(rows, "cumple_s1_sin_fondo"),
