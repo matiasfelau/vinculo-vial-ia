@@ -337,7 +337,7 @@ def test_parse_annotations_falla_si_el_encabezado_cambio(tmp_path: Path) -> None
         fetch.parse_annotations(tmp_path / "b.xlsx")
 
 
-def test_read_entry_verifica_el_crc_y_descomprime(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_entry_verifica_el_crc_y_descomprime() -> None:
     import struct
     import zlib
 
@@ -360,14 +360,12 @@ def test_read_entry_verifica_el_crc_y_descomprime(monkeypatch: pytest.MonkeyPatc
         4,
     )
     block = header + name.encode() + b"\0\0\0\0" + packed + b"RESTO"
-    monkeypatch.setattr(fetch, "http_range", lambda *_: block)
 
-    assert fetch.read_entry("u", 0, len(packed), 8, zlib.crc32(payload), name) == payload
+    assert fetch.read_entry(lambda *_: block, 0, len(packed), 8, zlib.crc32(payload), name) == payload
     with pytest.raises(fetch.FetchError, match="CRC"):
-        fetch.read_entry("u", 0, len(packed), 8, 123, name)
-    monkeypatch.setattr(fetch, "http_range", lambda *_: b"XXXX" + block[4:])
+        fetch.read_entry(lambda *_: block, 0, len(packed), 8, 123, name)
     with pytest.raises(fetch.FetchError, match="encabezado"):
-        fetch.read_entry("u", 0, len(packed), 8, zlib.crc32(payload), name)
+        fetch.read_entry(lambda *_: b"XXXX" + block[4:], 0, len(packed), 8, zlib.crc32(payload), name)
 
 
 def test_build_pairs_arma_los_tres_conjuntos() -> None:
@@ -406,6 +404,47 @@ def test_la_particion_de_un_estrato_no_cambia_si_se_suman_autos_de_otros() -> No
 
     assert all(after[name] == split for name, split in before.items())
     assert {after[c.name] for c in reflective} == {"train", "val", "test"}
+
+
+def test_sumar_autos_a_un_estrato_no_mueve_a_los_congelados() -> None:
+    old = [car(f"a{i:03d}", lighting="standard") for i in range(40)]
+    frozen = dataset.group_split(old, seed=3)
+    new = [car(f"b{i:03d}", lighting="standard") for i in range(60)]
+
+    after = dataset.group_split(old + new, seed=3, frozen=frozen)
+
+    assert all(after[name] == split for name, split in frozen.items())
+    counts = {part: sum(1 for v in after.values() if v == part) for part in dataset.SPLITS}
+    assert counts == {"train": 70, "val": 15, "test": 15}  # el estrato entero queda en 70/15/15
+
+
+def test_sin_congelar_la_particion_es_la_de_siempre() -> None:
+    cars = [car(f"c{i:03d}", lighting="standard") for i in range(50)]
+
+    assert dataset.group_split(cars, seed=5, frozen={}) == dataset.group_split(cars, seed=5)
+
+
+def test_congelar_ignora_particiones_invalidas_y_autos_ajenos() -> None:
+    cars = [car(f"c{i:03d}", lighting="dark") for i in range(10)]
+
+    split = dataset.group_split(cars, seed=1, frozen={"c000": "otra", "nadie": "train"})
+
+    assert set(split) == {c.name for c in cars}  # un auto que no está en la lista no entra
+    assert split["c000"] in dataset.SPLITS
+
+
+def test_load_frozen_prefiere_split_json_y_si_no_toma_crops_json(tmp_path: Path) -> None:
+    import json
+
+    assert dataset.load_frozen(tmp_path) == {}
+    (tmp_path / "crops.json").write_text(
+        json.dumps([{"auto": "a", "particion": "test"}, {"auto": "a", "particion": "test"}])
+    )
+    assert dataset.load_frozen(tmp_path) == {"a": "test"}
+
+    dataset.save_split(tmp_path, {"b": "val", "a": "train"})
+
+    assert dataset.load_frozen(tmp_path) == {"a": "train", "b": "val"}
 
 
 def test_is_complete_detecta_jpg_y_json_a_medias(tmp_path: Path) -> None:
