@@ -813,7 +813,8 @@ la regla A gana sobre la C.
 
 `presence.py` también mide la regla que corre en `_has_car`, con el área mínima de 5 % y `DAMAGE_PRESENCE_T` = 0,97
 (el daño solo cuenta en DETAIL y no pide área): GENERAL y CONTEXT piden un auto (detector o segmentador); PLATE y DETAIL
-también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y negativas que pasan (regla A):
+también aceptaban una rueda o una patente (**la rueda salió de la regla el 11/11/2026**; ver "R1 sin la clase rueda").
+Fotos válidas rechazadas (regla C) y negativas que pasan (regla A), medidas todavía con la rueda:
 
 | Rol | Conjunto | Válidas rechazadas | Antes (R2 sin daño) | Negativas que pasan (de 489) |
 |---|---|---|---|---|
@@ -828,7 +829,7 @@ CarDD que se rechazaban sin él. Las rechazadas siguen siendo fotos sin ninguna 
 
 El segmentador (`rfdetr_seg_coco`) salió de la cascada, como el detector de daños y el chequeo de rebajes: con
 `MODEL_SEGMENTER=null` (y `MODEL_DAMAGE=null`) la presencia la decide **solo el detector** (`car`; en PLATE y DETAIL
-también `wheel` y `plate`, con el área mínima de 5 % de la foto) y la re-ID compara el recorte de la caja `car`. El
+también `plate`, con el área mínima de 5 % de la foto; las cifras de esta sección son de cuando también contaba `wheel`) y la re-ID compara el recorte de la caja `car`. El
 código del segmentador queda como experimental. Se midió todo de nuevo, con la foto reducida a 1024 px como hace el
 servicio y comprobando que ningún modelo dejara de responder (0 fotos con señales faltantes en los cinco conjuntos).
 
@@ -862,6 +863,267 @@ cifra de 0 sobre las vistas era optimista**: el detector se entrenó con esas fo
 un camión, una topadora, una quitanieves, sillas de ruedas, bicicletas) o un objeto con una patente o una rueda parecidas
 (un reloj, una historieta), y 3 tienen un auto real al fondo sin anotar. Son fallos reales de R1 sobre cosas parecidas a
 un auto, no errores de etiquetas. Con 0 aceptadas la cota sería 3/1 200 = 0,25 %; con 15 a 21, es la de Clopper-Pearson.
+
+### R1 en tres configuraciones (`presence_configs.py`)
+
+Con las señales que guardó `presence.py` (sin volver a inferir) evalúa R1, por rol, en las configuraciones de abajo, todas
+**sin la caja de daño**. **S1** es la cantidad de fotos sin auto que la regla acepta (cota del 95 %); **U3** es la de
+primeros planos válidos (PLATE y DETAIL) que rechaza. `--verify` vuelve a medir las fotos aceptadas y comprueba que los
+nombres corresponden a las señales (21 re-medidas, 0 diferencias); `--sheets` arma hojas de contacto para mirarlas.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\presence-configs"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/presence_configs.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas --verify --sheets
+```
+
+La mejor de **a** y **b** se elige por S1 (fotos sin auto nuevas aceptadas, sumadas por rol) y, si empatan, por U3.
+
+| Configuración | Reglas (PLATE y DETAIL; GENERAL: `car`, y `seg` en b y c) | U3 de 511 (tasa; cota 95 %) | S1 nuevas, de 1 200 (cota 95 %): GENERAL / PLATE y DETAIL | S1 vistas, de 489 (cota) |
+|---|---|---|---|---|
+| **a** sin segmentador (la oficial) | `car`, `wheel`, `plate` | 29 (5,7 %; 7,7 %) | 15 (1,9 %) / 21 (2,5 %) | 0 (0,6 %) |
+| **b** con segmentador | + `seg` | **22 (4,3 %; 6,1 %)** | 15 (1,9 %) / 21 (2,5 %) | 0 (0,6 %) |
+| **c1** b sin la clase rueda | `car`, `plate`, `seg` | 22 (4,3 %; 6,1 %) | 15 (1,9 %) / **20 (2,4 %)** | 0 (0,6 %) |
+| **c2** b con la rueda a confianza ≥ 0,60 | `car`, `wheel ≥ 0,60`, `plate`, `seg` | 22 (4,3 %; 6,1 %) | 15 (1,9 %) / **20 (2,4 %)** | 0 (0,6 %) |
+| referencia: a sin la clase rueda | `car`, `plate` | 30 (5,9 %; 7,9 %) | 15 (1,9 %) / 20 (2,4 %) | 0 (0,6 %) |
+
+Rechazos por rol (de 417, 137 y 374): a, 5 / 1 / 28; b, c1 y c2, 2 / 1 / 21; a sin rueda, 5 / 1 / 29. El barrido de la
+rueda (0,50 a 0,90) da lo mismo que c2 desde 0,60: con 0,50 sigue pasando la foto de la rueda (0,52).
+
+**Qué dejó pasar a cada foto sin auto** (las mismas 21 en a, b y c; ninguna configuración acepta una distinta):
+
+| Señal | Fotos | Qué son |
+|---|---|---|
+| detector, clase `car` | 15 | aviones y un planeador, una lancha y una lancha rápida, una quitanieves, una cabina de avión y una cápsula espacial, una escalera de caracol, un camión (cabina), una topadora; 3 con un auto real al fondo sin anotar (y 1 dudosa) |
+| detector, clase `plate` | 5 | un reloj con letras, una historieta con un rótulo, un equipo de radio, un cartel de velocidad y ciclistas |
+| detector, clase `wheel` | 1 | sillas de ruedas de básquet |
+| segmentador | 0 | nunca dejó pasar una foto sin auto por sí solo (solo suma `seg` donde el detector ya había marcado un auto) |
+
+El segmentador **no suma falsas aceptaciones** y recupera 7 primeros planos (DETAIL 28 → 21, GENERAL 5 → 2). La rueda aporta
+casi nada en b: quitarla no rechaza ninguna foto válida más y saca la única negativa que pasaba solo por rueda (21 → 20).
+En a, la rueda salva 1 primer plano (30 → 29 rechazados).
+
+**Latencia por alerta** (`cascade.py --long-side 4000`, 20 alertas por escenario, redacción y mosaico activos, una corrida a
+la vez, nada más corriendo; AMD Ryzen 5 3600). c1 y c2 usan los mismos modelos que b, así que cuestan lo mismo:
+
+| Escenario | a: mediana / p95 | b: mediana / p95 |
+|---|---|---|
+| CRASHED de 3 fotos | 5 316 / 6 139 ms | 6 491 / 6 755 ms |
+| PARKED_ON_GARAGE de 3 fotos | 5 490 / 6 020 ms | 6 611 / 7 348 ms |
+| CRASHED de 5 fotos | 9 526 / 11 355 ms | 11 700 / 12 712 ms |
+
+El segmentador suma unos 1,2 s por alerta en la mediana (la etapa `burst` pasa de ~0,3 a ~1,5 s). Con 20 alertas el p95 es
+casi el máximo y varía de una corrida limpia a otra (a, CRASHED de 3 fotos: 6 522 ms en la corrida anterior, 6 139 ms en esta):
+conviene mirar la mediana. Una corrida de a hecha mientras corrían otras herramientas salió con p95 8 018 ms y se descartó.
+Los 330 y 1 615 ms de media del detector (un pase y con mosaico) de una repetición posterior salen ~13 % por debajo de los 381 y
+1 808 ms de arriba: la latencia de esta PC tiene un ruido de ese orden.
+
+### R1 sin la clase rueda: decisor, patente y umbrales (`presence_grid.py`)
+
+**Decisión (11/11/2026): la clase `wheel` salió de la regla R1.** `_has_car` cuenta ahora un `car` del detector (y, en
+PLATE y DETAIL, una `plate`), una instancia del segmentador si lo hay y, en DETAIL, el daño si lo hay. Los helpers de
+`tools/eval` (`presence.SERVICE_RULE`, `cascade.has_part`) siguen la misma regla; `presence.service_rules(wheel=True)`
+reconstruye la anterior para comparar. Las tablas de arriba (a, b, c1, c2) son de antes de esa decisión y se dejan tal cual.
+Sin la rueda, la regla oficial (sin segmentador ni daño) rechaza 5 / 1 / 29 válidas (GENERAL / PLATE / DETAIL) y acepta
+15 / 20 / 20 de las 1 200 fotos sin auto nuevas.
+
+`presence_grid.py` evalúa, **sin volver a inferir**, todas las combinaciones de tres dimensiones sobre las señales
+guardadas (9 694 configuraciones, 20 s):
+
+- **Decisor de "hay un auto":** `det` (solo la clase `car` del detector), `seg` (solo el segmentador), `det ∨ seg`
+  (cualquiera de los dos) y `det ∧ seg` (los dos, en la misma foto).
+- **Patente como señal de presencia** (la clase `plate` del detector, que se suma al decisor con un OR): `todas` las
+  fotos, `PLATE y DETAIL` (la regla del servicio), `solo PLATE` o `ninguna`. No hay un modo "GENERAL solamente".
+- **Umbrales solo de R1** (separados de los de redacción): `car` y `plate` del detector de 0,40 a 0,95 de a 0,05, y
+  `seg` del segmentador de 0,50 a 0,95. El área mínima sigue en 5 %. Estos umbrales no están en el servicio: es una
+  medición, y cambiarlos pide tu aprobación.
+- **Mosaico: no es una dimensión.** R1 llama a `VehicleDetector.detect` (un solo pase, `_Run.detect`); el mosaico
+  (`detect_plates`) solo se usa al redactar. Se comprobó además sobre las 5 negativas que R1 acepta por la clase patente:
+  salen **las 5 sin mosaico** (0,50 a 0,76) y también con mosaico (0,60 a 0,78); ninguna es "solo de mosaico". Con el
+  mosaico solo suben algunas confianzas (2e57…: 0,50 → 0,60; a6cf…: 0,74 → 0,78) y aparecen más cajas chicas.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\r1-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/presence_grid.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas
+```
+
+Deja `r1_grid.json` (resumen), `r1_grid.csv` (las 9 694 filas) y `registro_por_foto.json` (qué se encendió en cada foto,
+con su confianza), todo fuera del repo.
+
+#### Qué son S1 y U3 (mi interpretación, una estimación)
+
+El repo no define S1 ni U3; esta es la lectura que se usa acá, y las cifras son **estimaciones** que dependen de ella:
+
+- **S1:** de las fotos sin auto, cuántas acepta la regla. Cada foto se evalúa en cada rol (GENERAL, PLATE, DETAIL) como si
+  se hubiera enviado con ese rol; sale una cuenta por rol. Cota superior del 95 % de Clopper-Pearson (3/N con 0 aceptadas).
+  La **marca de cumplimiento** es "como máximo 5 de 1 200 en cada uno de los tres roles", que deja la cota en 0,9 %. "Sin
+  auto" quiere decir "sin `Car`, `Vehicle registration plate` ni `Wheel` anotados en Open Images", y Open Images no anota
+  todo: 3 de las 1 200 nuevas (381d…, 5249…, 6aea…) tienen un auto real al fondo. Por eso se da también la cuenta **sin
+  esas 3** (de 1 197).
+- **U3:** de los primeros planos válidos (137 recortes de PLATE y 374 fotos de DETAIL de CarDD, 511 en total), cuántos
+  rechaza. "Válido" quiere decir que se toma como foto bien tomada del rol; no se revisó una por una.
+- El rechazo de GENERAL (de 417) se da aparte. "Total rechazado" suma los tres roles (928 fotos).
+
+#### Punto actual (umbrales 0,40 / 0,40 / 0,50)
+
+| Decisor | Patente como señal | Rechazo de válidas G / P / D (de 417 / 137 / 374) | Cota 95 % | U3 de 511 | S1 nuevas G / P / D (de 1 200) | Cota 95 % | sin las 3 con auto al fondo (de 1 197) | S1 vistas (de 489) | ≤ 5 de 1 200 |
+|---|---|---|---|---|---|---|---|---|---|
+| det | todas | 4 (1,0 %) / 1 (0,7 %) / 29 (7,8 %) | 2,2 % / 3,4 % / 10,4 % | 30 (5,9 %) | 20 / 20 / 20 | 2,4 % / 2,4 % / 2,4 % | 17 / 17 / 17 | 0 / 0 / 0 | no |
+| det | PLATE y DETAIL (actual) | 5 (1,2 %) / 1 (0,7 %) / 29 (7,8 %) | 2,5 % / 3,4 % / 10,4 % | 30 (5,9 %) | 15 / 20 / 20 | 1,9 % / 2,4 % / 2,4 % | 12 / 17 / 17 | 0 / 0 / 0 | no |
+| det | solo PLATE | 5 (1,2 %) / 1 (0,7 %) / 30 (8,0 %) | 2,5 % / 3,4 % / 10,7 % | 31 (6,1 %) | 15 / 20 / 15 | 1,9 % / 2,4 % / 1,9 % | 12 / 17 / 12 | 0 / 0 / 0 | no |
+| det | ninguna | 5 (1,2 %) / 109 (79,6 %) / 30 (8,0 %) | 2,5 % / 85,1 % / 10,7 % | 139 (27,2 %) | 15 / 15 / 15 | 1,9 % / 1,9 % / 1,9 % | 12 / 12 / 12 | 0 / 0 / 0 | no |
+| seg | todas | 27 (6,5 %) / 1 (0,7 %) / 79 (21,1 %) | 8,8 % / 3,4 % / 24,9 % | 80 (15,7 %) | 7 / 7 / 7 | 1,1 % / 1,1 % / 1,1 % | 5 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | PLATE y DETAIL (actual) | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 80 (15,7 %) | 2 / 7 / 7 | 0,5 % / 1,1 % / 1,1 % | 0 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | solo PLATE | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 80 (15,7 %) | 2 / 7 / 2 | 0,5 % / 1,1 % / 0,5 % | 0 / 5 / 0 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | ninguna | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 185 (36,2 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 | 0 / 0 / 0 | sí |
+| det ∨ seg | todas | 1 (0,2 %) / 1 (0,7 %) / 21 (5,6 %) | 1,1 % / 3,4 % / 8,0 % | 22 (4,3 %) | 20 / 20 / 20 | 2,4 % / 2,4 % / 2,4 % | 17 / 17 / 17 | 0 / 0 / 0 | no |
+| det ∨ seg | PLATE y DETAIL (actual) | 2 (0,5 %) / 1 (0,7 %) / 21 (5,6 %) | 1,5 % / 3,4 % / 8,0 % | 22 (4,3 %) | 15 / 20 / 20 | 1,9 % / 2,4 % / 2,4 % | 12 / 17 / 17 | 0 / 0 / 0 | no |
+| det ∨ seg | solo PLATE | 2 (0,5 %) / 1 (0,7 %) / 21 (5,6 %) | 1,5 % / 3,4 % / 8,0 % | 22 (4,3 %) | 15 / 20 / 15 | 1,9 % / 2,4 % / 1,9 % | 12 / 17 / 12 | 0 / 0 / 0 | no |
+| det ∨ seg | ninguna | 2 (0,5 %) / 96 (70,1 %) / 21 (5,6 %) | 1,5 % / 76,5 % / 8,0 % | 117 (22,9 %) | 15 / 15 / 15 | 1,9 % / 1,9 % / 1,9 % | 12 / 12 / 12 | 0 / 0 / 0 | no |
+| det ∧ seg | todas | 30 (7,2 %) / 1 (0,7 %) / 87 (23,3 %) | 9,6 % / 3,4 % / 27,1 % | 88 (17,2 %) | 7 / 7 / 7 | 1,1 % / 1,1 % / 1,1 % | 5 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | PLATE y DETAIL (actual) | 35 (8,4 %) / 1 (0,7 %) / 87 (23,3 %) | 11,0 % / 3,4 % / 27,1 % | 88 (17,2 %) | 2 / 7 / 7 | 0,5 % / 1,1 % / 1,1 % | 0 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | solo PLATE | 35 (8,4 %) / 1 (0,7 %) / 88 (23,5 %) | 11,0 % / 3,4 % / 27,4 % | 89 (17,4 %) | 2 / 7 / 2 | 0,5 % / 1,1 % / 0,5 % | 0 / 5 / 0 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | ninguna | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 207 (40,5 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 | 0 / 0 / 0 | sí |
+
+- Con la patente en `ninguna`, PLATE se rechaza en 96 a 119 de 137: los recortes de patente solo se reconocen por la
+  clase `plate`, y el decisor de autos casi no ve nada en ellos. Sin esa señal la regla no sirve.
+- `seg` solo y `det ∧ seg` bajan S1 pero rechazan 80 a 89 primeros planos, casi todos de DETAIL.
+- `det ∨ seg` es la que menos rechaza (22 de 511) con el mismo S1 que el detector solo.
+- Con la patente en `todas`, S1 en GENERAL sube de 15 a 20: la patente falsa de un reloj o de un cartel pasa en una foto
+  que debería mostrar el auto entero.
+
+#### Mejor punto que cumple S1 ≤ 5 de 1 200
+
+Entre todos los umbrales del barrido, el de menos válidas rechazadas (empate: menos aceptadas):
+
+| Decisor | Patente | Umbrales `car` / `plate` / `seg` | Rechazo de válidas G / P / D | Cota 95 % | Total rechazado (de 928) | S1 nuevas G / P / D | Cota 95 % | S1 vistas |
+|---|---|---|---|---|---|---|---|---|
+| det | todas | 0,55 / 0,80 / 0,50 | 15 (3,6 %) / 14 (10,2 %) / 52 (13,9 %) | 5,5 % / 15,5 % / 17,2 % | 81 (8,7 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | PLATE y DETAIL (actual) | 0,55 / 0,80 / 0,50 | 19 (4,6 %) / 14 (10,2 %) / 52 (13,9 %) | 6,6 % / 15,5 % / 17,2 % | 85 (9,2 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | solo PLATE | 0,55 / 0,80 / 0,50 | 19 (4,6 %) / 14 (10,2 %) / 53 (14,2 %) | 6,6 % / 15,5 % / 17,5 % | 86 (9,3 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | ninguna | 0,55 / 0,40 / 0,50 | 19 (4,6 %) / 119 (86,9 %) / 53 (14,2 %) | 6,6 % / 91,3 % / 17,5 % | 191 (20,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | todas | 0,40 / 0,65 / 0,50 | 27 (6,5 %) / 5 (3,6 %) / 79 (21,1 %) | 8,8 % / 7,5 % / 24,9 % | 111 (12,0 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | PLATE y DETAIL (actual) | 0,40 / 0,65 / 0,50 | 32 (7,7 %) / 5 (3,6 %) / 79 (21,1 %) | 10,2 % / 7,5 % / 24,9 % | 116 (12,5 %) | 2 / 4 / 4 | 0,5 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | solo PLATE | 0,40 / 0,65 / 0,50 | 32 (7,7 %) / 5 (3,6 %) / 79 (21,1 %) | 10,2 % / 7,5 % / 24,9 % | 116 (12,5 %) | 2 / 4 / 2 | 0,5 % / 0,8 % / 0,5 % | 0 / 0 / 0 |
+| seg | ninguna | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 217 (23,4 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 |
+| det ∨ seg | todas | 0,55 / 0,80 / 0,50 | 5 (1,2 %) / 13 (9,5 %) / 34 (9,1 %) | 2,5 % / 14,7 % / 11,9 % | 52 (5,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | PLATE y DETAIL (actual) | 0,55 / 0,80 / 0,50 | 8 (1,9 %) / 13 (9,5 %) / 34 (9,1 %) | 3,4 % / 14,7 % / 11,9 % | 55 (5,9 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | solo PLATE | 0,55 / 0,80 / 0,50 | 8 (1,9 %) / 13 (9,5 %) / 34 (9,1 %) | 3,4 % / 14,7 % / 11,9 % | 55 (5,9 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | ninguna | 0,55 / 0,40 / 0,50 | 8 (1,9 %) / 102 (74,5 %) / 34 (9,1 %) | 3,4 % / 80,5 % / 11,9 % | 144 (15,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | todas | 0,40 / 0,65 / 0,50 | 30 (7,2 %) / 5 (3,6 %) / 87 (23,3 %) | 9,6 % / 7,5 % / 27,1 % | 122 (13,1 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | PLATE y DETAIL (actual) | 0,40 / 0,65 / 0,50 | 35 (8,4 %) / 5 (3,6 %) / 87 (23,3 %) | 11,0 % / 7,5 % / 27,1 % | 127 (13,7 %) | 2 / 4 / 4 | 0,5 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | solo PLATE | 0,40 / 0,65 / 0,50 | 35 (8,4 %) / 5 (3,6 %) / 88 (23,5 %) | 11,0 % / 7,5 % / 27,4 % | 128 (13,8 %) | 2 / 4 / 2 | 0,5 % / 0,8 % / 0,5 % | 0 / 0 / 0 |
+| det ∧ seg | ninguna | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 242 (26,1 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 |
+
+Con la misma regla, pero contando sin las 3 negativas con un auto real al fondo (≤ 5 de 1 197):
+
+| Decisor | Patente | Umbrales `car` / `plate` / `seg` | Rechazo de válidas G / P / D | Cota 95 % | Total rechazado (de 928) | S1 nuevas G / P / D | Cota 95 % | S1 vistas |
+|---|---|---|---|---|---|---|---|---|
+| det | todas | 0,50 / 0,75 / 0,50 | 10 (2,4 %) / 9 (6,6 %) / 42 (11,2 %) | 4,0 % / 11,2 % / 14,3 % | 61 (6,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | PLATE y DETAIL (actual) | 0,50 / 0,75 / 0,50 | 12 (2,9 %) / 9 (6,6 %) / 42 (11,2 %) | 4,6 % / 11,2 % / 14,3 % | 63 (6,8 %) | 4 / 5 / 5 | 0,8 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | solo PLATE | 0,50 / 0,75 / 0,50 | 12 (2,9 %) / 9 (6,6 %) / 43 (11,5 %) | 4,6 % / 11,2 % / 14,6 % | 64 (6,9 %) | 4 / 5 / 4 | 0,8 % / 0,9 % / 0,8 % | 0 / 0 / 0 |
+| det | ninguna | 0,50 / 0,40 / 0,50 | 12 (2,9 %) / 114 (83,2 %) / 43 (11,5 %) | 4,6 % / 88,2 % / 14,6 % | 169 (18,2 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | todas | 0,40 / 0,40 / 0,50 | 27 (6,5 %) / 1 (0,7 %) / 79 (21,1 %) | 8,8 % / 3,4 % / 24,9 % | 107 (11,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | PLATE y DETAIL (actual) | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 112 (12,1 %) | 0 / 5 / 5 | 0,2 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | solo PLATE | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 112 (12,1 %) | 0 / 5 / 0 | 0,2 % / 0,9 % / 0,2 % | 0 / 0 / 0 |
+| seg | ninguna | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 217 (23,4 %) | 0 / 0 / 0 | 0,2 % / 0,2 % / 0,2 % | 0 / 0 / 0 |
+| det ∨ seg | todas | 0,50 / 0,75 / 0,50 | 5 (1,2 %) / 9 (6,6 %) / 28 (7,5 %) | 2,5 % / 11,2 % / 10,1 % | 42 (4,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | PLATE y DETAIL (actual) | 0,50 / 0,75 / 0,50 | 7 (1,7 %) / 9 (6,6 %) / 28 (7,5 %) | 3,1 % / 11,2 % / 10,1 % | 44 (4,7 %) | 4 / 5 / 5 | 0,8 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | solo PLATE | 0,50 / 0,75 / 0,50 | 7 (1,7 %) / 9 (6,6 %) / 28 (7,5 %) | 3,1 % / 11,2 % / 10,1 % | 44 (4,7 %) | 4 / 5 / 4 | 0,8 % / 0,9 % / 0,8 % | 0 / 0 / 0 |
+| det ∨ seg | ninguna | 0,50 / 0,40 / 0,50 | 7 (1,7 %) / 99 (72,3 %) / 28 (7,5 %) | 3,1 % / 78,5 % / 10,1 % | 134 (14,4 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | todas | 0,40 / 0,40 / 0,50 | 30 (7,2 %) / 1 (0,7 %) / 87 (23,3 %) | 9,6 % / 3,4 % / 27,1 % | 118 (12,7 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | PLATE y DETAIL (actual) | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 1 (0,7 %) / 87 (23,3 %) | 11,0 % / 3,4 % / 27,1 % | 123 (13,3 %) | 0 / 5 / 5 | 0,2 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | solo PLATE | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 1 (0,7 %) / 88 (23,5 %) | 11,0 % / 3,4 % / 27,4 % | 124 (13,4 %) | 0 / 5 / 0 | 0,2 % / 0,9 % / 0,2 % | 0 / 0 / 0 |
+| det ∧ seg | ninguna | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 242 (26,1 %) | 0 / 0 / 0 | 0,2 % / 0,2 % / 0,2 % | 0 / 0 / 0 |
+
+Cumplir S1 ≤ 1 % cuesta pasar de 23 o 24 a **52 a 55** válidas rechazadas de 928 con `det ∨ seg` (patente en `todas` o en
+`PLATE y DETAIL`, `car` ≥ 0,55 y `plate` ≥ 0,80) y de 34 o 35 a **81 a 85** con el detector solo. La frontera completa
+(umbrales de cada configuración, de menor a mayor rechazo) está en `r1_grid.json` (`frontera`). En esos puntos se rechazan
+13 o 14 de los 137 recortes de PLATE y de 34 a 52 de las 374 fotos de DETAIL (con la patente en 0,80 y `car` en 0,55).
+
+#### Registro por foto: detector contra segmentador (umbrales actuales)
+
+| Conjunto | Fotos | det sí / seg sí | det sí / seg no | det no / seg sí | det no / seg no | det solo por patente |
+|---|---|---|---|---|---|---|
+| válidas GENERAL | 417 | 382 | 30 | 3 | 2 | 0 |
+| válidas PLATE | 137 | 31 | 105 | 0 | 1 | 108 |
+| válidas DETAIL | 374 | 287 | 58 | 8 | 21 | 1 |
+| sin auto, vistas | 489 | 0 | 0 | 0 | 489 | 0 |
+| sin auto, nuevas | 1200 | 2 | 18 | 0 | 1180 | 5 |
+
+"det" es el auto del detector y, en PLATE, DETAIL y las negativas, también su patente; "det solo por patente" cuenta
+las fotos donde el detector solo marcó una patente. El segmentador **nunca se enciende solo en una foto sin auto**
+(0 en "det no / seg sí" en las 1 689 negativas), y en las válidas rescata 11 fotos (3 de GENERAL y 8 de DETAIL).
+
+#### De las 15 negativas que pasan por la clase auto, ¿el segmentador también vio un auto?
+
+| Foto | Confianza del auto | Segmentador: mejor instancia (cualquier tamaño) | Segmentador: cuenta para R1 (≥ 0,50 y ≥ 5 %) |
+|---|---|---|---|
+| `05b216c9501d4389` | 0,49 | 0,07 | no |
+| `139b58bf9981102e` | 0,45 | 0,64 | no |
+| `145225d35029ace7` | 0,79 | 0,91 | no |
+| `1d3e7fa4223dca3e` | 0,46 | 0,39 | no |
+| `1fa203101e83d731` | 0,43 | 0,02 | no |
+| `373bc1f6e343749d` | 0,65 | 0,13 | no |
+| `381d3671020dca70` (auto real al fondo) | 0,73 | 0,91 | **sí** (0,91) |
+| `52491dfdb5474272` (auto real al fondo) | 0,52 | 0,89 | no |
+| `6aea64be3ea593ec` (auto real al fondo) | 0,68 | 0,83 | **sí** (0,83) |
+| `72668dba3d8886b8` | 0,48 | 0,02 | no |
+| `85be4b924320e539` | 0,54 | 0,02 | no |
+| `9b59c0e2c3fe60da` | 0,41 | 0,12 | no |
+| `a21c9ae16959fbae` | 0,47 | 0,06 | no |
+| `a5fd24fe4683492b` | 0,40 | 0,14 | no |
+| `adb32fe9df8bea34` | 0,68 | 0,08 | no |
+
+El segmentador cuenta (con el 5 % de área) en **2 de 15**, y las dos son de las 3 con un auto real al fondo. En 3 más
+vio una instancia con confianza ≥ 0,50 pero de menos del 5 % de la foto (5249…, la tercera con un auto real, y 139b… y
+145225…); en las otras 10 no vio nada relevante. Dicho de otro modo: en las negativas con un auto real el segmentador
+acompaña al detector, y en las que no lo tienen no lo acompaña.
+
+#### Latencia por alerta de 3 fotos
+
+La regla R1 no cambia la latencia (compara tres números por foto): la cambian los modelos que corren. Las configuraciones
+`det` usan los modelos de **a**; `seg`, `det ∨ seg` y `det ∧ seg` necesitan el segmentador y usan los de **b**. Son las
+mismas corridas limpias de arriba (`cascade.py --long-side 4000`, 20 alertas por escenario, una a la vez):
+
+| Modelos | CRASHED de 3 fotos: mediana / p95 | PARKED_ON_GARAGE de 3 fotos: mediana / p95 |
+|---|---|---|
+| sin segmentador (`det`) | 5 316 / 6 139 ms | 5 490 / 6 020 ms |
+| con segmentador (`seg`, `det ∨ seg`, `det ∧ seg`) | 6 491 / 6 755 ms | 6 611 / 7 348 ms |
+
+Con 20 alertas el p95 es casi el máximo y varía de una corrida limpia a otra: conviene mirar la mediana.
+
+### Precisión corregida del detector, por revisión manual de un solo revisor (`fp_audit.py`)
+
+Open Images no anota todo lo que se ve, así que parte de los "falsos positivos" son autos o patentes reales sin anotar.
+`detector.py --dump-fp` escribe cada falso positivo (de auto y de patente, con los umbrales del servicio) y `fp_audit.py`
+arma hojas de contacto (fuera del repo) con la caja en rojo y las reales en verde. La precisión corregida es **una corrección por
+revisión manual de un solo revisor**: un solo revisor miró los 145 distintos (114 sin mosaico, más 33 que solo aparecen
+con mosaico; el resto se hereda por IoU ≥ 0,5), sin segunda opinión. El veredicto es subjetivo y por eso se da con y sin
+los dudosos. **La precisión oficial no se reemplaza**: la corregida va aparte, al lado de la oficial.
+
+```powershell
+uv run --frozen --extra dev --extra tools python tools/eval/detector.py --split test --dump-fp
+uv run --frozen --extra dev --extra tools python tools/eval/fp_audit.py sheets --dump <falsos_positivos.json> --out <carpeta>
+# se mira cada hoja y se anota veredictos.json ({categoría: [números de panel]}) en <carpeta>
+uv run --frozen --extra dev --extra tools python tools/eval/fp_audit.py corrected --report <detector_report.json> --audit <carpeta>
+```
+
+| Clase | Falsos positivos | Auto o patente real sin anotar | Otro vehículo (camión, pickup, furgoneta) | Duplicada o mal ubicada | No es | Dudoso | Precisión oficial | **Corregida** (con dudosos) |
+|---|---|---|---|---|---|---|---|---|
+| Auto | 74 | 46 | 10 | 5 | 2 | 11 | 0,747 | **0,904** (0,942) |
+| Patente, sin mosaico | 40 | 18 | 0 | 5 | 12 | 5 | 0,737 | **0,855** (0,888) |
+| Patente, con mosaico | 71 | 23 | 0 | 10 | 27 | 11 | 0,632 | **0,751** (0,808) |
+| Auto + patente (micro), sin mosaico | 114 | 64 | 10 | 10 | 14 | 16 | 0,744 | **0,888** (0,924) |
+| Auto + patente (micro), con mosaico | 145 | 69 | 10 | 15 | 29 | 22 | 0,702 | **0,844** (0,889) |
+
+La corregida cuenta como acierto solo lo de la columna "real sin anotar". Los "otros vehículos" no cuentan: Open Images los
+anota con otra clase (`Truck`, `Van`), aunque para el servicio una pickup o una furgoneta sean un vehículo. Los falsos
+positivos de patente son sobre todo textos o piezas con forma de patente (marcas, insignias, carteles, faros): 12 de 40
+sin mosaico y 27 de 71 con mosaico, así que el mosaico agrega ruido real, no solo patentes sin anotar. Los falsos
+positivos de auto que no lo son casi no existen (2 de 74: un scooter y un cartel con la foto de un auto).
 
 ## Calibración de `REID_T` con VeRi-776 (`reid_veri.py`)
 

@@ -48,12 +48,12 @@ AREA_SWEEP = (0.0, 0.005, 0.01, 0.02, 0.05, 0.10)  # fracción mínima de la fot
 MEASURE_ATTEMPTS = 3  # veces que se reintenta una foto si un modelo no responde
 SETS = ("general", "plate", "detail", "negativas")
 # La regla R1 del servicio, por rol (`_has_car`): GENERAL y CONTEXT piden un auto (detector o
-# segmentador); PLATE y DETAIL aceptan también una rueda o una patente; DETAIL suma una caja de daño con
-# `DAMAGE_PRESENCE_T` (sin área mínima). El área mínima es `PRESENCE_MIN_AREA`.
+# segmentador); PLATE y DETAIL aceptan también una patente (la rueda salió de la regla); DETAIL suma una
+# caja de daño con `DAMAGE_PRESENCE_T` (sin área mínima). El área mínima es `PRESENCE_MIN_AREA`.
 SERVICE_RULE: Mapping[str, tuple[str, ...]] = {
     "general": ("car", "seg"),
-    "plate": ("car", "wheel", "plate", "seg"),
-    "detail": ("car", "wheel", "plate", "seg"),
+    "plate": ("car", "plate", "seg"),
+    "detail": ("car", "plate", "seg"),
 }
 SERVICE_MIN_AREA = 0.05
 OPEN_IMAGES = "openimages-detector"
@@ -138,12 +138,19 @@ def upper_bound(failures: int, trials: int, confidence: float = 0.95) -> float |
     return round((low + high) / 2, 4)
 
 
-def service_rules(segmenter: bool = True) -> dict[str, tuple[str, ...]]:
-    """La regla `SERVICE_RULE`, con o sin la señal del segmentador."""
-    return {
+def service_rules(segmenter: bool = True, wheel: bool = False) -> dict[str, tuple[str, ...]]:
+    """La regla `SERVICE_RULE`, con o sin la señal del segmentador.
+
+    `wheel=True` le suma la clase rueda en PLATE y DETAIL: así era la regla antes de sacarla.
+    """
+    rules = {
         role: tuple(name for name in signals if segmenter or name != "seg")
         for role, signals in SERVICE_RULE.items()
     }
+    if wheel:
+        for role in ("plate", "detail"):
+            rules[role] = ("car", "wheel", *rules[role][1:])
+    return rules
 
 
 def service_rule(
@@ -153,13 +160,15 @@ def service_rule(
     min_area: float = SERVICE_MIN_AREA,
     segmenter: bool = True,
     damage: bool = True,
+    wheel: bool = False,
 ) -> dict[str, Any]:
     """R1 tal como la aplica el servicio, por rol: fotos válidas rechazadas (C) y negativas que pasan (A).
 
-    `segmenter=False` quita la señal del segmentador y `damage=False` la caja de daño en DETAIL. Las
-    negativas se miden en dos tandas: las de siempre y, si las hay, las que el detector nunca vio.
+    `segmenter=False` quita la señal del segmentador, `damage=False` la caja de daño en DETAIL y
+    `wheel=True` le suma la clase rueda (la regla anterior). Las negativas se miden en dos tandas: las de
+    siempre y, si las hay, las que el detector nunca vio.
     """
-    rules = service_rules(segmenter)
+    rules = service_rules(segmenter, wheel)
 
     def accepts(role: str, signals: Signals) -> bool:
         if passes(signals, rules[role], thresholds, min_area):

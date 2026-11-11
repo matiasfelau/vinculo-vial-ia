@@ -137,3 +137,27 @@ def test_combined_usa_el_umbral_de_cada_clase_para_recall_y_todas_las_cajas_para
 
 def test_cpu_name_devuelve_un_texto() -> None:
     assert isinstance(detector.cpu_name(), str)
+
+
+def test_false_positives_lista_solo_los_falsos_positivos_con_su_iou_y_las_cajas_reales() -> None:
+    gt = coco({1: [(1, (0, 0, 100, 100))], 2: [(2, (10, 10, 40, 30))]})
+    predictions = {
+        1: [
+            box(0, 0, 100, 100, 0.9, CAR),  # acierta: no se lista
+            box(10, 0, 110, 100, 0.8, CAR),  # repite el auto (el real ya lo usó el de arriba)
+            box(500, 500, 600, 600, 0.7, CAR),  # no hay nada anotado ahí
+            box(500, 500, 600, 600, 0.3, CAR),  # bajo el umbral del auto (0,4): no cuenta
+        ],
+        2: [box(60, 60, 90, 80, 0.5, PLATE)],
+    }
+
+    found = detector.false_positives(gt, predictions, THRESHOLDS, IDS)
+
+    assert [(f["foto"], f["clase"], f["confianza"]) for f in found] == [
+        ("1.jpg", CAR, 0.8),
+        ("1.jpg", CAR, 0.7),
+        ("2.jpg", PLATE, 0.5),
+    ]
+    assert found[0]["iou_max"] > 0.8 and found[1]["iou_max"] == 0.0
+    assert found[0]["reales"] == [[0.0, 0.0, 100.0, 100.0]] and found[0]["tam"] == [1000, 1000]
+    assert len({f["id"] for f in found}) == 3

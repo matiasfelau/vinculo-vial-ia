@@ -131,19 +131,27 @@ def test_el_mismo_defecto_en_cualquiera_de_los_detalles_alcanza() -> None:
 @pytest.mark.parametrize(
     ("boxes", "cars"),
     [
-        ([Box(0, 0, 60, 60, 0.9, BoxLabel.WHEEL)], []),  # una rueda
         ([plate_box(0.95)], []),  # una patente
         ([], [CarInstance(rect(0, 60, 0, 60))]),  # un auto segmentado
         ([Box(0, 0, 90, 90, 0.9, BoxLabel.CAR)], None),  # un auto detectado, el segmentador sin modelo
     ],
 )
 @pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
-def test_en_plate_y_detail_basta_una_parte_del_auto(
+def test_en_plate_y_detail_basta_un_auto_o_una_patente(
     boxes: list[Box], cars: list[CarInstance] | None, role_marker: int
 ) -> None:
     models = _only(happy_models(), role_marker, boxes, cars)
 
     assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+@pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
+def test_en_plate_y_detail_una_rueda_sola_no_alcanza(role_marker: int) -> None:
+    models = _only(happy_models(), role_marker, [Box(0, 0, 90, 90, 0.9, BoxLabel.WHEEL)], [])
+
+    result = _run(build_scenario(), models)
+
+    assert result.reason_codes == (R.NO_VEHICLE,) and is_fraud(result.reason_codes)
 
 
 def test_en_general_una_rueda_o_una_patente_no_alcanzan() -> None:
@@ -798,9 +806,9 @@ def test_sin_segmentador_cada_detalle_se_compara_con_el_auto_de_su_caja() -> Non
     assert _run(build_scenario(), models).reason_codes == ()
 
 
-def test_sin_segmentador_las_ruedas_y_patentes_no_son_autos_para_la_reid() -> None:
+def test_sin_segmentador_las_patentes_no_son_autos_para_la_reid() -> None:
     models = _boxed_models()
-    marker = detail_marker(0)  # un primer plano: solo una rueda, ningún auto que comparar
+    marker = detail_marker(0)  # un primer plano: solo una patente, ningún auto que comparar
     models.embedder.by_marker = {marker: vec(85)}
 
     result = _run(build_scenario(), models)

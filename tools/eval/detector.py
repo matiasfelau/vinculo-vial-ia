@@ -142,6 +142,49 @@ def combined(
     }
 
 
+def false_positives(
+    coco_gt: COCO,
+    predictions: dict[int, list[Box]],
+    thresholds: Mapping[str, float],
+    class_ids: Mapping[str, int] = CLASS_IDS,
+    names: Sequence[str] = COMBINED,
+) -> list[dict[str, Any]]:
+    """Cada falso positivo (con el umbral de su clase): foto, clase, confianza, caja y cajas reales.
+
+    `iou_max` es el mayor IoU con una caja real de la misma clase (alto: duplicada o mal ubicada; 0: no hay
+    nada anotado ahí). Sirve para revisarlos a mano: no cambia ninguna cifra del informe.
+    """
+    out: list[dict[str, Any]] = []
+    for image_id in sorted(coco_gt.getImgIds()):
+        for name in names:
+            truths = truth_boxes(coco_gt, image_id, class_ids[name])
+            guesses = sorted(
+                (
+                    (box.conf, (box.x1, box.y1, box.x2, box.y2))
+                    for box in predictions.get(image_id, [])
+                    if box.label == name and box.conf >= thresholds[name]
+                ),
+                key=lambda item: -item[0],
+            )
+            hits, _ = match(truths, guesses)
+            for (conf, box), hit in zip(guesses, hits, strict=True):
+                if hit:
+                    continue
+                out.append(
+                    {
+                        "id": f"{image_id}-{name}-{len(out)}",
+                        "foto": coco_gt.imgs[image_id]["file_name"],
+                        "clase": name,
+                        "tam": [coco_gt.imgs[image_id]["height"], coco_gt.imgs[image_id]["width"]],
+                        "confianza": round(conf, 3),
+                        "caja": [round(v, 1) for v in box],
+                        "iou_max": round(max((iou(box, t) for t in truths), default=0.0), 3),
+                        "reales": [[round(v, 1) for v in t] for t in truths],
+                    }
+                )
+    return out
+
+
 def ap50(coco_gt: COCO, detections: list[dict[str, Any]], category_id: int) -> float | None:
     """AP con IoU 0,5 de una clase; `None` si no hay cajas reales de esa clase."""
     if not coco_gt.getAnnIds(catIds=[category_id]):
@@ -257,6 +300,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=SERVICE_MAX_SIDE_PX,
         help="lado al que se reduce cada foto antes del detector (MODEL_MAX_SIDE_PX; 0 = sin reducir)",
     )
+    parser.add_argument(
+        "--dump-fp",
+        action="store_true",
+        help="escribe `falsos_positivos.json` (auto y patente) para revisarlos",
+    )
     parser.add_argument("--tile-px", type=int, default=DEFAULT_TILE_PX, help="lado de cada tile")
     parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP, help="solape entre tiles")
     args = parser.parse_args(argv)
@@ -335,6 +383,13 @@ def main(argv: list[str] | None = None) -> int:
         "auto_y_patente": combined(coco_gt, predictions, thresholds),
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    if args.dump_fp:
+        dump = false_positives(coco_gt, predictions, thresholds)
+        (Path(args.out_dir) / "falsos_positivos.json").write_text(
+            json.dumps({"dataset": str(args.dataset_dir), "falsos_positivos": dump}, indent=1),
+            encoding="utf-8",
+        )
+        print(f"{len(dump)} falsos positivos de auto y patente en falsos_positivos.json")
     (Path(args.out_dir) / "detector_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )

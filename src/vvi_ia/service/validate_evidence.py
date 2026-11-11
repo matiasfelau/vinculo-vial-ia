@@ -366,9 +366,10 @@ class ValidateEvidence:
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
         """R1. `False` si en alguna foto no hay evidencia de un auto (RED, fraude): se corta la cascada.
 
-        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente) y,
-        en DETAIL, también cuenta una caja de daño con confianza suficiente. Solo hay NO_VEHICLE si todos los
-        modelos consultados respondieron y ninguno encontró nada; si no se pudo decidir, no se penaliza.
+        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una patente y, en DETAIL,
+        también cuenta una caja de daño con confianza suficiente. La clase rueda del detector no cuenta.
+        Solo hay NO_VEHICLE si todos los modelos consultados respondieron y ninguno encontró nada; si no se
+        pudo decidir, no se penaliza.
         """
         for image in images:
             if self._has_car(run, image) is False:
@@ -377,14 +378,14 @@ class ValidateEvidence:
         return True
 
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
-        """¿Hay un auto (o una parte, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
+        """¿Hay un auto (o una patente, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
 
-        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, una
+        Cuenta una caja de `car` del detector, una de `plate` si la foto es de una parte, una
         instancia de auto del segmentador o, en DETAIL, una caja de daño. `None` si no se pudo decidir (sin
         hallazgos y algún modelo sin respuesta).
         """
         part = image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL)
-        labels = {BoxLabel.CAR} | ({BoxLabel.WHEEL, BoxLabel.PLATE} if part else set())
+        labels = {BoxLabel.CAR} | ({BoxLabel.PLATE} if part else set())
         minimum = self._t.presence_min_area * image.width * image.height
         mask_minimum = self._t.presence_min_area * image.model_pixels.shape[0] * image.model_pixels.shape[1]
         detections = run.detect(image)

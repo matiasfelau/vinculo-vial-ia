@@ -151,9 +151,9 @@ def summarize(values: Sequence[float]) -> dict[str, float]:
 
 
 def has_part(models: Any, image: Pixels, min_area: float) -> bool:
-    """Lo mismo que la presencia del servicio para PLATE y DETAIL: un auto, una rueda o una patente."""
+    """Lo mismo que la presencia del servicio para PLATE y DETAIL: un auto o una patente."""
     minimum = min_area * image.shape[0] * image.shape[1]
-    labels = {BoxLabel.CAR, BoxLabel.WHEEL, BoxLabel.PLATE}
+    labels = {BoxLabel.CAR, BoxLabel.PLATE}
     boxes = models.vehicle.detect(image) or ()
     if any(
         b.label in labels and b.area >= minimum and (b.label != BoxLabel.PLATE or b.conf >= 0.4)
