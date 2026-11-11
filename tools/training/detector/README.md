@@ -1,5 +1,14 @@
 # Entrenar el detector (autos, ruedas, patentes y rostros)
 
+> **Este es el detector v1.** Existe también el **v2** (`tools/training/detector_v2/`): presencia de vehículo,
+> patente y confusoras, **sin rostro ni rueda**. Decisiones del 11/11/2026:
+>
+> - El camino `MODEL_FACE=rfdetr_openimages` (rostros del detector) **queda solo para v1**. v2 no lo ofrece
+>   (`MODEL_FACE=rfdetr_openimages_v2` no arranca) y su adaptador toma los ids de clase del manifest.
+> - La clase **rueda** salió de todo camino activo del servicio (ya no cuenta en R1). Solo sigue dentro de los
+>   pesos de v1 y en el chequeo de rebajes (`domain/ramp.py::wheel_diameter`, `tools/eval/curb.py`), que está
+>   **congelado y es experimental, atado a v1**: no se modifica.
+
 Un **detector** recibe una foto y devuelve cajas: dónde hay un auto, una rueda, una patente o un rostro.
 El servicio lo usa para dos cosas: encontrar la patente que hay que leer y **tapar las patentes y los
 rostros** antes de guardar la evidencia. Un solo modelo (RF-DETR Small, licencia Apache 2.0) hace los

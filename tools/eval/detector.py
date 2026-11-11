@@ -330,8 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Falta {annotations.name} en {args.dataset_dir}.", file=sys.stderr)
         return 1
     try:
+        # v2 no tiene rostro ni rueda: solo sirve al puerto `detector` y se evalúan `car` y `plate`
+        selection = {"detector": args.model} | ({"face": args.model} if args.model == MODEL_NAME else {})
         models = build_models(
-            {"detector": args.model, "face": args.model},
+            selection,
             args.manifest,
             args.models_dir,
             params={
@@ -359,8 +361,11 @@ def main(argv: list[str] | None = None) -> int:
         # Lo que corre el servicio: un pase para decidir la presencia o, con mosaico, el pase más los tiles
         vehicles = models.vehicle.detect_plates(shown) if args.plate_tiling else models.vehicle.detect(shown)
         times.append((time.perf_counter() - start) * 1000)
-        faces = models.face.detect(shown)  # reutiliza el pase (memoria del adaptador): no cuenta en el tiempo
+        faces = (  # reutiliza el pase (memoria del adaptador): no cuenta en el tiempo
+            models.face.detect(shown) if "face" in selection else []
+        )
         predictions[image_id] = to_original((vehicles or []) + (faces or []), ratio) or []
+    class_ids = CLASS_IDS if "face" in selection else {n: i for n, i in CLASS_IDS.items() if n in COMBINED}
     thresholds = {
         BoxLabel.CAR: args.detector_min_conf,
         BoxLabel.WHEEL: args.detector_min_conf,
@@ -379,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         "latencia_ms_media": round(statistics.mean(times)),
         "latencia_ms_mediana": round(statistics.median(times)),
         "latencia_ms_p95": round(sorted(times)[round(0.95 * (len(times) - 1))]),
-        "clases": evaluate(coco_gt, predictions, thresholds),
+        "clases": evaluate(coco_gt, predictions, thresholds, class_ids),
         "auto_y_patente": combined(coco_gt, predictions, thresholds),
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
