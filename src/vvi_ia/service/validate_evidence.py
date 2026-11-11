@@ -157,12 +157,37 @@ class _Run:
             )
         return self.plate_detections[key]
 
-    def segment_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
-        """Los autos de la foto reducida (las máscaras son del tamaño de la reducida)."""
+    def car_instances(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Los autos de la foto reducida, cada uno con su máscara (del tamaño de la reducida).
+
+        Con un segmentador (`MODEL_SEGMENTER`, experimental) son sus instancias. Sin él, que es la
+        configuración de la cascada, son las cajas `car` del detector, cada una como una máscara rectangular:
+        el recorte que se le da al embedder es la caja. `None` si ningún modelo respondió.
+        """
         key = (image.role, image.index)
         if key not in self.cars:
-            self.cars[key] = self.models.cars.cars(image.model_pixels)
+            segmented = self.models.cars.cars(image.model_pixels)
+            self.cars[key] = segmented if segmented is not None else self._boxed_cars(image)
         return self.cars[key]
+
+    def _boxed_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Las cajas `car` del detector (con su confianza mínima) como instancias de máscara rectangular."""
+        detections = self.detect(image)
+        if detections is None:
+            return None
+        height, width = image.model_pixels.shape[:2]
+        cars: list[CarInstance] = []
+        for box in detections:
+            if box.label != BoxLabel.CAR:
+                continue
+            x1, y1 = max(0, int(box.x1 / image.ratio)), max(0, int(box.y1 / image.ratio))
+            x2, y2 = min(width, round(box.x2 / image.ratio)), min(height, round(box.y2 / image.ratio))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            mask = np.zeros((height, width), np.bool_)
+            mask[y1:y2, x1:x2] = True
+            cars.append(CarInstance(mask=mask, conf=box.conf))
+        return cars
 
     def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
         """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
@@ -367,7 +392,7 @@ class ValidateEvidence:
             if box.label in labels and box.area >= minimum:
                 if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
                     return True
-        cars = run.segment_cars(image)
+        cars = run.car_instances(image)
         if any(int(car.mask.sum()) >= mask_minimum for car in cars or ()):
             return True
         answered = detections is not None and cars is not None
@@ -386,8 +411,8 @@ class ValidateEvidence:
         Solo hay BURST_MISMATCH si la re-ID confirma que es otro auto; si no se puede comparar (falta el auto
         segmentado o el embedding), no hay código.
         """
-        general_cars = run.segment_cars(general)
-        plate_cars = run.segment_cars(plate_img)
+        general_cars = run.car_instances(general)
+        plate_cars = run.car_instances(plate_img)
         if not general_cars or not plate_cars:
             return None
         emb_general = run.embed(general, 0, largest_car(general_cars))
@@ -407,14 +432,14 @@ class ValidateEvidence:
         """R2: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
 
         De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
-        segmenta ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
+        encuentra ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
         """
         if run.general_embedding is None:
             return
         for image in others:
             candidates = [
                 embedding
-                for index, car in enumerate(run.segment_cars(image) or ())
+                for index, car in enumerate(run.car_instances(image) or ())
                 if (embedding := run.embed(image, index, car)) is not None
             ]
             match = best_match(candidates, [run.general_embedding])

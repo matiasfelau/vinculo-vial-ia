@@ -668,6 +668,30 @@ alertas a la vez (`WORKERS` > 1) cada una usa hasta `REDACT_WORKERS` hilos más,
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
 También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.
 
+### Latencia por alerta sin segmentador (3 y 5 fotos)
+
+Mismas condiciones de arriba (**AMD Ryzen 5 3600**, una alerta por vez, fotos de 4000 × 3000 px, `REDACT_WORKERS` 3,
+mosaicos de patentes y rostros, umbrales aflojados para recorrer todas las etapas), pero **20 alertas por escenario**
+para que el p95 sea una medida y no el máximo de ocho. Antes de medir se terminaron los procesos sobrantes de
+corridas anteriores y se corrió una sola medición a la vez. En ms:
+
+| Configuración | Escenario | Mediana | **p95** | Máximo |
+|---|---|---|---|---|
+| **Oficial: sin segmentador ni daño** | **3 fotos** (general, patente, detalle) | 5 680 | **6 522** | 6 705 |
+| | **5 fotos** (general, patente, 3 detalles) | 9 103 | **10 339** | 10 427 |
+| | 3 fotos, PARKED_ON_GARAGE (general, patente, contexto) | 5 613 | 6 274 | 6 327 |
+| Comparación: sin segmentador, con daño | 3 fotos | 5 517 | 6 052 | 6 065 |
+| | 5 fotos | 9 247 | 9 631 | 9 921 |
+| | 3 fotos, PARKED_ON_GARAGE | 6 540 | 7 439 | 7 894 |
+| Comparación: con segmentador y daño (antes) | 3 fotos | 7 888 | 8 924 | 9 196 |
+| | 5 fotos | 12 872 | 13 551 | 14 462 |
+| | 3 fotos, PARKED_ON_GARAGE | 7 974 | 9 009 | 9 947 |
+
+Etapas medianas de la configuración oficial (ms): 3 fotos, carga 194, presencia 1 070, re-ID 310, patente 70,
+redacción 4 040; 5 fotos, carga 302, presencia 1 664, re-ID 489, patente 64, redacción 6 576. Sacar el segmentador
+baja la re-ID de unos 2 000-3 000 ms a 300-500 ms. Los dos escenarios quedan bajo los 12 s del objetivo (p95 de 6,5 s con
+3 fotos y de 10,3 s con 5). La diferencia entre "con daño" y "sin daño" está dentro del ruido de la medición.
+
 ### Producción: hilos por alerta y concurrencia del consumer
 
 Tres perillas multiplican el uso de CPU de **una** instancia del servicio:
@@ -713,6 +737,41 @@ validarlos con `tools/eval/cascade.py --redact-workers N --threads M` en el hard
   ocupa unos 36 MB sin comprimir); el límite de memoria del contenedor tiene que cubrir `WORKERS` alertas de 5 fotos.
 - Si la cola crece, es preferible agregar réplicas (cada una con su propio `prefetch`) y repartir los núcleos entre
   ellas, no subir `WORKERS` por encima de los núcleos disponibles.
+
+### Autos y patentes: precisión, recall y mAP50 (micro-promedio)
+
+Lo que se presenta del detector son **autos y patentes**: la clase rueda no se presenta (aunque la regla de presencia
+R1 la usa; ver abajo) y los rostros los cubre otro modelo. Mismos datos y umbrales del servicio (autos 0,40, patentes
+0,20, el de redacción), sobre las 204 fotos del split `test` de Open Images que el detector nunca vio, con cada foto
+reducida a `MODEL_MAX_SIDE_PX` = 1024 como hace el servicio. El micro-promedio junta las cajas de las dos clases
+(el acierto sigue siendo por clase, con IoU 0,5); el AP50 combinado ordena todas por confianza en una sola curva.
+
+| Clase | Cajas reales | Precisión | Recall | AP50 | Falsos positivos |
+|---|---|---|---|---|---|
+| Auto | 244 | 0,747 | 0,898 | 0,897 | 74 |
+| Patente, sin mosaico | 135 | 0,737 | 0,830 | 0,787 | 40 |
+| Patente, con mosaico (`PLATE_TILING`) | 135 | 0,632 | 0,904 | 0,831 | 71 |
+| **Auto + patente (micro), sin mosaico** | 379 | **0,744** | **0,873** | **0,851** | 114 |
+| **Auto + patente (micro), con mosaico** | 379 | **0,702** | **0,900** | **0,866** | 145 |
+
+El mosaico sube el recall de las patentes (y de las chicas, de 0,61 a 0,76) a costa de más cajas de más, que al tapar
+cuestan poco. Las cifras anteriores (precisión 0,81, recall 0,79, mAP50 0,83) eran promedios de las cuatro clases:
+con la rueda (recall 0,54 con el umbral de 0,40) y los rostros (0,76) el promedio no describe a autos y patentes.
+
+**Latencia del detector por foto** (CPU, ONNX Runtime; **AMD Ryzen 5 3600**, 6 núcleos, la PC sin otras cargas
+significativas, sin contar la decodificación ni la reducción de la foto):
+
+| Configuración | Media | p95 |
+|---|---|---|
+| Un pase (autos y patentes; lo que decide la presencia) | 381 ms | 468 ms |
+| Un pase y el mosaico de patentes (lo que corre al redactar) | 1 808 ms | 2 174 ms |
+
+Se descartaron dos mediciones anteriores (695 y 2 137 ms de media): se hicieron con otros procesos consumiendo la CPU y
+la memoria de la PC y salían casi al doble de lo que cuesta el modelo.
+
+**R1 usa la clase rueda.** En PLATE y DETAIL cuenta como presencia de un auto una caja `car`, `wheel` o `plate` del
+detector; en GENERAL y CONTEXT hace falta una caja `car`. Por eso el recall de la rueda importa para esos dos roles
+(ver "R1 sin segmentador").
 
 ## Presencia de auto en todas las fotos (`presence.py`)
 
@@ -764,6 +823,45 @@ también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y 
 
 Con 0 negativas que pasan, la cota del 95 % es 3/489 = 0,6 %. El daño recupera 5 de los 21 primeros planos de
 CarDD que se rechazaban sin él. Las rechazadas siguen siendo fotos sin ninguna parte reconocible.
+
+### R1 sin segmentador (configuración oficial)
+
+El segmentador (`rfdetr_seg_coco`) salió de la cascada, como el detector de daños y el chequeo de rebajes: con
+`MODEL_SEGMENTER=null` (y `MODEL_DAMAGE=null`) la presencia la decide **solo el detector** (`car`; en PLATE y DETAIL
+también `wheel` y `plate`, con el área mínima de 5 % de la foto) y la re-ID compara el recorte de la caja `car`. El
+código del segmentador queda como experimental. Se midió todo de nuevo, con la foto reducida a 1024 px como hace el
+servicio y comprobando que ningún modelo dejara de responder (0 fotos con señales faltantes en los cinco conjuntos).
+
+**Fotos válidas rechazadas** (regla C; los mismos 417, 137 y 374 conjuntos de arriba):
+
+| Rol | Con segmentador y daño (antes) | Sin segmentador, con daño | **Sin segmentador ni daño (oficial)** |
+|---|---|---|---|
+| GENERAL (y CONTEXT), de 417 | 2 (0,5 %) | 5 (1,2 %) | **5 (1,2 %)** |
+| PLATE, de 137 | 1 (0,7 %) | 1 (0,7 %) | **1 (0,7 %)** |
+| DETAIL, de 374 | 16 (4,3 %) | 21 (5,6 %) | **28 (7,5 %)** |
+
+Sacar el segmentador cuesta 3 fotos de GENERAL (autos que el detector no marca con 0,40) y 5 de DETAIL, y sacar además
+el daño cuesta 7 primeros planos de DETAIL más: el daño, con `DAMAGE_PRESENCE_T` = 0,97, recuperaba 7 de los primeros planos de carrocería
+que el detector no reconocía. La medición con segmentador y con daño queda solo como comparación.
+
+**Fotos sin auto aceptadas** (regla A), con dos tandas de negativas de Open Images (sin `Car`, `Vehicle registration
+plate` ni `Wheel` anotados):
+
+- **Vistas:** 489 fotos de las tres particiones del subconjunto del detector, **incluida la de entrenamiento**.
+- **Nuevas:** 1 200 fotos que el detector nunca vio (`negatives.py`: partición `test` de Open Images V7, otras clases
+  —rostros, personas, edificios, perros, árboles, flores— y ninguna foto del subconjunto).
+
+| Rol | Vistas (de 489) | Cota 95 % | **Nuevas (de 1 200)** | Cota 95 % |
+|---|---|---|---|---|
+| GENERAL (y CONTEXT), sin segmentador | 0 | 0,6 % (3/N) | **15 (1,25 %)** | **1,9 %** |
+| PLATE y DETAIL, sin segmentador | 0 | 0,6 % (3/N) | **21 (1,75 %)** | **2,5 %** |
+
+Las dos cifras son las mismas con y sin segmentador y con y sin daño: el segmentador no filtraba estas fotos. **La
+cifra de 0 sobre las vistas era optimista**: el detector se entrenó con esas fotos. Sobre fotos nuevas pasan 1,3 a
+1,8 %. Se miraron las 21 que pasan: casi todas son otros objetos con forma de vehículo (aviones y planeadores, lanchas,
+un camión, una topadora, una quitanieves, sillas de ruedas, bicicletas) o un objeto con una patente o una rueda parecidas
+(un reloj, una historieta), y 3 tienen un auto real al fondo sin anotar. Son fallos reales de R1 sobre cosas parecidas a
+un auto, no errores de etiquetas. Con 0 aceptadas la cota sería 3/1 200 = 0,25 %; con 15 a 21, es la de Clopper-Pearson.
 
 ## Calibración de `REID_T` con VeRi-776 (`reid_veri.py`)
 
@@ -827,6 +925,91 @@ groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto 
   tamaño efectivo está más cerca de la cantidad de autos y de pares de cámaras.
 - El 20 % de los recortes sin auto segmentado es por la baja resolución; en fotos de celular no se espera.
 - Se usan hasta 3 recortes por auto y cámara (5 011 de los 11 579) para acotar el costo (unos 40 minutos en CPU).
+- **Esta calibración usó máscaras del segmentador.** El segmentador salió de la cascada y ahora el embedder recibe la caja
+  `car` del detector: con ese recorte, `REID_T` = 0,075 sigue dejando U1 en 0,1 % en VeRi y en 0,3 % en 3DRealCar (ver
+  "Re-ID con 3DRealCar", abajo), pero detecta muy pocos autos distintos (S4 de 0,1 % y 5 %).
+
+## Re-ID con 3DRealCar (`reid_3drealcar.py`)
+
+Compara DINOv2 ViT-S/14 **sin ajustar** (`dinov2_vits14`) con el **ajustado** con 3DRealCar (`dinov2_vits14_reid`, ver
+[tools/training/reid](../training/reid/README.md)), los dos sobre el **recorte de la caja `car` del detector** (la cascada
+ya no tiene segmentador), con la regla del servicio: otro auto si el coseno es menor que `REID_T`. 3DRealCar (Du et al.,
+ICCV 2025) es Apache-2.0 con uso comercial; licencia y cita en [THIRD_PARTY.md](../../THIRD_PARTY.md).
+
+```powershell
+$env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-eval"
+uv run --frozen --extra dev --extra tools python tools/eval/reid_3drealcar.py --models dinov2_vits14 dinov2_vits14_reid --veri-dir D:\vv-eval\veri\VeRi
+```
+
+**Protocolo.** Partición agrupada por auto (ninguno está en dos particiones), estratificada por luz, tipo y color, con
+semilla fija. Pares del mismo auto: vistas separadas por **30° o más** según la pose de la cámara (se reportan por rango
+de ángulo). Pares de autos distintos: una muestra de 100 000 y los **difíciles** (misma marca y mismo color, 30 000). El
+umbral se **calibra sobre validación**: el mayor con la cota del 95 % de U1 en 1 % o menos; con eso fijo se reporta sobre
+prueba. **U1** = pares del mismo auto marcados como distintos; **S4** = pares de autos distintos detectados.
+
+**Datos que se usaron (límite importante).** El zip de 3DRealCar pesa 55 a 110 GB por tramo y Google Drive agotó la
+cuota de descarga cuando se habían bajado 406 autos completos: **175 de luz estándar y 231 de luz oscura, ninguno de luz
+reflectiva** (los 425 reflectivos seleccionados quedaron sin bajar). Con 411 autos (4 864 recortes; el detector no
+encontró auto en 49 de 4 913 fotos) la partición queda en 293 autos de entrenamiento, 59 de validación y 59 de prueba
+(26 estándar y 33 oscuros). **La condición reflectiva no se midió, ni se entrenó con ella.** Para completarla, repetir
+`fetch.py pull` cuando se libere la cuota (baja lo que falta), luego `prepare.py`, `train.py`, `export.py` y esta
+evaluación: la partición de los autos que ya están no cambia.
+
+### Tabla 3: línea base contra ajustado (prueba: 59 autos, 3 287 pares del mismo auto, 100 000 distintos, 30 000 difíciles)
+
+Con el umbral calibrado en validación (0,0736 sin ajustar; 0,0862 ajustado). Entre paréntesis, la cota del 95 % de U1.
+
+| Conjunto | Modelo | AUC | U1 | S4 |
+|---|---|---|---|---|
+| Todos | sin ajustar | 0,684 | 0,3 % (0,6 %) | 5,1 % |
+| | **ajustado** | **0,988** | **0,8 % (1,1 %)** | **76,5 %** |
+| Difíciles (misma marca y color) | sin ajustar | 0,590 | 0,3 % (0,6 %) | 0,9 % |
+| | **ajustado** | **0,951** | 0,8 % (1,1 %) | **47,4 %** |
+| Luz estándar | sin ajustar | 0,681 | 0,8 % (1,3 %) | 9,2 % |
+| | **ajustado** | **0,991** | 0,5 % (0,9 %) | **69,4 %** |
+| Luz oscura | sin ajustar | 0,622 | 0,0 % (0,2 %) | 0,6 % |
+| | **ajustado** | **0,974** | 1,1 % (1,6 %) | **70,4 %** |
+| Luz reflectiva | ambos | no medida (sin datos, ver arriba) | | |
+| Difíciles, luz estándar | ajustado | 0,997 | | 76,3 % |
+| Difíciles, luz oscura | ajustado | 0,881 | | 30,2 % |
+
+Con el `REID_T` que hoy usa el servicio (0,075): sin ajustar, U1 0,3 % y S4 5,2 %; ajustado, U1 0,6 % (cota 0,9 %) y S4 74,0 %.
+U1 por rango de ángulo del ajustado (umbral 0,0862): 30-60° 0,7 % (de 550 pares), 60-90° 0,3 % (636), 90-135° 1,4 % (1 029)
+y 135-180° 0,7 % (1 072): las vistas más separadas no fallan más que las cercanas.
+
+**Lo que se separa.** El efecto del *ajuste* es enorme: el AUC sube de 0,68 a 0,99 y el S4 de 5 % a 76 %, con el mismo
+recorte. El efecto del *recorte* (caja del detector en vez de máscara del segmentador) es chico: en VeRi, DINOv2 sin
+ajustar da AUC 0,664 con máscaras (medición anterior, 4 010 recortes) y 0,641 con la caja del detector (4 506 recortes).
+Sin ajustar, la re-ID casi no detecta autos distintos con ninguno de los dos recortes.
+
+**Propuesta de `REID_T` (no aplicada).** Para `dinov2_vits14_reid`: **0,086**, con **U1 0,8 % (cota 1,1 %) y S4 76,5 %**
+sobre prueba (objetivo S4 >= 70 % cumplido; la cota de U1 queda apenas sobre el 1 % pedido: 27 pares de 3 287). Sin ajustar,
+con el recorte de la caja, el umbral calibrado (0,074) es casi el actual (0,075): U1 0,3 % y S4 5 %. **El servicio sigue con
+`dinov2_vits14` y `REID_T` = 0,075: el modelo nuevo no está activado** (`MODEL_EMBEDDER`) y el umbral no se cambió.
+
+### Referencia en VeRi-776 (¿generaliza fuera de 3DRealCar?)
+
+Los mismos modelos y el mismo recorte del detector sobre los recortes de VeRi de `reid_veri.py` (4 506 de 5 011; en 505 el
+detector no encuentra un auto): 55 206 pares del mismo auto, 10 090 292 de autos distintos y 915 116 difíciles.
+
+| Modelo | AUC (todos / difíciles) | Con `REID_T` 0,075: U1 / S4 | Con el umbral de 3DRealCar: U1 / S4 | Con el umbral propio de VeRi (U1 0,9 %): S4 |
+|---|---|---|---|---|
+| Sin ajustar | 0,641 / 0,526 | 0,1 % / 0,1 % | 0,1 % / 0,1 % | 1,7 % |
+| **Ajustado** | **0,810 / 0,621** | 0,1 % / 0,8 % | 0,2 % / 1,1 % | 4,6 % |
+
+**Generaliza solo en parte:** el AUC sube de 0,64 a 0,81, pero el S4 útil sigue siendo bajo (1 a 5 %). VeRi son cámaras de
+vigilancia de baja resolución y 3DRealCar son fotos de celular alrededor del auto: el parecido con las fotos de la app es
+mayor con 3DRealCar, pero no está validado.
+
+### Limitaciones
+
+- **U1 es optimista:** los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma
+  luz), así que se parecen más que dos fotos de personas distintas en momentos distintos. El S4 de los pares difíciles, no.
+- **Puede haber diferencias con el parque automotor argentino:** las marcas y modelos están anotados en chino (BYD, Changan...).
+- **No hay primeros planos de partes del auto:** el recorte de DETAIL (un primer plano) no es comparable; el servicio ya
+  lo trata como "sin auto que comparar".
+- **Pocos autos de prueba** (59, sin reflectivos): las cotas de los grupos chicos (luz estándar, 26 autos) son anchas.
+- Ajustado con la partición de entrenamiento (293 autos de luz estándar y oscura): hay que repetirlo con los reflectivos.
 
 ## Veredicto de la IA: solo GREEN o RED
 

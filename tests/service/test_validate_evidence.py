@@ -1,4 +1,5 @@
 import logging
+from types import SimpleNamespace
 
 import pytest
 
@@ -740,3 +741,118 @@ def test_el_mosaico_solo_corre_al_redactar_y_solo_si_el_veredicto_no_es_rojo() -
 
     assert green.vehicle.plate_calls == 3  # una vez por foto
     assert red.vehicle.plate_calls == 0
+
+
+# --- sin segmentador (MODEL_SEGMENTER=null): los autos salen de las cajas del detector ----------------
+
+
+def _without_segmenter(models: FakeModels) -> FakeModels:
+    models.cars = NullCarSegmenter()  # type: ignore[assignment]
+    return models
+
+
+def _boxed_models() -> FakeModels:
+    """Sin segmentador, con un auto detectado en GENERAL y en PLATE y un embedding por caja (90 x 90 px)."""
+    models = _without_segmenter(happy_models())
+    models.vehicle.by_marker[PLATE] = [car_box(), plate_box(0.95)]
+    models.embedder.by_marker_area = {(GENERAL, 8100): vec(0), (PLATE, 8100): vec(10)}
+    return models
+
+
+def test_sin_segmentador_la_presencia_la_decide_el_detector() -> None:
+    models = _without_segmenter(happy_models())
+    models.vehicle.by_marker[GENERAL] = [plate_box()]  # sin caja de auto
+
+    result = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.RED and result.reason_codes == (R.NO_VEHICLE,)
+
+
+def test_sin_segmentador_un_auto_detectado_alcanza_y_la_cascada_sigue() -> None:
+    result = _run(build_scenario(), _boxed_models())
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+    assert result.model_versions["segmenter"] == "null"
+
+
+def test_sin_segmentador_la_reid_compara_el_recorte_de_la_caja_del_detector() -> None:
+    same = _run(build_scenario(), _boxed_models())
+    other = _boxed_models()
+    other.embedder.by_marker_area[(PLATE, 8100)] = vec(80)
+
+    different = _run(build_scenario(), other)
+
+    assert same.reason_codes == () and same.scores.burst_similarity == pytest.approx(0.98, abs=0.01)
+    assert R.BURST_MISMATCH in _codes(different) and different.verdict == Verdict.RED
+
+
+def test_sin_segmentador_cada_detalle_se_compara_con_el_auto_de_su_caja() -> None:
+    models = _boxed_models()
+    marker = detail_marker(0)
+    models.vehicle.by_marker[marker] = [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR)]  # 6400 px
+    models.embedder.by_marker_area[(marker, 6400)] = vec(85)  # otro auto
+
+    assert R.BURST_MISMATCH in _codes(_run(build_scenario(), models))
+    models.embedder.by_marker_area[(marker, 6400)] = vec(5)  # el mismo
+
+    assert _run(build_scenario(), models).reason_codes == ()
+
+
+def test_sin_segmentador_las_ruedas_y_patentes_no_son_autos_para_la_reid() -> None:
+    models = _boxed_models()
+    marker = detail_marker(0)  # un primer plano: solo una rueda, ningún auto que comparar
+    models.embedder.by_marker = {marker: vec(85)}
+
+    result = _run(build_scenario(), models)
+
+    assert result.reason_codes == ()
+
+
+def test_sin_segmentador_y_con_el_detector_caido_no_se_penaliza() -> None:
+    models = _without_segmenter(happy_models())
+    models.vehicle.by_marker[GENERAL] = None
+    models.damage.by_marker = {}
+
+    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
+
+
+def test_con_segmentador_sus_instancias_mandan_aunque_no_haya_ninguna() -> None:
+    """Un segmentador que responde `[]` no se completa con las cajas del detector (modo experimental)."""
+    models = happy_models()
+    models.vehicle.by_marker[PLATE] = [car_box(), plate_box(0.95)]
+    models.cars.by_marker[PLATE] = []
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
+
+    result = _run(build_scenario(), models)
+
+    assert R.BURST_MISMATCH not in _codes(result)  # PLATE sin auto segmentado: no hay con qué comparar
+
+
+def test_las_mascaras_de_las_cajas_estan_en_las_coordenadas_de_la_foto_reducida() -> None:
+    import numpy as np
+
+    from vvi_ia.domain.model import EvidenceImage
+    from vvi_ia.service.validate_evidence import _Run
+
+    original = np.zeros((200, 200, 3), np.uint8)
+    reduced = np.zeros((100, 100, 3), np.uint8)
+    image = EvidenceImage(role=EvidenceRole.GENERAL, index=0, pixels=original, view=reduced)
+    models = _without_segmenter(happy_models())
+    # el detector ve la foto reducida: un auto, una rueda (se ignora) y un auto fuera de la foto (se ignora)
+    boxes = [
+        Box(5, 10, 75, 60, 0.9, BoxLabel.CAR),
+        Box(0, 0, 20, 20, 0.9, BoxLabel.WHEEL),
+        Box(200, 200, 250, 250, 0.9, BoxLabel.CAR),
+    ]
+    models.vehicle = SimpleNamespace(version="fake", detect=lambda _: boxes)  # type: ignore[assignment]
+    run = _Run(models=models.as_models())
+
+    cars = run.car_instances(image)
+
+    assert cars is not None and len(cars) == 1
+    mask = cars[0].mask
+    assert mask.shape == (100, 100) and mask.dtype == np.bool_
+    ys, xs = np.nonzero(mask)
+    assert (xs.min(), xs.max() + 1, ys.min(), ys.max() + 1) == (5, 75, 10, 60)
+    assert cars[0].conf == pytest.approx(0.9)
+    assert run.car_instances(image) is cars  # con caché

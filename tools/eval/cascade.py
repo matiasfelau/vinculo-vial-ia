@@ -216,6 +216,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--face-tiling", choices=("on", "off"), default="on", help="FACE_TILING (por defecto on)"
     )
     parser.add_argument("--model-max-side", type=int, help="MODEL_MAX_SIDE_PX (por defecto el del servicio)")
+    parser.add_argument(
+        "--no-segmenter",
+        action="store_true",
+        help="MODEL_SEGMENTER=null: los autos salen de las cajas del detector",
+    )
+    parser.add_argument(
+        "--no-damage", action="store_true", help="MODEL_DAMAGE=null (sin caja de daño en DETAIL)"
+    )
     parser.add_argument("--redact-workers", type=int, help="REDACT_WORKERS (por defecto el del servicio)")
     parser.add_argument(
         "--real-thresholds",
@@ -297,6 +305,9 @@ def main(argv: list[str] | None = None) -> int:
         **relaxed,
     )
     selection = dict(SELECTION)
+    for flag, port in ((args.no_segmenter, "segmenter"), (args.no_damage, "damage")):
+        if flag:
+            selection[port] = "null"
     try:
         models = build_models(
             selection, args.manifest, args.models_dir, args.threads, adapter_params(settings)
@@ -363,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     report: dict[str, Any] = {
         "modelos": models.versions(),
+        "segmentador": not args.no_segmenter,
+        "dano": not args.no_damage,
         "hilos_onnx": args.threads,
         "redaccion": not args.no_redaction,
         "mosaico_patentes": args.plate_tiling == "on",

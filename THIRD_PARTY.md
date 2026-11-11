@@ -17,9 +17,9 @@ El campo `commercial` del manifest usa tres valores:
 | Puerto | Modelo | Paper | Licencia | `commercial` |
 |---|---|---|---|---|
 | `detector`, `face` | RF-DETR (Small o Medium), entrenado con Open Images V7 | Robinson, Robicheaux, Popov, Ramanan y Peri. *RF-DETR: Neural Architecture Search for Real-Time Detection Transformers*. ICLR 2026 | Código y pesos base Apache 2.0. Datos de entrenamiento CC BY 4.0 | `yes` |
-| `segmenter` | RF-DETR-Seg (Small o Medium), pesos preentrenados con COCO | Mismo paper, ICLR 2026 | Apache 2.0 | `yes` |
+| `segmenter` (experimental, fuera de la cascada) | RF-DETR-Seg (Small o Medium), pesos preentrenados con COCO | Mismo paper, ICLR 2026 | Apache 2.0 | `yes` |
 | `curb` | RF-DETR-Seg Small, entrenado con el dataset propio de rebajes | Mismo paper, ICLR 2026 | Apache 2.0. Datos propios | `yes` |
-| `embedder` | DINOv2 ViT-S/14, sin entrenar | Oquab et al. *DINOv2: Learning Robust Visual Features without Supervision*. TMLR 2024 | Apache 2.0 | `yes` |
+| `embedder` | DINOv2 ViT-S/14, sin entrenar (`dinov2_vits14`) o ajustado con 3DRealCar (`dinov2_vits14_reid`, no activado) | Oquab et al. *DINOv2: Learning Robust Visual Features without Supervision*. TMLR 2024 | Apache 2.0 | `yes` |
 | `face` | SCRFD-10G (`scrfd_10g`), pesos de InsightFace sin reentrenar | Guo et al. *Sample and Computation Redistribution for Efficient Face Detection*. ICLR 2022 | Pesos para investigación (entrenados con WIDER FACE, CC BY-NC-ND 4.0). InsightFace ofrece licencias comerciales | `escalable` |
 | `ocr` | PARSeq, pesos preentrenados | Bautista y Atienza. *Scene Text Recognition with Permuted Autoregressive Sequence Models*. ECCV 2022 | Código Apache 2.0. El repositorio no declara una licencia para los pesos | `escalable` |
 | `damage` | RF-DETR, entrenado con CarDD | RF-DETR: ICLR 2026. Datos: ver CarDD | Modelo Apache 2.0. Los pesos heredan las condiciones de CarDD | `escalable` |
@@ -33,6 +33,9 @@ Notas:
   (Apache 2.0). Los pesos resultantes son propios y no se redistribuyen con el repositorio; se generan con
   [tools/training/detector/](tools/training/detector/README.md). Open Images: anotaciones CC BY 4.0 e imágenes CC BY
   2.0 (ver la sección del dataset).
+- **`dinov2_vits14_reid`:** DINOv2 ViT-S/14 ajustado por este proyecto con 3DRealCar (Apache-2.0) y una pérdida CosFace, con
+  [tools/training/reid/](tools/training/reid/README.md). Misma entrada y salida que el modelo base. Los pesos no se
+  redistribuyen y no están activados.
 - **DINOv2:** pesos `facebook/dinov2-small` publicados por Meta en Hugging Face
   (<https://huggingface.co/facebook/dinov2-small>), convertidos a ONNX sin modificar con
   [tools/export/dinov2.py](tools/export/dinov2.py).
@@ -87,6 +90,23 @@ No van al servicio. Se usan para preetiquetar o como referencia en las evaluacio
 - **Uso:** solo a través de los pesos preentrenados de RF-DETR-Seg. El dataset no se descarga.
 - **Licencia:** anotaciones CC BY 4.0.
 - **Cita:** Lin et al. *Microsoft COCO: Common Objects in Context*. ECCV 2014.
+
+### 3DRealCar
+
+- **Uso:** ajuste y evaluación de la re-identificación del `embedder` (DINOv2 ViT-S/14). Solo se usan las fotos RGB
+  (`frame_N.jpg`) y la pose de la cámara de cada una; no se usa el escaneo 3D (depth, mallas, mapas del escáner).
+- **Licencia:** Apache-2.0. El `README` del repositorio dice "3DRealCar dataset is allowed commercial usage for
+  free. The dataset license is Apache-2.0", y el `LICENSE` del repositorio es el texto de Apache-2.0 (verificado
+  el 10/11/2026 en <https://github.com/xiaobiaodu/3DRealCar_Dataset>).
+- **Cita:** Du, Sun, Wang, Wu, Sheng, Ying, Lu, Zhu, Zhan y Yu. *3DRealCar: An In-the-wild RGB-D Car Dataset with
+  360-degree Views*. ICCV 2025 (arXiv:2406.04875).
+- **Sitio:** <https://xiaobiaodu.github.io/3drealcar/>
+- **En este proyecto:** los datos viven fuera del repositorio (`REID_DATA_DIR`) y no se versionan ni entran a la
+  imagen. Los pesos ajustados con él (`dinov2_vits14_reid`) no van a git: se montan desde `MODELS_DIR` y se
+  verifican contra el `sha256` del manifest.
+- **Límites:** cada auto se capturó en una sola sesión (el mismo lugar, el mismo día), así que los pares del mismo
+  auto son más fáciles que los de la vida real; hay diferencias con el parque automotor argentino (las
+  marcas y los modelos están anotados en chino, p. ej. BYD o Changan, y son los de las calles donde se capturó); y no hay primeros planos de partes del auto.
 
 ### CarDD
 
