@@ -77,10 +77,8 @@ def plate_box(conf: float = 0.9) -> Box:
 THRESHOLDS = Thresholds(
     reid_t=0.50,
     ocr_min_conf=0.60,
-    damage_presence_t=0.70,
     presence_min_area=0.05,
     model_max_side_px=1024,
-    presence_plate_min_conf=0.40,
 )
 
 
@@ -204,9 +202,9 @@ def happy_models() -> FakeModels:
         vehicle=FakeVehicleDetector(
             {
                 GENERAL: [car_box(), plate_box()],
-                PLATE: [plate_box(0.95)],
+                PLATE: [car_box(), plate_box(0.95)],
                 CONTEXT: [car_box(), Box(35, 60, 45, 80, 0.9, BoxLabel.WHEEL)],
-                **{detail_marker(i): [Box(0, 0, 80, 80, 0.9, BoxLabel.PLATE)] for i in range(3)},
+                **{detail_marker(i): [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR)] for i in range(3)},
             }
         ),
         cars=FakeCarSegmenter(

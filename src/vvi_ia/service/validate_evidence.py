@@ -99,14 +99,12 @@ class Thresholds:
 
     reid_t: float  # coseno bajo el cual la re-ID confirma que es otro auto (BURST_MISMATCH)
     ocr_min_conf: float  # lectura segura de patente: con menos confianza no hay veredicto de patente
-    damage_presence_t: float  # confianza de una caja de daño para contar como presencia de auto en DETAIL
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
     model_max_side_px: (
         int  # lado mayor al que se reduce cada foto antes de los modelos (las cajas vuelven al original)
     )
-    presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
 
 
 @dataclass(frozen=True)
@@ -160,9 +158,9 @@ class _Run:
     def car_instances(self, image: EvidenceImage) -> list[CarInstance] | None:
         """Los autos de la foto reducida, cada uno con su máscara (del tamaño de la reducida).
 
-        Con un segmentador (`MODEL_SEGMENTER`, experimental) son sus instancias. Sin él, que es la
-        configuración de la cascada, son las cajas `car` del detector, cada una como una máscara rectangular:
-        el recorte que se le da al embedder es la caja. `None` si ningún modelo respondió.
+        Con un segmentador (`MODEL_SEGMENTER`, que está en la cascada) son sus instancias. Sin él son las
+        cajas `car` del detector, cada una como una máscara rectangular: el recorte que se le da al embedder
+        es la caja. `None` si ningún modelo respondió.
         """
         key = (image.role, image.index)
         if key not in self.cars:
@@ -364,12 +362,13 @@ class ValidateEvidence:
     # --- etapas -------------------------------------------------------------------------
 
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
-        """R1. `False` si en alguna foto no hay evidencia de un auto (RED, fraude): se corta la cascada.
+        """R1. `False` si en alguna foto no hay evidencia de un vehículo (RED, fraude): se corta la cascada.
 
-        GENERAL, CONTEXT y DETAIL tienen que mostrar un auto (en DETAIL también cuenta una caja de daño con
-        confianza suficiente); PLATE, un auto o una patente. La clase rueda del detector no cuenta en ningún
-        rol, y una patente sola no valida GENERAL ni DETAIL: alcanza una patente arrancada o impresa para
-        hacer pasar cualquier imagen. Solo hay NO_VEHICLE si todos los modelos consultados respondieron y
+        La regla es la misma para todas las fotos (GENERAL, PLATE, DETAIL y CONTEXT): tiene que haber un
+        vehículo, que es una caja `car` del detector o una instancia del segmentador (det ∨ seg). Ni la
+        patente ni la rueda ni una caja de daño cuentan como presencia: alcanza una patente arrancada o
+        impresa para hacer pasar cualquier imagen. DETAIL no tiene una regla propia (verificar el daño o la
+        rampa es trabajo futuro). Solo hay NO_VEHICLE si todos los modelos consultados respondieron y
         ninguno encontró nada; si no se pudo decidir, no se penaliza.
         """
         for image in images:
@@ -379,30 +378,20 @@ class ValidateEvidence:
         return True
 
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
-        """¿Hay un auto (o una patente, en PLATE) que ocupe al menos `presence_min_area` de la foto?
+        """¿Hay un vehículo que ocupe al menos `presence_min_area` de la foto? Igual en todos los roles.
 
-        Cuenta una caja de `car` del detector, una de `plate` si la foto es de PLATE, una
-        instancia de auto del segmentador o, en DETAIL, una caja de daño. `None` si no se pudo decidir (sin
-        hallazgos y algún modelo sin respuesta).
+        Cuenta una caja `car` del detector o una instancia de auto del segmentador. `None` si no se pudo
+        decidir (sin hallazgos y algún modelo sin respuesta).
         """
-        labels = {BoxLabel.CAR} | ({BoxLabel.PLATE} if image.role == EvidenceRole.PLATE else set())
         minimum = self._t.presence_min_area * image.width * image.height
         mask_minimum = self._t.presence_min_area * image.model_pixels.shape[0] * image.model_pixels.shape[1]
         detections = run.detect(image)
-        for box in detections or ():
-            if box.label in labels and box.area >= minimum:
-                if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
-                    return True
+        if any(box.label == BoxLabel.CAR and box.area >= minimum for box in detections or ()):
+            return True
         cars = run.car_instances(image)
         if any(int(car.mask.sum()) >= mask_minimum for car in cars or ()):
             return True
-        answered = detections is not None and cars is not None
-        if image.role == EvidenceRole.DETAIL:
-            damage = self._models.damage.detect(image.model_pixels)
-            if any(box.conf >= self._t.damage_presence_t for box in damage or ()):
-                return True
-            answered = answered and damage is not None
-        return False if answered else None
+        return False if detections is not None and cars is not None else None
 
     def _burst(
         self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage, codes: Codes

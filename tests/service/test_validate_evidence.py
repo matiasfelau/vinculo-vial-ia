@@ -39,8 +39,11 @@ from vvi_ia.domain.model import (
     BoxLabel,
     CarInstance,
     EvidenceRole,
+    Mask,
+    Pixels,
     ReasonCode,
     ValidationResult,
+    Vector,
     Verdict,
 )
 from vvi_ia.domain.verdict import is_fraud
@@ -144,15 +147,10 @@ def test_en_plate_y_detail_basta_un_auto(
     assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
 
 
-def test_en_plate_una_patente_sola_alcanza() -> None:
-    models = _only(happy_models(), PLATE, [plate_box(0.95)], [])
-
-    assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
-
-
-def test_en_detail_una_patente_sola_no_alcanza() -> None:
-    """Una patente arrancada o impresa haría pasar cualquier imagen: en DETAIL no cuenta como presencia."""
-    models = _only(happy_models(), detail_marker(0), [plate_box(0.95)], [])
+@pytest.mark.parametrize("role_marker", [PLATE, detail_marker(0)])
+def test_en_plate_y_detail_una_patente_sola_no_alcanza(role_marker: int) -> None:
+    """Una patente arrancada o impresa haría pasar cualquier imagen: no es presencia en ninguna foto."""
+    models = _only(happy_models(), role_marker, [plate_box(0.95)], [])
 
     result = _run(build_scenario(), models)
 
@@ -499,22 +497,27 @@ def _detail_without_part(models: FakeModels, damage: float | None) -> FakeModels
     return models
 
 
-def test_un_detalle_sin_partes_pero_con_dano_seguro_cuenta_como_presente() -> None:
-    models = _detail_without_part(happy_models(), 0.80)  # THRESHOLDS.damage_presence_t = 0,70
-
-    assert _run(build_scenario(), models).reason_codes == ()
-
-
-def test_un_dano_poco_confiable_no_alcanza_como_presencia() -> None:
-    models = _detail_without_part(happy_models(), 0.60)
+@pytest.mark.parametrize("damage", [0.60, 0.80, 0.99])
+def test_el_dano_no_cuenta_como_presencia_ni_en_detail(damage: float) -> None:
+    """DETAIL sigue la regla de GENERAL: tiene que haber un vehículo, no basta una caja de daño."""
+    models = _detail_without_part(happy_models(), damage)
 
     assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
 
 
-def test_el_dano_no_cuenta_como_presencia_en_plate_ni_en_general() -> None:
-    for marker in (PLATE, GENERAL):
-        models = _only(happy_models(), marker, [], [])
-        models.damage.by_marker[marker] = [Box(0, 0, 90, 90, 0.99)]
+@pytest.mark.parametrize("marker", [PLATE, GENERAL, detail_marker(0)])
+def test_el_dano_no_cuenta_como_presencia_en_ningun_rol(marker: int) -> None:
+    models = _only(happy_models(), marker, [], [])
+    models.damage.by_marker[marker] = [Box(0, 0, 90, 90, 0.99)]
+
+    assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
+
+
+def test_detail_y_general_aplican_la_misma_regla_de_area() -> None:
+    """Un vehículo del 4 % de la foto no alcanza ni en GENERAL ni en DETAIL (un único área mínima)."""
+    small = Box(0, 0, 20, 20, 0.9, BoxLabel.CAR)
+    for marker in (GENERAL, detail_marker(0)):
+        models = _only(happy_models(), marker, [small], [CarInstance(rect(0, 20, 0, 20))])
 
         assert _codes(_run(build_scenario(), models)) == {R.NO_VEHICLE}
 
@@ -822,12 +825,23 @@ def test_sin_segmentador_cada_detalle_se_compara_con_el_auto_de_su_caja() -> Non
 
 def test_sin_segmentador_las_patentes_no_son_autos_para_la_reid() -> None:
     models = _boxed_models()
-    marker = detail_marker(0)  # un primer plano: solo una patente, ningún auto que comparar
-    models.embedder.by_marker = {marker: vec(85)}
+    marker = detail_marker(0)  # un primer plano con el auto (80 x 80 px) y una patente (50 x 20 px)
+    models.vehicle.by_marker[marker] = [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR), plate_box()]
+    embedded: list[int] = []
+    real_embed = models.embedder.embed
+
+    def recording(img: Pixels, mask: Mask) -> Vector | None:
+        embedded.append(int(mask.sum()))
+        return real_embed(img, mask)
+
+    models.embedder.embed = recording  # type: ignore[method-assign]
+    models.embedder.by_marker_area[(marker, 6400)] = vec(5)
 
     result = _run(build_scenario(), models)
 
     assert result.reason_codes == ()
+    assert 6400 in embedded and 1000 not in embedded  # se compara el auto; la caja de la patente no
+    assert plate_box().area == 1000
 
 
 def test_sin_segmentador_y_con_el_detector_caido_no_se_penaliza() -> None:

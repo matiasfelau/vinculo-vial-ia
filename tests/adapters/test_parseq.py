@@ -26,6 +26,7 @@ from vvi_ia.adapters.models.parseq import (
     ParseqPlateReader,
     decode_greedy,
     extract_plate,
+    extract_plate_chars,
     preprocess,
 )
 from vvi_ia.adapters.models.registry import ADAPTERS, ModelSetupError, build_models
@@ -462,3 +463,16 @@ def test_pesos_reales_leen_texto_sintetico_con_formato_de_patente(text: str) -> 
     assert result[0] == text
     assert result[1] > 0.9
     assert models.versions()["ocr"].startswith(f"{MODEL_NAME}@")
+
+
+def test_extract_plate_chars_devuelve_la_probabilidad_de_cada_caracter_de_la_patente() -> None:
+    probs = [0.99, 0.98, 0.1, 0.97, 0.96, 0.95, 0.1, 0.94, 0.93]  # los espacios valen 0.1
+
+    text, chars = extract_plate_chars("AB 123 CD", probs)
+
+    assert text == "AB123CD"
+    assert chars == [0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93]
+
+
+def test_extract_plate_chars_sin_patente_devuelve_el_texto_crudo_con_todas_sus_probabilidades() -> None:
+    assert extract_plate_chars("HELLO", [0.9, 0.8, 0.95, 0.99, 0.6]) == ("HELLO", [0.9, 0.8, 0.95, 0.99, 0.6])
