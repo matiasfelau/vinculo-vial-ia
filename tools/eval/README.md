@@ -175,6 +175,87 @@ formatos en alcance: de 14 835 pares, el **75,2 %** sale `MISMATCH` (RED); el re
 par da `MATCH`. Cuando la lectura es segura, el 99,96 % sale `MISMATCH`. Del otro lado, ninguna patente en alcance que
 coincide con su etiqueta sale `MISMATCH` con 0,78.
 
+### R3 con confusiones de caracteres (`ocr_confusions.py`)
+
+**¿El servicio normaliza por posición según el formato?** Sí, y no hizo falta implementarlo: `plate_check`
+(`domain/plate.py`), con la lectura del mismo largo que la patente reportada, lee cada carácter como dígito o como letra
+según el de la reportada en esa posición (`TO_DIGIT`: O, Q, D → 0; I → 1; Z → 2; S → 5; G → 6; B → 8, y `TO_LETTER` al
+revés). El formato lo da la reportada (`ABC123` o `AB123CD`), así que vale para los dos; el adaptador de PARSeq hace lo
+mismo al buscar la patente dentro del texto. Los tests de `tests/domain/test_plate.py` cubren los seis pares en los dos
+formatos. El límite es que necesita el mismo largo: con un carácter de más o de menos no hay posiciones que comparar y
+la confusión cuenta como otra diferencia.
+
+`ocr_confusions.py` compara tres criterios para declarar `PLATE_MISMATCH` (RED, fraude), con la misma carga y recorte que
+`ocr.py`, y la confianza de cada carácter que ahora devuelve `ParseqPlateReader.read_chars` (solo para `tools/`; el
+servicio sigue usando `read`):
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\ocr-r3"; $env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/ocr_confusions.py
+```
+
+- **V0, la actual**: lectura segura (confianza >= `OCR_MIN_CONF`) y diferencia en 2 o más caracteres; uno solo es duda.
+- **V1, la actual + confusiones**: igual, pero una diferencia entre caracteres que el OCR confunde con frecuencia no
+  cuenta: es duda, no una patente distinta.
+- **V2, solo confusiones y baja confianza**: sin la regla del "un solo carácter" y sin umbral global sobre la lectura.
+  Hay MISMATCH si algún carácter difiere, no es una confusión frecuente y PARSeq lo leyó con confianza >= `t_char`.
+
+**S5** es cuántos de los pares cruzados (la lectura de una foto contra la etiqueta de otra patente: 14 835 pares de las 129
+lecturas en alcance) salen MISMATCH. **U2** es cuántas de las lecturas contra su propia etiqueta salen MISMATCH: patentes
+correctas marcadas como equivocadas. Son **133 lecturas** (las 137 cajas del dataset menos 3 marcadores de posición y 1
+ilegible), con la cota de una cola al 95 %.
+
+**La lista de confusiones sale de los errores reales de PARSeq en este dataset**: las diferencias entre la lectura y la
+etiqueta, después de la normalización por posición, en las lecturas del mismo largo con 3 diferencias o menos (más que
+eso es un recorte roto, no una confusión). Una pareja entra a la lista si aparece en al menos 2 lecturas. Como la lista y
+la evaluación usan las mismas lecturas, **se evalúa dejando una lectura afuera**: para cada una, la lista se arma sin sus
+propios errores, así que U2 no premia memorizar. Se evalúa además la lista a priori del pedido (C/G, O/D/Q, M/N, E/F, P/R,
+U/V, 3/8, 1/7, 5/6), que no depende del dataset.
+
+| Pareja | Lecturas en que aparece |
+|---|---|
+| 0/6 | 4 |
+| M/W | 3 |
+| O/Q | 2 |
+| 0/1, 2/4, 2/7, 3/8, 3/J, 6/8, 7/9, A/Z, D/O, H/M, I/J, J/L, N/W, V/Y | 1 cada una |
+
+Solo **tres parejas se repiten** (0/6, M/W y O/Q); de ellas, la lista a priori solo comparte O/Q. Con 129 lecturas en alcance y 25 sin coincidencia exacta, es una lista corta y poco estable.
+
+| Variante | `OCR_MIN_CONF` o `t_char` | S5 (de 14 835) | U2 (de 133) | Cota 95 % de U2 |
+|---|---|---|---|---|
+| **V0, la actual** | 0,78 (la del servicio) | **75,2 %** (11 151) | **1** | 3,5 % |
+| V0 | 0,60 | 89,9 % (13 336) | 3 | 5,7 % |
+| V1, + confusiones aprendidas | 0,78 | 75,2 % (11 151) | 1 | 3,5 % |
+| V1, + confusiones aprendidas | 0,60 | 89,9 % (13 336) | 3 | 5,7 % |
+| V1, + confusiones a priori | 0,78 | 75,2 % (11 149) | 1 | 3,5 % |
+| V2, aprendidas | `t_char` 0,95 | 99,93 % (14 824) | 6 | 8,7 % |
+| V2, aprendidas | 0,90 | 100 % | 8 | 10,6 % |
+| V2, aprendidas | 0,78 | 100 % | 8 | 10,6 % |
+| V2, aprendidas | 0,70 | 100 % | 10 | 12,4 % |
+| V2, aprendidas | 0,60 | 100 % | 12 | 14,2 % |
+| V2, aprendidas | 0,50 | 100 % | 16 | 17,7 % |
+| V2, a priori | 0,95 / 0,90 / 0,78 / 0,70 | 99,97 % / 100 % / 100 % / 100 % | 6 / 8 / 9 / 12 | 8,7 / 10,6 / 11,5 / 14,2 % |
+| V2, sin lista (solo baja confianza) | 0,95 / 0,90 / 0,78 / 0,70 | 99,99 % / 100 % / 100 % / 100 % | 6 / 8 / 9 / 13 | 8,7 / 10,6 / 11,5 / 15,1 % |
+
+**Lectura.**
+
+- **Las confusiones no cambian nada en V1**: S5 y U2 son idénticos a V0 (con la lista a priori, 2 pares menos de 14 835). Las
+  diferencias de 2 o más caracteres no son, en este dataset, parejas que se repitan, así que la lista no las absorbe
+  (no revisé lectura por lectura de qué son).
+- **V2 detecta casi todo (S5 ≈ 100 %) pero marca como fraude 6 a 16 de 133 patentes correctas** (4,5 % a 12 %), contra 1 de
+  la actual. Una sola diferencia con confianza alta alcanza, y PARSeq se equivoca con seguridad en patentes que son
+  correctas: el costo (una penalización injusta) es el error caro. Con `t_char` de 0,95 baja a 6, que sigue siendo 6 veces
+  la actual.
+- **La lista de confusiones ayuda poco en V2**: a `t_char` 0,78 pasa de 9 (sin lista) a 8 (aprendida, dejando una
+  afuera) o 9 (a priori); a 0,50, de 21 a 16. Con 3 parejas repetidas no hay con qué.
+- **No recomiendo cambiar de variante con estos datos**: V0 y V1 son iguales y V2 cambia una pérdida de 1 patente correcta por 8.
+  La decisión es tuya; el servicio queda como estaba (V0).
+
+Límites: 133 lecturas, 25 con errores y una lista aprendida de 3 parejas repetidas; el dataset de Roboflow tiene fotos
+con ángulo y desenfoque que no son las de la app; la confianza de PARSeq por carácter se calibró con este mismo dataset
+solo en el sentido de que se barrió `t_char` sobre él (optimista). No se probó una variante que combine V0 con la baja
+confianza por carácter.
+
 ### Opciones
 
 | Opción | Para qué |
@@ -1852,7 +1933,7 @@ La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
 
 | Regla | Código | Cuándo |
 |---|---|---|
-| R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay evidencia de un auto: GENERAL y CONTEXT, un auto; PLATE, un auto, una parte o una patente; DETAIL, lo mismo o una caja de daño de confianza `DAMAGE_PRESENCE_T`. |
+| R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay un vehículo (la misma regla para GENERAL, PLATE, DETAIL y CONTEXT): una caja `car` del detector o una instancia del segmentador (det ∨ seg) que ocupa al menos `PRESENCE_MIN_AREA` de la foto. La patente, la rueda y el daño no cuentan. |
 | R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,075 con VeRi). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
 | R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE`, `VALIDATION_FAILED` | Sin fraude: foto ilegible, no se pudo redactar todas las fotos, o el mensaje terminó en la DLQ sin veredicto (`VALIDATION_FAILED`, ver abajo). |
@@ -1871,9 +1952,9 @@ como en cualquier veredicto: una redelivery repite el mismo aviso y Alert lo ded
 - El aviso lleva solo el `alert_id`, el `eventId` de causa y el código; nunca se loguea el payload ni `pat_enc_ia`.
 
 Salieron de la cascada el chequeo de **rebajes** (experimental y en construcción: `MODEL_CURB` vacío, sin pesos) y el
-chequeo de **daño** (solo queda como prueba de presencia en DETAIL). `presence.py` calibra `DAMAGE_PRESENCE_T`: el primer
-valor sobre la mayor confianza de daño de una de las 489 fotos sin auto de Open Images (0,97: pasan 0 de 489, cota del
-95 % = 0,6 %), que recupera 5 de los 21 primeros planos de CarDD que las otras reglas rechazaban.
+chequeo de **daño**: el daño tampoco cuenta como presencia en DETAIL (decisión del 12/11/2026), que sigue exactamente la
+regla de GENERAL. Verificar el daño o la rampa es trabajo futuro. `DAMAGE_PRESENCE_T` queda solo como la confianza
+mínima del adaptador de daño (`MODEL_DAMAGE`, experimental).
 
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
 
