@@ -99,12 +99,13 @@ def _substitutions(window: str, pattern: str) -> int | None:
     return cost
 
 
-def extract_plate(text: str, probs: Sequence[float]) -> tuple[str, float]:
-    """Patente argentina dentro de `text` y su confianza; si no hay, el texto crudo y su confianza.
+def extract_plate_chars(text: str, probs: Sequence[float]) -> tuple[str, list[float]]:
+    """Patente argentina dentro de `text` y la probabilidad de cada uno de sus caracteres.
 
     Gana la ventana con menos caracteres reinterpretados más caracteres que quedan fuera de ella: así
     una ventana corta del formato anterior no le gana a una patente Mercosur con una confusión. Ante
-    un empate, Mercosur antes que el formato anterior, y la más a la izquierda.
+    un empate, Mercosur antes que el formato anterior, y la más a la izquierda. Si no hay ninguna ventana,
+    el texto crudo con sus probabilidades.
     """
     kept = [index for index, char in enumerate(text) if char.isascii() and char.isalnum()]
     canonical = "".join(text[index].upper() for index in kept)
@@ -119,9 +120,15 @@ def extract_plate(text: str, probs: Sequence[float]) -> tuple[str, float]:
             if best is None or key < best[0]:
                 best = (key, start, size)
     if best is None:
-        return text, min(probs, default=0.0)
+        return text, list(probs)
     _, start, size = best
-    return canonical[start : start + size], min(probs[index] for index in kept[start : start + size])
+    return canonical[start : start + size], [probs[index] for index in kept[start : start + size]]
+
+
+def extract_plate(text: str, probs: Sequence[float]) -> tuple[str, float]:
+    """Patente argentina dentro de `text` y su confianza (la menor de sus caracteres); si no hay, el crudo."""
+    plate, plate_probs = extract_plate_chars(text, probs)
+    return plate, min(plate_probs, default=0.0)
 
 
 class ParseqPlateReader:
@@ -145,6 +152,14 @@ class ParseqPlateReader:
             return extract_plate(*self._decode(crop))
         except Exception as exc:
             # Solo el tipo de error: el mensaje podría arrastrar la patente o la imagen.
+            logger.warning("falló la inferencia del OCR", extra={"error": type(exc).__name__})
+            return None
+
+    def read_chars(self, crop: Pixels) -> tuple[str, list[float]] | None:
+        """Patente y probabilidad de cada carácter. Es solo para `tools/eval`: el servicio usa `read`."""
+        try:
+            return extract_plate_chars(*self._decode(crop))
+        except Exception as exc:
             logger.warning("falló la inferencia del OCR", extra={"error": type(exc).__name__})
             return None
 
