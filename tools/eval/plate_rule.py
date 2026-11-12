@@ -1,5 +1,9 @@
 """R1 con la regla nueva de patente: P1 contra P2, por nivel de zoom, y U3 por alerta de tres fotos.
 
+**Histórico (12/11/2026):** mide una regla de presencia anterior (la patente o la rueda como señal, CarDD como
+foto de detalle) con exclusiones manuales de negativas. La vigente es `capture_sets.py` y `capture_r1.py`.
+
+
 Decisión del 11/11/2026: una patente sola **no valida** una foto (alcanza una patente arrancada o impresa para
 hacer pasar cualquier imagen). En GENERAL y DETAIL la patente deja de contar como presencia: se pide un auto
 (detector, segmentador o los dos). En PLATE hay dos variantes, que este script mide sin aplicar ninguna:

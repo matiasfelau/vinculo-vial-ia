@@ -1,5 +1,9 @@
 """R1 en varias configuraciones, a partir de las señales que midió `presence.py` (sin volver a inferir).
 
+**Histórico (12/11/2026):** mide una regla de presencia anterior (la patente o la rueda como señal, CarDD como
+foto de detalle) con exclusiones manuales de negativas. La vigente es `capture_sets.py` y `capture_r1.py`.
+
+
 Con las señales de cada foto (`presence_report.json`) evalúa la regla R1 del servicio, por rol, en:
 
 - **a** sin segmentador (la oficial) y **b** con segmentador, ambas sin la caja de daño;

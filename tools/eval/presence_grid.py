@@ -1,5 +1,9 @@
 """Barrido de la regla R1 sin la clase rueda, a partir de las señales que midió `presence.py`.
 
+**Histórico (12/11/2026):** mide una regla de presencia anterior (la patente o la rueda como señal, CarDD como
+foto de detalle) con exclusiones manuales de negativas. La vigente es `capture_sets.py` y `capture_r1.py`.
+
+
 No vuelve a inferir: cada foto trae, por señal, la lista `[confianza, fracción de la foto]`, así que cualquier
 combinación de decisor, patente y umbrales se evalúa sin volver a correr un modelo.
 

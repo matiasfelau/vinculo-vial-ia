@@ -1,5 +1,9 @@
 """Presencia de auto en cada foto: ¿qué regla no deja pasar un no-auto (A) ni rechaza un primer plano (C)?
 
+**Histórico (12/11/2026):** mide una regla de presencia anterior (la patente o la rueda como señal, CarDD como
+foto de detalle) con exclusiones manuales de negativas. La vigente es `capture_sets.py` y `capture_r1.py`.
+
+
 Mide, con los adaptadores reales, las señales que puede usar el servicio para decidir que en una foto hay un
 auto: `car`, `wheel` y `plate` del detector, una instancia de auto del segmentador y una caja de daño. Con
 esas señales evalúa tres reglas, de la más simple a la más amplia, contra cuatro conjuntos:
