@@ -28,6 +28,7 @@ dev = [
 # Export, etiquetado, entrenamiento y evaluación: corre fuera de Docker y nunca entra en la imagen.
 tools = [
     "fiftyone>=1.0,<2",
+    "google-auth>=2.30,<3",
     "nltk>=3.9,<4",
     "onnx>=1.17,<2",
     "pytorch-lightning>=2.6,<3",

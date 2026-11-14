@@ -57,6 +57,43 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
 
    Se puede repetir: no vuelve a bajar lo que ya está.
 
+   **Desde una copia propia en Google Drive** (cuando el folder público corta por cuota): cada zip se copia con
+   "Crear una copia" al Drive de quien entrena, y `fetch.py` lo lee por rangos con una cuenta de servicio de **solo
+   lectura**. No baja el zip: lee el índice (unos 0,1 GB) y las vistas elegidas (1,5 a 3,5 GB por zip).
+
+   Configuración, una sola vez:
+
+   1. En Google Cloud Console: un proyecto con la API **Google Drive** habilitada y una **cuenta de servicio** sin
+      roles. Creale una clave JSON y guardala **fuera del repositorio** (`fetch.py` se niega a leerla desde dentro).
+   2. En Drive: una carpeta (p. ej. `3drealcar-copias`) compartida con el correo de la cuenta de servicio como
+      **Lector**. Ve solo esa carpeta, no puede escribir ni borrar.
+   3. Copiá cada zip del folder público con "Crear una copia" y movelo a esa carpeta. El nombre
+      `Copia de 1400-1600.zip` se reconoce solo; si hay dos copias del mismo zip, se frena.
+   4. Variables (el id es lo que sigue a `/folders/` en la URL de la carpeta):
+
+      ```powershell
+      $env:GOOGLE_APPLICATION_CREDENTIALS = "C:\Users\<vos>\.vv\drive-lector.json"
+      $env:REID_DRIVE_FOLDER_ID = "<id de la carpeta>"
+      ```
+
+   Después, para sumar todos los autos (las vistas de los ya elegidos no cambian) y bajar un zip por vez:
+
+   ```powershell
+   uv run --frozen --extra dev --extra tools python tools/training/reid/fetch.py select --frames 12 --standard 2000
+   uv run --frozen --extra dev --extra tools python tools/training/reid/fetch.py drive-check --source drive
+   uv run --frozen --extra dev --extra tools python tools/training/reid/fetch.py pull --source drive --only 1400-1600
+   uv run --frozen --extra dev --extra tools python tools/training/reid/fetch.py status
+   ```
+
+   - `drive-check` valida el acceso (lista la carpeta y lee 1 KiB al final de cada zip) y muestra el MD5 de cada
+     copia, para compararlo con el de Drive.
+   - `pull` verifica antes de bajar: el zip abre, tiene los mismos autos que `index.json` y las vistas elegidas
+     están donde el índice dice. Cada foto y cada pose se comparan contra su CRC32. Si algo no coincide, no baja
+     nada de ese zip. `verify --source drive` hace solo esa verificación.
+   - Al terminar un zip dice **"ya podés borrar su copia de Drive"**. Si Google corta por cuota termina con código
+     3 y lo bajado se conserva: se retoma después con el mismo comando.
+   - Al terminar, borrá la clave de la cuenta de servicio y dejá de compartir la carpeta.
+
 3. **Recortes, ángulos y partición:**
 
    ```powershell
@@ -65,7 +102,9 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
 
    Escribe `crops/` y `crops.json`. La **partición** es agrupada por auto (ningún auto está en dos particiones),
    estratificada por luz, tipo de carrocería y color, con semilla fija (`--seed`, 0 por defecto): 70 % entrenamiento,
-   15 % validación y 15 % prueba.
+   15 % validación y 15 % prueba. La partición se **congela** en `split.json`: al sumar autos (otro zip, más autos
+   estándar) los que ya estaban no cambian de partición y solo se sortean los nuevos, de modo que cada estrato
+   vuelva a quedar en 70/15/15. Para empezar de cero hay que borrar `split.json` y `crops.json`.
 
 4. **Entrenar** (GTX 1660 de 6 GB, FP32, lote chico con acumulación; cerrá antes lo que use la GPU):
 
