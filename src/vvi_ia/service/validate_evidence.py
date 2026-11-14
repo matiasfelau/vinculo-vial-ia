@@ -99,14 +99,12 @@ class Thresholds:
 
     reid_t: float  # coseno bajo el cual la re-ID confirma que es otro auto (BURST_MISMATCH)
     ocr_min_conf: float  # lectura segura de patente: con menos confianza no hay veredicto de patente
-    damage_presence_t: float  # confianza de una caja de daño para contar como presencia de auto en DETAIL
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
     model_max_side_px: (
         int  # lado mayor al que se reduce cada foto antes de los modelos (las cajas vuelven al original)
     )
-    presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
 
 
 @dataclass(frozen=True)
@@ -157,12 +155,37 @@ class _Run:
             )
         return self.plate_detections[key]
 
-    def segment_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
-        """Los autos de la foto reducida (las máscaras son del tamaño de la reducida)."""
+    def car_instances(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Los autos de la foto reducida, cada uno con su máscara (del tamaño de la reducida).
+
+        Con un segmentador (`MODEL_SEGMENTER`, que está en la cascada) son sus instancias. Sin él son las
+        cajas `car` del detector, cada una como una máscara rectangular: el recorte que se le da al embedder
+        es la caja. `None` si ningún modelo respondió.
+        """
         key = (image.role, image.index)
         if key not in self.cars:
-            self.cars[key] = self.models.cars.cars(image.model_pixels)
+            segmented = self.models.cars.cars(image.model_pixels)
+            self.cars[key] = segmented if segmented is not None else self._boxed_cars(image)
         return self.cars[key]
+
+    def _boxed_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Las cajas `car` del detector (con su confianza mínima) como instancias de máscara rectangular."""
+        detections = self.detect(image)
+        if detections is None:
+            return None
+        height, width = image.model_pixels.shape[:2]
+        cars: list[CarInstance] = []
+        for box in detections:
+            if box.label != BoxLabel.CAR:
+                continue
+            x1, y1 = max(0, int(box.x1 / image.ratio)), max(0, int(box.y1 / image.ratio))
+            x2, y2 = min(width, round(box.x2 / image.ratio)), min(height, round(box.y2 / image.ratio))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            mask = np.zeros((height, width), np.bool_)
+            mask[y1:y2, x1:x2] = True
+            cars.append(CarInstance(mask=mask, conf=box.conf))
+        return cars
 
     def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
         """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
@@ -339,11 +362,14 @@ class ValidateEvidence:
     # --- etapas -------------------------------------------------------------------------
 
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
-        """R1. `False` si en alguna foto no hay evidencia de un auto (RED, fraude): se corta la cascada.
+        """R1. `False` si en alguna foto no hay evidencia de un vehículo (RED, fraude): se corta la cascada.
 
-        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente) y,
-        en DETAIL, también cuenta una caja de daño con confianza suficiente. Solo hay NO_VEHICLE si todos los
-        modelos consultados respondieron y ninguno encontró nada; si no se pudo decidir, no se penaliza.
+        La regla es la misma para todas las fotos (GENERAL, PLATE, DETAIL y CONTEXT): tiene que haber un
+        vehículo, que es una caja `car` del detector o una instancia del segmentador (det ∨ seg). Ni la
+        patente ni la rueda ni una caja de daño cuentan como presencia: alcanza una patente arrancada o
+        impresa para hacer pasar cualquier imagen. DETAIL no tiene una regla propia (verificar el daño o la
+        rampa es trabajo futuro). Solo hay NO_VEHICLE si todos los modelos consultados respondieron y
+        ninguno encontró nada; si no se pudo decidir, no se penaliza.
         """
         for image in images:
             if self._has_car(run, image) is False:
@@ -352,31 +378,20 @@ class ValidateEvidence:
         return True
 
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
-        """¿Hay un auto (o una parte, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
+        """¿Hay un vehículo que ocupe al menos `presence_min_area` de la foto? Igual en todos los roles.
 
-        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, una
-        instancia de auto del segmentador o, en DETAIL, una caja de daño. `None` si no se pudo decidir (sin
-        hallazgos y algún modelo sin respuesta).
+        Cuenta una caja `car` del detector o una instancia de auto del segmentador. `None` si no se pudo
+        decidir (sin hallazgos y algún modelo sin respuesta).
         """
-        part = image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL)
-        labels = {BoxLabel.CAR} | ({BoxLabel.WHEEL, BoxLabel.PLATE} if part else set())
         minimum = self._t.presence_min_area * image.width * image.height
         mask_minimum = self._t.presence_min_area * image.model_pixels.shape[0] * image.model_pixels.shape[1]
         detections = run.detect(image)
-        for box in detections or ():
-            if box.label in labels and box.area >= minimum:
-                if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
-                    return True
-        cars = run.segment_cars(image)
+        if any(box.label == BoxLabel.CAR and box.area >= minimum for box in detections or ()):
+            return True
+        cars = run.car_instances(image)
         if any(int(car.mask.sum()) >= mask_minimum for car in cars or ()):
             return True
-        answered = detections is not None and cars is not None
-        if image.role == EvidenceRole.DETAIL:
-            damage = self._models.damage.detect(image.model_pixels)
-            if any(box.conf >= self._t.damage_presence_t for box in damage or ()):
-                return True
-            answered = answered and damage is not None
-        return False if answered else None
+        return False if detections is not None and cars is not None else None
 
     def _burst(
         self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage, codes: Codes
@@ -386,8 +401,8 @@ class ValidateEvidence:
         Solo hay BURST_MISMATCH si la re-ID confirma que es otro auto; si no se puede comparar (falta el auto
         segmentado o el embedding), no hay código.
         """
-        general_cars = run.segment_cars(general)
-        plate_cars = run.segment_cars(plate_img)
+        general_cars = run.car_instances(general)
+        plate_cars = run.car_instances(plate_img)
         if not general_cars or not plate_cars:
             return None
         emb_general = run.embed(general, 0, largest_car(general_cars))
@@ -407,14 +422,14 @@ class ValidateEvidence:
         """R2: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
 
         De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
-        segmenta ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
+        encuentra ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
         """
         if run.general_embedding is None:
             return
         for image in others:
             candidates = [
                 embedding
-                for index, car in enumerate(run.segment_cars(image) or ())
+                for index, car in enumerate(run.car_instances(image) or ())
                 if (embedding := run.embed(image, index, car)) is not None
             ]
             match = best_match(candidates, [run.general_embedding])

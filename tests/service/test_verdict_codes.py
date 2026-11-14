@@ -20,12 +20,14 @@ from tests.fakes import (
     build_scenario,
     detail_marker,
     happy_models,
+    rect,
     vec,
 )
 from vvi_ia.adapters.imaging import JpegRenderer
 from vvi_ia.domain.model import (
     FRAUD_CODES,
     AlertType,
+    CarInstance,
     EvidenceRole,
     ReasonCode,
     ValidationResult,
@@ -140,7 +142,12 @@ def _burst_not_comparable(_: Scenario, models: FakeModels) -> None:
 
 
 def _no_damage(_: Scenario, models: FakeModels) -> None:
-    models.damage.by_marker[detail_marker(0)] = []
+    marker = detail_marker(0)
+    models.cars.by_marker[marker] = [
+        CarInstance(rect(10, 90, 10, 60))
+    ]  # el auto da la presencia (la patente sola no)
+    models.embedder.by_marker_area[(marker, 80 * 50)] = vec(5)
+    models.damage.by_marker[marker] = []
 
 
 def _no_curb_model(_: Scenario, models: FakeModels) -> None:

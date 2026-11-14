@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     reid_t: float = Field(default=0.075, ge=0.0, le=1.0)
     # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
-    # el daño solo cuenta como presencia de auto en DETAIL; ver tools/eval/presence.py
+    # confianza mínima del adaptador de daño (MODEL_DAMAGE, experimental): el daño ya no cuenta como presencia
     damage_presence_t: float = Field(default=0.97, ge=0.0, le=1.0)
     # provisorio: barrido con SCRFD sobre WIDER FACE val y Open Images (tools/eval/README.md)
     face_min_conf: float = Field(default=0.25, ge=0.0, le=1.0)

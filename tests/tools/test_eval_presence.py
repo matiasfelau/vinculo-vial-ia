@@ -184,7 +184,131 @@ def test_service_rule_aplica_la_regla_de_cada_rol_con_area_y_dano() -> None:
     out = presence.service_rule(scores, damage_t=0.97)
 
     assert (out["general"]["fotos"], out["general"]["rechazadas"]) == (3, 2)
-    assert out["plate"]["rechazadas"] == 1
-    assert out["detail"]["rechazadas"] == 1  # el daño de 0,90 no llega a 0,97
+    assert out["plate"]["rechazadas"] == 2  # la rueda ya no cuenta como presencia
+    assert out["detail"]["rechazadas"] == 2  # la rueda y el daño de 0,90, que no llega a 0,97
+    assert presence.service_rule(scores, damage_t=0.97, wheel=True)["plate"]["rechazadas"] == 1
+    plate_only = {
+        "general": [{"plate": [[0.9, 0.3]]}],
+        "plate": [{"plate": [[0.9, 0.3]]}],
+        "detail": [{"plate": [[0.9, 0.3]]}],
+    }
+    now = presence.service_rule(plate_only, damage_t=1.0)
+    before = presence.service_rule(plate_only, damage_t=1.0, detail_plate=True)
+    assert (now["general"]["rechazadas"], now["plate"]["rechazadas"], now["detail"]["rechazadas"]) == (
+        1,
+        0,
+        1,
+    )
+    assert before["detail"]["rechazadas"] == 0  # antes una patente sola alcanzaba en DETAIL
     assert out["detail"]["negativas_que_pasan"] == 1  # el daño sin auto pasa en DETAIL
     assert out["general"]["negativas_que_pasan"] == 0 and out["general"]["cota_95_negativas"] == 1.0
+
+
+def test_service_rules_sin_segmentador_quita_solo_esa_senal() -> None:
+    with_seg = presence.service_rules()
+    without = presence.service_rules(segmenter=False)
+
+    assert all("seg" in rule for rule in with_seg.values())
+    assert all("seg" not in rule for rule in without.values())
+    assert without["general"] == ("car",) and without["detail"] == ("car",)  # la patente no cuenta en DETAIL
+    assert without["plate"] == ("car", "plate")
+    anterior = presence.service_rules(segmenter=False, wheel=True, detail_plate=True)  # la regla anterior
+    assert anterior["detail"] == ("car", "wheel", "plate")
+
+
+def test_service_rule_sin_segmentador_rechaza_lo_que_solo_el_segmentador_veia() -> None:
+    seg_only = {"seg": [[0.9, 0.30]]}
+    car = {"car": [[0.9, 0.30]]}
+    scores = {"general": [seg_only, car], "plate": [seg_only], "detail": [seg_only], "negativas": [seg_only]}
+
+    with_seg = presence.service_rule(scores, damage_t=0.97)
+    without = presence.service_rule(scores, damage_t=0.97, segmenter=False)
+
+    assert with_seg["general"]["rechazadas"] == 0 and without["general"]["rechazadas"] == 1
+    assert without["plate"]["rechazadas"] == 1 and without["detail"]["rechazadas"] == 1
+    assert with_seg["general"]["negativas_que_pasan"] == 1  # el segmentador deja pasar una negativa
+    assert without["general"]["negativas_que_pasan"] == 0
+
+
+def test_service_rule_sin_dano_no_recupera_detalles_por_dano() -> None:
+    damage = {"damage": [[0.99, 0.01]]}
+    scores = {"general": [], "plate": [], "detail": [damage], "negativas": [damage]}
+
+    with_damage = presence.service_rule(scores, damage_t=0.97)
+    without = presence.service_rule(scores, damage_t=0.97, damage=False)
+
+    assert with_damage["detail"]["rechazadas"] == 0 and with_damage["detail"]["negativas_que_pasan"] == 1
+    assert without["detail"]["rechazadas"] == 1 and without["detail"]["negativas_que_pasan"] == 0
+
+
+def test_service_rule_reporta_las_negativas_nuevas_por_separado() -> None:
+    car = {"car": [[0.9, 0.30]]}
+    scores = {
+        "general": [car],
+        "plate": [car],
+        "detail": [car],
+        "negativas": [{}, {}],
+        "negativas_nuevas": [{}, {}, {}, car],
+    }
+
+    out = presence.service_rule(scores, damage_t=0.97)
+
+    assert out["general"]["negativas"] == 2 and out["general"]["negativas_que_pasan"] == 0
+    assert out["general"]["cota_95_negativas"] == 1.0  # 3/2 se acota a 1
+    fresh = out["general"]["negativas_nuevas"]
+    assert fresh["fotos"] == 4 and fresh["que_pasan"] == 1 and fresh["cota_95"] > 0.25
+
+
+def test_service_comparison_trae_las_tres_configuraciones() -> None:
+    out = presence.service_comparison({"general": [], "plate": [], "detail": [], "negativas": []}, 0.97)
+
+    assert set(out) == {"con_segmentador", "sin_segmentador", "sin_segmentador_ni_dano"}
+
+
+def test_upper_bound_cero_fallas_es_3_sobre_n_y_con_fallas_es_clopper_pearson() -> None:
+    assert presence.upper_bound(0, 1200) == pytest.approx(0.0025)
+    assert presence.upper_bound(0, 0) is None
+    assert presence.upper_bound(3, 3) == 1.0
+    assert presence.upper_bound(1, 100) == pytest.approx(0.0466, abs=5e-4)
+
+
+def test_measure_junta_las_senales_y_reduce_la_foto_como_el_servicio() -> None:
+    from types import SimpleNamespace
+
+    from vvi_ia.domain.model import Box, BoxLabel, CarInstance
+
+    seen: list[tuple[int, int]] = []
+
+    def detect(img: np.ndarray) -> list[Box]:  # type: ignore[type-arg]
+        seen.append(img.shape[:2])
+        return [Box(0, 0, 50, 50, 0.9, BoxLabel.CAR), Box(0, 0, 5, 5, 0.8, BoxLabel.WHEEL)]
+
+    mask = np.zeros((100, 200), bool)
+    mask[:50, :100] = True
+    models = SimpleNamespace(
+        vehicle=SimpleNamespace(detect=detect),
+        cars=SimpleNamespace(cars=lambda img: [CarInstance(mask, 0.7)]),
+        damage=SimpleNamespace(detect=lambda img: []),
+    )
+
+    out = presence.measure(models, None, np.zeros((100, 200, 3), np.uint8), max_side=0)
+
+    assert out["car"] == [[0.9, pytest.approx(2500 / 20000)]] and out["seg"] == [[0.7, 0.25]]
+    assert out["wheel"] == [[0.8, pytest.approx(25 / 20000)]] and out["plate"] == [] and out["damage"] == []
+    presence.measure(models, None, np.zeros((400, 800, 3), np.uint8), max_side=200)
+    assert seen[-1] == (100, 200)
+
+
+@pytest.mark.parametrize("missing", ["vehicle", "cars", "damage"])
+def test_measure_no_deja_pasar_un_modelo_que_no_responde(missing: str) -> None:
+    from types import SimpleNamespace
+
+    models = SimpleNamespace(
+        vehicle=SimpleNamespace(detect=lambda img: []),
+        cars=SimpleNamespace(cars=lambda img: []),
+        damage=SimpleNamespace(detect=lambda img: []),
+    )
+    getattr(models, missing).__dict__[next(iter(getattr(models, missing).__dict__))] = lambda img: None
+
+    with pytest.raises(presence.MissingSignalError):
+        presence.measure(models, None, np.zeros((10, 10, 3), np.uint8))

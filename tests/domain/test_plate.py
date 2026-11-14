@@ -68,3 +68,27 @@ def test_confianza_en_el_umbral_se_acepta() -> None:
 @pytest.mark.parametrize("ocr", [None, "", "  --  "])
 def test_ocr_vacio_es_ilegible(ocr: str | None) -> None:
     assert plate_check("AB123CD", ocr, 0.99, MIN_CONF) == PlateCheck.UNREADABLE
+
+
+@pytest.mark.parametrize(
+    ("reported", "ocr"),
+    [
+        ("ABC123", "A8C123"),  # formato anterior: 8 donde va una B
+        ("ABC123", "ABCI23"),  # I donde va un 1
+        ("ABC123", "ABC1Z3"),  # Z donde va un 2
+        ("ABC125", "ABC12S"),  # S donde va un 5
+        ("ABC126", "ABC12G"),  # G donde va un 6
+        ("ABC120", "ABC12O"),  # O donde va un 0
+        ("AB125CD", "AB12SCD"),  # Mercosur: S donde va un 5
+        ("AB126CD", "AB12GCD"),  # Mercosur: G donde va un 6
+        ("AG125CD", "A6125CD"),  # Mercosur: 6 donde va una G
+        ("S5C123", "5SC123"),  # el mismo par intercambiado, cada uno según su posición
+    ],
+)
+def test_la_normalizacion_por_posicion_vale_para_los_dos_formatos(reported: str, ocr: str) -> None:
+    assert plate_check(reported, ocr, 0.9, MIN_CONF) == PlateCheck.MATCH
+
+
+def test_la_normalizacion_necesita_el_mismo_largo() -> None:
+    """Con un carácter de menos no hay posiciones que comparar: la confusión cuenta como otra diferencia."""
+    assert plate_check("AB012CD", "ABO1CD", 0.9, MIN_CONF) == PlateCheck.MISMATCH

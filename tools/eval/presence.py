@@ -30,6 +30,7 @@ from numpy.typing import NDArray
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.domain.model import BoxLabel, Pixels
+from vvi_ia.service.validate_evidence import reduce_for_models
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ANNOTATIONS = "_annotations.coco.json"
@@ -44,14 +45,16 @@ RULES: Mapping[str, tuple[str, ...]] = {
 }
 DEFAULT_THRESHOLDS = {"car": 0.40, "wheel": 0.40, "plate": 0.40, "seg": 0.50, "damage": 0.70}
 AREA_SWEEP = (0.0, 0.005, 0.01, 0.02, 0.05, 0.10)  # fracción mínima de la foto que ocupa la señal
+MEASURE_ATTEMPTS = 3  # veces que se reintenta una foto si un modelo no responde
 SETS = ("general", "plate", "detail", "negativas")
-# La regla R1 del servicio, por rol (`_has_car`): GENERAL y CONTEXT piden un auto (detector o
-# segmentador); PLATE y DETAIL aceptan también una rueda o una patente; DETAIL suma una caja de daño con
-# `DAMAGE_PRESENCE_T` (sin área mínima). El área mínima es `PRESENCE_MIN_AREA`.
+# La regla R1 del servicio, por rol (`_has_car`): GENERAL, CONTEXT y DETAIL piden un auto (detector o
+# segmentador); solo PLATE acepta también una patente. La rueda salió de la regla y la patente salió de
+# GENERAL y DETAIL (una patente sola no valida una foto: alcanza una arrancada o impresa). DETAIL suma una
+# caja de daño con `DAMAGE_PRESENCE_T` (sin área mínima). El área mínima es `PRESENCE_MIN_AREA`.
 SERVICE_RULE: Mapping[str, tuple[str, ...]] = {
     "general": ("car", "seg"),
-    "plate": ("car", "wheel", "plate", "seg"),
-    "detail": ("car", "wheel", "plate", "seg"),
+    "plate": ("car", "plate", "seg"),
+    "detail": ("car", "seg"),
 }
 SERVICE_MIN_AREA = 0.05
 OPEN_IMAGES = "openimages-detector"
@@ -119,34 +122,99 @@ def calibrate_damage_presence(
     }
 
 
+def upper_bound(failures: int, trials: int, confidence: float = 0.95) -> float | None:
+    """Cota superior de la tasa de fallas: 3/N con 0 fallas (regla del 3); con más, Clopper-Pearson exacta."""
+    if trials <= 0:
+        return None
+    if failures == 0:
+        return round(min(1.0, 3 / trials), 4)
+    if failures >= trials:
+        return 1.0
+    alpha = 1.0 - confidence
+    low, high = failures / trials, 1.0
+    for _ in range(60):  # bisección: la p más alta cuya cola binomial P(X <= fallas) todavía es >= alpha
+        mid = (low + high) / 2
+        tail = sum(math.comb(trials, i) * mid**i * (1 - mid) ** (trials - i) for i in range(failures + 1))
+        low, high = (mid, high) if tail >= alpha else (low, mid)
+    return round((low + high) / 2, 4)
+
+
+def service_rules(
+    segmenter: bool = True, wheel: bool = False, detail_plate: bool = False
+) -> dict[str, tuple[str, ...]]:
+    """La regla `SERVICE_RULE`, con o sin la señal del segmentador.
+
+    `wheel=True` le suma la clase rueda en PLATE y DETAIL y `detail_plate=True` la patente en DETAIL: juntas
+    reconstruyen la regla anterior a las decisiones del 11/11/2026 (para comparar con las tablas viejas).
+    """
+    rules = {
+        role: tuple(name for name in signals if segmenter or name != "seg")
+        for role, signals in SERVICE_RULE.items()
+    }
+    if detail_plate:
+        rules["detail"] = ("car", "plate", *rules["detail"][1:])
+    if wheel:
+        for role in ("plate", "detail"):
+            rules[role] = ("car", "wheel", *rules[role][1:])
+    return rules
+
+
 def service_rule(
     scores: Mapping[str, Sequence[Signals]],
     damage_t: float,
     thresholds: Mapping[str, float] = DEFAULT_THRESHOLDS,
     min_area: float = SERVICE_MIN_AREA,
+    segmenter: bool = True,
+    damage: bool = True,
+    wheel: bool = False,
+    detail_plate: bool = False,
 ) -> dict[str, Any]:
-    """R1 tal como la aplica el servicio, por rol: fotos válidas rechazadas (C) y negativas que pasan (A)."""
+    """R1 tal como la aplica el servicio, por rol: fotos válidas rechazadas (C) y negativas que pasan (A).
+
+    `segmenter=False` quita la señal del segmentador, `damage=False` la caja de daño en DETAIL y
+    `wheel=True` le suma la clase rueda y `detail_plate=True` la patente en DETAIL (la regla anterior). Las
+    negativas se miden en dos tandas: las de siempre y, si las hay, las que el detector nunca vio.
+    """
+    rules = service_rules(segmenter, wheel, detail_plate)
 
     def accepts(role: str, signals: Signals) -> bool:
-        if passes(signals, SERVICE_RULE[role], thresholds, min_area):
+        if passes(signals, rules[role], thresholds, min_area):
             return True
-        return role == "detail" and any(conf >= damage_t for conf, _ in signals.get("damage", ()))
+        return damage and role == "detail" and any(conf >= damage_t for conf, _ in signals.get("damage", ()))
 
-    negatives = scores.get("negativas", ())
     out: dict[str, Any] = {}
-    for role in SERVICE_RULE:
+    for role in rules:
         rows = scores.get(role, ())
         rejected = sum(not accepts(role, signals) for signals in rows)
-        passing = sum(accepts(role, signals) for signals in negatives)
-        out[role] = {
+        entry: dict[str, Any] = {
             "fotos": len(rows),
             "rechazadas": rejected,
             "tasa_de_rechazo": round(rejected / len(rows), 4) if rows else None,
-            "negativas": len(negatives),
-            "negativas_que_pasan": passing,
-            "cota_95_negativas": bound(len(negatives)) if passing == 0 else None,
         }
+        negatives = scores.get("negativas", ())
+        passing = sum(accepts(role, signals) for signals in negatives)
+        entry["negativas"] = len(negatives)
+        entry["negativas_que_pasan"] = passing
+        entry["cota_95_negativas"] = upper_bound(passing, len(negatives))
+        fresh = scores.get("negativas_nuevas")
+        if fresh is not None:  # las que el detector nunca vio al entrenar
+            fresh_passing = sum(accepts(role, signals) for signals in fresh)
+            entry["negativas_nuevas"] = {
+                "fotos": len(fresh),
+                "que_pasan": fresh_passing,
+                "cota_95": upper_bound(fresh_passing, len(fresh)),
+            }
+        out[role] = entry
     return out
+
+
+def service_comparison(scores: Mapping[str, Sequence[Signals]], damage_t: float) -> dict[str, Any]:
+    """La regla del servicio con el segmentador (como estaba), sin él, y sin él ni el daño."""
+    return {
+        "con_segmentador": service_rule(scores, damage_t),
+        "sin_segmentador": service_rule(scores, damage_t, segmenter=False),
+        "sin_segmentador_ni_dano": service_rule(scores, damage_t, segmenter=False, damage=False),
+    }
 
 
 def verdict(table: Mapping[str, Any]) -> dict[str, Any]:
@@ -166,16 +234,39 @@ def verdict(table: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
-def measure(models: Any, decoder: CvImageDecoder, image: Pixels) -> dict[str, list[list[float]]]:
-    """Todos los hallazgos de cada señal en la foto: `[confianza, fracción de la foto que ocupa]`."""
+class MissingSignalError(RuntimeError):
+    """Un modelo no respondió (devolvió `None`) sobre una foto: la medición quedaría incompleta."""
+
+
+def measure(
+    models: Any, decoder: CvImageDecoder, image: Pixels, max_side: int = 0
+) -> dict[str, list[list[float]]]:
+    """Todos los hallazgos de cada señal en la foto: `[confianza, fracción de la foto que ocupa]`.
+
+    Con `max_side` la foto se reduce a ese lado mayor antes de los modelos, como hace el servicio
+    (`MODEL_MAX_SIDE_PX`); las fracciones de área no dependen de la escala.
+    """
+    if max_side:
+        reduced = reduce_for_models(image, max_side)
+        image = image if reduced is None else reduced
     total = float(image.shape[0] * image.shape[1])
     signals: dict[str, list[list[float]]] = {name: [] for name in SIGNALS}
-    for box in models.vehicle.detect(image) or ():
+    detections = models.vehicle.detect(image)
+    cars = models.cars.cars(image)
+    damage = models.damage.detect(image)
+    missing = [
+        name
+        for name, found in (("detector", detections), ("segmentador", cars), ("daño", damage))
+        if found is None
+    ]
+    if missing:  # un modelo que no responde no es "no encontré nada": la señal faltaría en silencio
+        raise MissingSignalError(", ".join(missing))
+    for box in detections or ():
         if box.label in (BoxLabel.CAR, BoxLabel.WHEEL, BoxLabel.PLATE):
             signals[str(box.label)].append([box.conf, box.area / total])
-    for car in models.cars.cars(image) or ():
+    for car in cars or ():
         signals["seg"].append([car.conf, float(car.mask.sum()) / total])
-    for box in models.damage.detect(image) or ():
+    for box in damage or ():
         signals["damage"].append([box.conf, box.area / total])
     return signals
 
@@ -236,6 +327,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="MODELS_DIR")
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / "models" / "manifest.json")
     parser.add_argument("--limit", type=int, help="fotos por conjunto (para probar rápido)")
+    parser.add_argument(
+        "--model-max-side",
+        type=int,
+        default=1024,
+        help="lado al que se reduce cada foto antes de los modelos (MODEL_MAX_SIDE_PX; 0 = sin reducir)",
+    )
+    parser.add_argument("--fresh-limit", type=int, help="máximo de negativas nuevas")
+    parser.add_argument(
+        "--fresh-negatives",
+        type=Path,
+        help="carpeta con fotos de Open Images sin auto que el detector nunca vio (negativas_nuevas)",
+    )
     args = parser.parse_args(argv)
     for flag, value in (
         ("--data-dir", args.data_dir),
@@ -276,30 +379,50 @@ def main(argv: list[str] | None = None) -> int:
         "detail": sorted((data / "cardd-detector" / "test").glob("*.jpg")),
         "negativas": negative_photos(data),
     }
+    if args.fresh_negatives:
+        fresh = sorted(Path(args.fresh_negatives).glob("*.jpg"))
+        sources["negativas_nuevas"] = fresh[: args.fresh_limit] if args.fresh_limit else fresh
     scores: dict[str, list[dict[str, list[list[float]]]]] = {}
+
+    def measure_item(item: Any) -> dict[str, list[list[float]]]:
+        pixels = item if isinstance(item, np.ndarray) else decoder.decode(Path(item).read_bytes())
+        return measure(models, decoder, pixels, args.model_max_side)
+
+    failures: dict[str, int] = {}
+
+    def measure_retrying(name: str, item: Any) -> dict[str, list[list[float]]] | None:
+        for _ in range(MEASURE_ATTEMPTS):
+            try:
+                return measure_item(item)
+            except MissingSignalError:
+                continue
+        failures[name] = failures.get(name, 0) + 1
+        return None
+
     for name, items in sources.items():
         items = items[: args.limit] if args.limit else items
-        scores[name] = [
-            measure(
-                models,
-                decoder,
-                item if isinstance(item, np.ndarray) else decoder.decode(Path(item).read_bytes()),
-            )
-            for item in items
-        ]
-        print(f"{name}: {len(scores[name])} fotos medidas")
+        measured = [measure_retrying(name, item) for item in items]
+        scores[name] = [m if m is not None else {signal: [] for signal in SIGNALS} for m in measured]
+        print(
+            f"{name}: {len(scores[name])} fotos medidas, {failures.get(name, 0)} con señales faltantes",
+            flush=True,
+        )
     table = rates(scores)
     rejected = [s for s in scores["detail"] if not passes(s, RULES["R2"], DEFAULT_THRESHOLDS, 0.05)]
     damage_presence = calibrate_damage_presence(scores["negativas"], rejected)
     sweep = {str(area): rates(scores, min_area=area) for area in AREA_SWEEP}
-    service = service_rule(scores, damage_presence["DAMAGE_PRESENCE_T"] or 1.0)
+    service = service_comparison(scores, damage_presence["DAMAGE_PRESENCE_T"] or 1.0)
     report = {
         "umbrales": DEFAULT_THRESHOLDS,
         "tabla": table,
         "reglas": verdict(table),
         "barrido_de_area": {area: {"tabla": rows, "reglas": verdict(rows)} for area, rows in sweep.items()},
         "presencia_por_dano": damage_presence,
-        "regla_del_servicio": {"DAMAGE_PRESENCE_T": damage_presence["DAMAGE_PRESENCE_T"], "por_rol": service},
+        "regla_del_servicio": {
+            "DAMAGE_PRESENCE_T": damage_presence["DAMAGE_PRESENCE_T"],
+            "configuraciones": service,
+        },
+        "senales_faltantes": failures,
         "senales": scores,
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
@@ -313,11 +436,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{rule}: {row}")
     print(f"Presencia por daño en DETAIL: {damage_presence}")
     print("R1 del servicio por rol (área >= 5 %, daño >= DAMAGE_PRESENCE_T en DETAIL):")
-    for role, row in service.items():
-        print(
-            f"  {role:<8} válidas rechazadas {row['rechazadas']}/{row['fotos']} · "
-            f"negativas que pasan {row['negativas_que_pasan']}/{row['negativas']}"
-        )
+    for config, roles in service.items():
+        print(f"  [{config}]")
+        for role, row in roles.items():
+            fresh = row.get("negativas_nuevas")
+            extra = (
+                f"vistas {row['negativas_que_pasan']}/{row['negativas']} (cota {row['cota_95_negativas']})"
+            )
+            if fresh:
+                extra += f" · nuevas {fresh['que_pasan']}/{fresh['fotos']} (cota {fresh['cota_95']})"
+            print(f"    {role:<8} válidas rechazadas {row['rechazadas']}/{row['fotos']} · negativas {extra}")
     print("Barrido del área mínima (fracción de la foto): negativas que pasan / válidas rechazadas")
     for area, rows in sweep.items():
         verdicts = verdict(rows)
@@ -326,6 +454,9 @@ def main(argv: list[str] | None = None) -> int:
             for rule, row in verdicts.items()
         ]
         print(f"  area >= {area}: " + " · ".join(cells))
+    if failures:
+        print(f"ATENCIÓN: fotos con señales faltantes {failures}: la medición NO es válida, repetila.")
+        return 2
     return 0
 
 
