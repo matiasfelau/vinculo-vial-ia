@@ -251,6 +251,21 @@ Solo **tres parejas se repiten** (0/6, M/W y O/Q); de ellas, la lista a priori s
 - **No recomiendo cambiar de variante con estos datos**: V0 y V1 son iguales y V2 cambia una pérdida de 1 patente correcta por 8.
   La decisión es tuya; el servicio queda como estaba (V0).
 
+**Decisión (14/11/2026): el servicio queda en V0** (`MISMATCH` solo con una lectura segura que difiere en 2 o más caracteres,
+más la normalización por posición de `plate_check`). **La lista de confusiones no aportó**: solo 3 parejas se repiten en las
+lecturas reales de PARSeq (0/6, M/W y O/Q), V1 da lo mismo que V0 y V2 cuesta 8 patentes correctas marcadas como fraude.
+
+**Por qué U2 es "1 de 133" y antes se hablaba de "0 de 137" (no es una regresión).** Son dos denominadores y dos alcances, no dos
+resultados. El dataset tiene 137 cajas; quedan 133 lecturas (se descartan 3 marcadores de posición y 1 ilegible), de las cuales
+129 son de los formatos en alcance (Mercosur y anterior) y 4 de otros formatos (motos, de dos líneas). Con `OCR_MIN_CONF` = 0,78
+y la regla V0, **ninguna de las 129 lecturas en alcance sale `MISMATCH` (0 de 129)**: es lo que dice la sección "R3 con pares
+cruzados" y lo mismo que medía `ocr.py`. La única que sale `MISMATCH` es una **patente de moto de dos líneas fuera de alcance**
+(etiqueta de 6 caracteres, PARSeq lee 3 con confianza 0,98 porque solo ve una línea), y `ocr_confusions.py` cuenta las 133
+lecturas, no solo las 129. A `OCR_MIN_CONF` = 0,60 las marcadas son 3 (las dos motos y una lectura de 6 caracteres con confianza
+0,76), que es el "3 de 133" de la tabla. Código y regla no cambiaron entre las dos mediciones. Que una patente de dos líneas
+leída a medias salga RED con confianza alta es un riesgo real del criterio actual (la moto está fuera de alcance, pero el
+servicio no la distingue al recibirla): queda como límite, sin cambios.
+
 Límites: 133 lecturas, 25 con errores y una lista aprendida de 3 parejas repetidas; el dataset de Roboflow tiene fotos
 con ángulo y desenfoque que no son las de la app; la confianza de PARSeq por carácter se calibró con este mismo dataset
 solo en el sentido de que se barrió `t_char` sobre él (optimista). No se probó una variante que combine V0 con la baja

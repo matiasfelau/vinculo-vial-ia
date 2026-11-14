@@ -22,7 +22,7 @@ from typing import Any
 
 import cv2
 import numpy as np
-from dataset import Car, azimuths, group_split
+from dataset import Car, azimuths, group_split, load_frozen, save_split
 from fetch import LIGHTING, is_complete, load_annotations
 
 from vvi_ia.adapters.imaging import CvImageDecoder
@@ -155,7 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         for name in results
         if any(f["file"] for f in results[name]["fotos"]) and (a := annotations.get(name))
     ]
-    split = group_split(cars, seed=args.seed)
+    # Los autos ya particionados no se mueven (`split.json`): solo se sortean los nuevos
+    split = group_split(cars, seed=args.seed, frozen=load_frozen(root))
+    save_split(root, {**load_frozen(root), **split})
     out: list[dict[str, Any]] = []
     for car in cars:
         frames = results[car.name]["fotos"]

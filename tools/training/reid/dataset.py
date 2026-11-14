@@ -8,16 +8,18 @@ Todo es puro (sin red ni modelos), para poder probarlo con datos sintéticos.
   azimut de la cámara alrededor de ese punto. Dos vistas del mismo auto se separan por la diferencia de azimut
   (no hace falta saber hacia dónde "mira" el auto).
 - **Partición**: agrupada por auto (ningún auto en dos particiones), estratificada por luz, tipo y color, con
-  semilla.
+  semilla. Una vez usada se congela en `split.json`: sumar autos después no mueve a los que ya estaban.
 - **Pares**: mismo auto con una separación angular mínima; autos distintos, todos y "difíciles" (misma marca y
   color).
 """
 
+import json
 import math
 import random
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
@@ -112,15 +114,23 @@ def stratum(car: Car) -> tuple[str, str, str]:
 
 
 def group_split(
-    cars: Sequence[Car], fractions: Sequence[float] = DEFAULT_FRACTIONS, seed: int = 0
+    cars: Sequence[Car],
+    fractions: Sequence[float] = DEFAULT_FRACTIONS,
+    seed: int = 0,
+    frozen: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     """`auto → partición`, con cada auto en una sola, estratificado por (luz, tipo, color) y con semilla fija.
 
     Dentro de cada estrato los autos se sortean y se reparten según `fractions`; los estratos chicos
     (pocos autos) se completan en orden `train`, `val`, `test` para que cada partición los vea.
+
+    `frozen` es la partición ya usada (`auto → partición`): esos autos no se mueven nunca. Los autos nuevos
+    se reparten de modo que cada estrato quede lo más cerca posible de las fracciones pedidas, contando los
+    que ya estaban. Sin `frozen`, el resultado es el de siempre.
     """
     if len(fractions) != len(SPLITS) or abs(sum(fractions) - 1.0) > 1e-9:
         raise ValueError("las fracciones tienen que ser tres y sumar 1")
+    fixed = {name: part for name, part in (frozen or {}).items() if part in SPLITS}
     strata: dict[tuple[str, str, str], list[str]] = defaultdict(list)
     for car in sorted(cars, key=lambda c: c.name):
         strata[stratum(car)].append(car.name)
@@ -129,18 +139,40 @@ def group_split(
         names = strata[key]
         # Un sorteo por estrato (semilla + estrato): sumar autos de otro estrato no mueve a los demás
         rng = random.Random(f"{seed}|{'|'.join(key)}")  # noqa: S311 - partición de datos, no criptografía
-        rng.shuffle(names)
+        fresh = [name for name in names if name not in fixed]
+        rng.shuffle(fresh)
         n = len(names)
         n_test = round(n * fractions[2])
         n_val = round(n * fractions[1])
         if n >= len(SPLITS):  # cada partición ve al menos un auto del estrato
             n_test, n_val = max(1, n_test), max(1, n_val)
-        n_train = n - n_val - n_test
-        for index, name in enumerate(names):
-            assignment[name] = (
-                SPLITS[0] if index < n_train else SPLITS[1] if index < n_train + n_val else SPLITS[2]
-            )
+        target = {SPLITS[0]: n - n_val - n_test, SPLITS[1]: n_val, SPLITS[2]: n_test}
+        for name in names:
+            if name in fixed:
+                assignment[name] = fixed[name]
+                target[fixed[name]] -= 1
+        # Lo que falta para llegar al objetivo, en el orden train, val, test (como el sorteo sin congelar)
+        slots = [part for part in SPLITS for _ in range(max(0, target[part]))]
+        for index, name in enumerate(fresh):
+            assignment[name] = slots[index] if index < len(slots) else SPLITS[0]
     return assignment
+
+
+def load_frozen(root: Path) -> dict[str, str]:
+    """La partición ya usada: `split.json`, o la de `crops.json` si todavía no se congeló."""
+    split = root / "split.json"
+    if split.is_file():
+        data: dict[str, str] = json.loads(split.read_text(encoding="utf-8"))
+        return data
+    crops = root / "crops.json"
+    if crops.is_file():
+        return {item["auto"]: item["particion"] for item in json.loads(crops.read_text(encoding="utf-8"))}
+    return {}
+
+
+def save_split(root: Path, assignment: Mapping[str, str]) -> None:
+    """Guarda la partición (`split.json`): de acá en adelante, esos autos no cambian de partición."""
+    (root / "split.json").write_text(json.dumps(dict(sorted(assignment.items()))), encoding="utf-8")
 
 
 def same_car_pairs(

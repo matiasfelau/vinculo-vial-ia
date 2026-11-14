@@ -1,19 +1,20 @@
 """Baja de 3DRealCar solo las fotos RGB que hacen falta (sin depth, mallas ni mapas del escáner).
 
 3DRealCar (Du et al., ICCV 2025; Apache-2.0) se distribuye en zips de 55-110 GB con todo el escaneo 3D. Acá
-solo
-se necesita un puñado de fotos por auto, así que el script lee el índice de cada zip por HTTP (Google Drive
-acepta
-pedidos por rango) y baja únicamente `frame_N.jpg` y `frame_N.json` (la pose de la cámara) de las vistas
-elegidas.
-Nada se guarda dentro del repositorio.
+solo se necesita un puñado de fotos por auto: el script lee el índice de cada zip con pedidos por rango y baja
+únicamente `frame_N.jpg` y `frame_N.json` (la pose de la cámara) de las vistas elegidas. Nada se guarda dentro
+del repositorio. Los zips salen del folder público (`--source public`, sujeto a la cuota de Google) o de una
+carpeta de Drive propia con copias (`--source drive`, ver `drive.py`).
 
     annotations  baja `annotation2000.xlsx` (marca, modelo, luz, tipo y color de cada auto) y lo pasa a
-    `annotations.json`
-    index   lee el índice de los 11 zips y arma `index.json` (auto → zip, fotos y posiciones dentro del zip)
-    select  elige los autos (todos los oscuros y reflectivos, y una muestra de los estándar) y `K` fotos de
-    cada uno
-    pull    baja esas fotos a `raw/<auto>/frame_N.jpg|json`
+                 `annotations.json`
+    index        lee el índice de los zips y arma `index.json` (auto → zip, fotos y posiciones en el zip)
+    select       elige los autos (todos los oscuros y reflectivos, y una muestra de los estándar) y `K` fotos
+                 de cada uno; no cambia las vistas de los autos ya elegidos
+    drive-check  lista la carpeta de Drive y lee unos bytes de cada zip (valida el acceso con casi 0 tráfico)
+    verify       compara cada zip de la fuente con `index.json` (cantidad de autos y posición de las vistas)
+    pull         baja esas fotos a `raw/<auto>/frame_N.jpg|json`, con CRC y conteo verificados
+    status       autos completos por zip y por luz (qué copia ya se puede borrar)
 
 Uso: ver `tools/training/reid/README.md`.
 """
@@ -26,16 +27,27 @@ import re
 import shutil
 import struct
 import sys
+import threading
 import time
 import zipfile
 import zlib
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 from urllib.request import Request, urlopen
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+from drive import (
+    FOLDER_ENV,
+    KEY_ENV,
+    REPO_ROOT,
+    DriveSource,
+    FetchError,
+    QuotaExceeded,
+    Reader,
+    ServiceAccountTokens,
+)
+
 DRIVE_URL = "https://drive.usercontent.google.com/download?id={id}&export=download&confirm=t"
 # Los zips de autos del folder público de 3DRealCar (id de Google Drive). Los HQ y el de segmentación quedan
 # afuera.
@@ -66,10 +78,6 @@ ANNOTATIONS_ID = "1L5b3QK4MDjNGp_LdCefjC8h1xz4n1EnI"  # annotation2000.xlsx (888
 HEADER = {"B": "数据文件夹名称", "C": "品牌", "D": "车型", "E": "光泽", "F": "车辆类型", "G": "颜色"}
 
 
-class FetchError(RuntimeError):
-    """No se pudo leer algo del zip remoto."""
-
-
 def http_range(url: str, start: int, end: int) -> bytes:
     """Los bytes `[start, end]` (inclusive) de `url`, con reintentos."""
     last: Exception | None = None
@@ -93,11 +101,11 @@ def total_size(url: str) -> int:
 
 
 class RangeFile:
-    """Archivo de solo lectura sobre HTTP con pedidos por rango (alcanza para que `zipfile` lea el índice)."""
+    """Archivo de solo lectura sobre pedidos por rango (alcanza para que `zipfile` lea el índice)."""
 
-    def __init__(self, url: str) -> None:
-        self.url = url
-        self.size = total_size(url)
+    def __init__(self, read: Reader, size: int) -> None:
+        self._read = read
+        self.size = size
         self.pos = 0
 
     def seekable(self) -> bool:
@@ -116,20 +124,59 @@ class RangeFile:
             count = self.size - self.pos
         if count <= 0:
             return b""
-        data = http_range(self.url, self.pos, self.pos + count - 1)
+        data = self._read(self.pos, self.pos + count - 1)
         self.pos += len(data)
         return data
 
 
-def read_entry(url: str, offset: int, compress_size: int, compress_type: int, crc: int, name: str) -> bytes:
+class ZipSource(Protocol):
+    """De dónde salen los zips: el folder público o una carpeta de Drive propia."""
+
+    bytes_read: int
+
+    def labels(self) -> list[str]: ...
+
+    def size(self, label: str) -> int: ...
+
+    def reader(self, label: str) -> Reader: ...
+
+
+class PublicSource:
+    """Los zips del folder público de 3DRealCar (`ZIPS`), sujetos a la cuota de descarga de Google."""
+
+    def __init__(self) -> None:
+        self.bytes_read = 0
+        self._lock = threading.Lock()
+
+    def labels(self) -> list[str]:
+        return list(ZIPS)
+
+    def size(self, label: str) -> int:
+        return total_size(DRIVE_URL.format(id=ZIPS[label]))
+
+    def reader(self, label: str) -> Reader:
+        url = DRIVE_URL.format(id=ZIPS[label])
+
+        def read(start: int, end: int) -> bytes:
+            data = http_range(url, start, end)
+            with self._lock:
+                self.bytes_read += len(data)
+            return data
+
+        return read
+
+
+def read_entry(
+    read: Reader, offset: int, compress_size: int, compress_type: int, crc: int, name: str
+) -> bytes:
     """Contenido de una entrada del zip con un solo pedido: encabezado local y datos juntos."""
-    block = http_range(url, offset, offset + LOCAL_HEADER.size + len(name) + HEADER_SLACK + compress_size)
+    block = read(offset, offset + LOCAL_HEADER.size + len(name) + HEADER_SLACK + compress_size)
     signature, *_, name_len, extra_len = LOCAL_HEADER.unpack_from(block)
     if signature != LOCAL_SIGNATURE:
         raise FetchError(f"encabezado local inválido en {name}")
     start = LOCAL_HEADER.size + name_len + extra_len
     if start + compress_size > len(block):
-        block = http_range(url, offset, offset + start + compress_size)
+        block = read(offset, offset + start + compress_size)
     raw = block[start : start + compress_size]
     if compress_type == zipfile.ZIP_DEFLATED:
         raw = zlib.decompress(raw, -zlib.MAX_WBITS)
@@ -140,10 +187,9 @@ def read_entry(url: str, offset: int, compress_size: int, compress_type: int, cr
     return raw
 
 
-def index_zip(zip_name: str, file_id: str) -> dict[str, Any]:
+def index_zip(label: str, source: ZipSource) -> dict[str, Any]:
     """`auto → {zip, fotos: {n: {jpg: entrada, json: entrada}}}` de un zip, leyendo solo su índice."""
-    url = DRIVE_URL.format(id=file_id)
-    archive = zipfile.ZipFile(RangeFile(url))  # type: ignore[arg-type]
+    archive = zipfile.ZipFile(RangeFile(source.reader(label), source.size(label)))  # type: ignore[arg-type]
     cars: dict[str, dict[str, Any]] = {}
     for info in archive.infolist():
         parts = info.filename.split("/", 1)
@@ -153,7 +199,7 @@ def index_zip(zip_name: str, file_id: str) -> dict[str, Any]:
         if not match or not CAR_NAME.match(match["car"]):
             continue
         entry = [info.header_offset, info.compress_size, info.compress_type, info.CRC, info.filename]
-        car = cars.setdefault(match["car"], {"zip": zip_name, "id": file_id, "fotos": {}})
+        car = cars.setdefault(match["car"], {"zip": label, "id": ZIPS.get(label, ""), "fotos": {}})
         car["fotos"].setdefault(int(match["n"]), {})[match["ext"]] = entry
     for car in cars.values():  # solo las vistas que tienen foto (hay muchos más json que jpg)
         car["fotos"] = {n: e for n, e in car["fotos"].items() if "jpg" in e and "json" in e}
@@ -244,11 +290,23 @@ def command_annotations(args: argparse.Namespace) -> int:
     return 0
 
 
+def make_source(args: argparse.Namespace) -> ZipSource:
+    """La fuente de los zips: el folder público o la carpeta de Drive propia (credenciales por entorno)."""
+    if args.source == "public":
+        return PublicSource()
+    folder = args.drive_folder or os.environ.get(FOLDER_ENV)
+    key = os.environ.get(KEY_ENV)
+    if not folder or not key:
+        raise FetchError(f"con --source drive indicá --drive-folder (o {FOLDER_ENV}) y definí {KEY_ENV}")
+    return DriveSource(folder, ServiceAccountTokens(Path(key)))
+
+
 def command_index(args: argparse.Namespace) -> int:
+    source = make_source(args)
     index: dict[str, Any] = {}
-    for zip_name, file_id in ZIPS.items():
-        cars = index_zip(zip_name, file_id)
-        print(f"{zip_name}: {len(cars)} autos, {sum(len(c['fotos']) for c in cars.values())} fotos")
+    for label in source.labels():
+        cars = index_zip(label, source)
+        print(f"{label}: {len(cars)} autos, {sum(len(c['fotos']) for c in cars.values())} fotos")
         index.update(cars)
     Path(args.root).mkdir(parents=True, exist_ok=True)
     (Path(args.root) / "index.json").write_text(json.dumps(index), encoding="utf-8")
@@ -271,7 +329,23 @@ def command_select(args: argparse.Namespace) -> int:
         }
         for car in cars
     }
-    (root / "selection.json").write_text(json.dumps(selection), encoding="utf-8")
+    target = root / "selection.json"
+    if target.is_file():  # sumar autos no puede cambiar las vistas (ni sacar autos) de los ya elegidos
+        previous = json.loads(target.read_text(encoding="utf-8"))
+        changed = [
+            car
+            for car, meta in previous.items()
+            if car in selection and selection[car]["fotos"] != meta["fotos"]
+        ]
+        if changed:
+            print(
+                f"{len(changed)} autos cambiarían de vistas (¿otro --frames?); no se escribió nada.",
+                file=sys.stderr,
+            )
+            return 1
+        for car, meta in previous.items():
+            selection.setdefault(car, meta)
+    target.write_text(json.dumps(selection), encoding="utf-8")
     print(f"{len(selection)} autos de {len(available)} con anotación y fotos; {args.frames} vistas cada uno")
     return 0
 
@@ -290,11 +364,10 @@ def is_complete(path: Path) -> bool:
     return True
 
 
-def pull_frame(root: Path, car: str, number: int, entries: Mapping[str, Sequence[Any]], file_id: str) -> int:
+def pull_frame(root: Path, car: str, number: int, entries: Mapping[str, Sequence[Any]], read: Reader) -> int:
     """Baja la pose y la foto de una vista (las que ya están enteras se saltean); devuelve cuántas bajó."""
     folder = root / "raw" / car
     folder.mkdir(parents=True, exist_ok=True)
-    url = DRIVE_URL.format(id=file_id)
     done = 0
     for ext in ("json", "jpg"):
         target = folder / f"frame_{number:05d}.{ext}"
@@ -302,41 +375,177 @@ def pull_frame(root: Path, car: str, number: int, entries: Mapping[str, Sequence
             continue
         offset, size, kind, crc, name = entries[ext]
         partial = target.with_suffix(target.suffix + ".part")
-        partial.write_bytes(read_entry(url, offset, size, kind, crc, name))
+        partial.write_bytes(read_entry(read, offset, size, kind, crc, name))
         partial.replace(target)  # nunca queda un archivo a medias con el nombre final
         done += 1
     return done
 
 
-def command_pull(args: argparse.Namespace) -> int:
-    root = Path(args.root)
+def car_complete(root: Path, car: str, frames: Sequence[int]) -> bool:
+    return all(
+        is_complete(root / "raw" / car / f"frame_{number:05d}.{ext}")
+        for number in frames
+        for ext in ("jpg", "json")
+    )
+
+
+def check_zip(
+    label: str, source: ZipSource, index: Mapping[str, Any], selection: Mapping[str, Any]
+) -> list[str]:
+    """Qué no coincide entre el zip de la fuente y `index.json` (vacío si está bien).
+
+    Un zip cortado no abre (su directorio central está al final). Después se compara la cantidad de autos, la
+    cantidad de vistas de cada uno y la posición y el CRC de las vistas elegidas.
+    """
+    try:
+        cars = index_zip(label, source)
+    except QuotaExceeded:
+        raise  # no es una copia dañada: es la cuota de Google, y lo maneja quien llama
+    except (zipfile.BadZipFile, FetchError, OSError, ValueError, KeyError) as exc:
+        return [f"no se puede abrir {label}.zip ({type(exc).__name__}): ¿terminó de copiarse?"]
+    expected = {car: meta for car, meta in index.items() if meta["zip"] == label}
+    problems: list[str] = []
+    if len(cars) != len(expected):
+        problems.append(f"{len(cars)} autos en la copia y {len(expected)} en el índice")
+    problems += [f"falta el auto {car}" for car in sorted(set(expected) - set(cars))]
+    problems += [f"sobra el auto {car}" for car in sorted(set(cars) - set(expected))]
+    for car, meta in expected.items():
+        mine = cars.get(car)
+        if mine is None:
+            continue
+        if len(mine["fotos"]) != len(meta["fotos"]):
+            problems.append(
+                f"{car}: {len(mine['fotos'])} vistas en la copia y {len(meta['fotos'])} en el índice"
+            )
+        for number in selection.get(car, {}).get("fotos", []):
+            if mine["fotos"].get(number) != meta["fotos"].get(str(number)):
+                problems.append(f"{car}: la vista {number} no coincide con el índice")
+    return problems
+
+
+def report_problems(label: str, problems: Sequence[str]) -> None:
+    print(f"{label}.zip: la copia no coincide con el índice ({len(problems)} problemas)", file=sys.stderr)
+    for problem in problems[:20]:
+        print(f"  {problem}", file=sys.stderr)
+
+
+def load_state(root: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     index = json.loads((root / "index.json").read_text(encoding="utf-8"))
     selection = json.loads((root / "selection.json").read_text(encoding="utf-8"))
-    jobs = [
-        (car, number, index[car]["fotos"][str(number)], meta["id"])
-        for car, meta in selection.items()
-        for number in meta["fotos"]
-    ]
-    if args.reverse:  # para sumar un segundo proceso que arranque por el final
-        jobs.reverse()
+    return index, selection
+
+
+def command_drive_check(args: argparse.Namespace) -> int:
+    """Valida el acceso: lista la carpeta y lee los últimos bytes de cada zip (donde está su índice)."""
+    source = make_source(args)
+    if not isinstance(source, DriveSource):
+        print("drive-check es solo para --source drive", file=sys.stderr)
+        return 1
+    zips = source.zips()
+    for label in source.labels():
+        found = zips[label]
+        tail = source.reader(label)(max(0, found.size - 1024), found.size - 1)
+        state = "ok" if b"PK\x05\x06" in tail else "SIN FIN DE ZIP"
+        print(f"{label:>10}  {found.size / 1e9:7.2f} GB  md5 {found.md5 or '-'}  {state}")
+    missing = [label for label in ZIPS if label not in zips]
+    print(
+        f"{len(zips)} de {len(ZIPS)} zips en la carpeta"
+        + (f"; faltan: {', '.join(missing)}" if missing else "")
+    )
+    print(f"{source.bytes_read / 1e6:.2f} MB leídos en {source.requests} pedidos")
+    return 0
+
+
+def command_verify(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    source = make_source(args)
+    index, selection = load_state(root)
+    bad = 0
+    for label in args.only or source.labels():
+        problems = check_zip(label, source, index, selection)
+        if problems:
+            report_problems(label, problems)
+            bad += 1
+        else:
+            cars = sum(meta["zip"] == label for meta in index.values())
+            print(f"{label}.zip: {cars} autos y las vistas elegidas coinciden con el índice")
+    print(f"{source.bytes_read / 1e9:.3f} GB leídos")
+    return 1 if bad else 0
+
+
+def command_pull(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    source = make_source(args)
+    index, selection = load_state(root)
+    available = source.labels()
+    unknown = [label for label in args.only or [] if label not in available]
+    if unknown:
+        print(f"No están en la fuente: {', '.join(unknown)}", file=sys.stderr)
+        return 1
     failed = 0
-    with ThreadPoolExecutor(max_workers=args.threads) as pool:
-        futures = [pool.submit(pull_frame, root, *job) for job in jobs]
-        for count, future in enumerate(futures, 1):
-            try:
-                future.result()
-            except FetchError as exc:
-                failed += 1
-                print(f"  {exc}", file=sys.stderr)
-            if count % 500 == 0:
-                print(f"{count}/{len(jobs)} vistas")
-    print(f"Listo: {len(jobs) - failed} vistas bajadas, {failed} con error")
+    for label in args.only or available:
+        before = source.bytes_read
+        problems = check_zip(label, source, index, selection)
+        if problems:
+            report_problems(label, problems)
+            failed += 1
+            continue
+        read = source.reader(label)
+        cars = [car for car, meta in selection.items() if meta["zip"] == label]
+        jobs = [
+            (car, number, index[car]["fotos"][str(number)])
+            for car in cars
+            for number in selection[car]["fotos"]
+        ]
+        if args.reverse:  # para sumar un segundo proceso que arranque por el final
+            jobs.reverse()
+        with ThreadPoolExecutor(max_workers=args.threads) as pool:
+            futures = [pool.submit(pull_frame, root, *job, read) for job in jobs]
+            for count, future in enumerate(futures, 1):
+                try:
+                    future.result()
+                except QuotaExceeded as exc:
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    print(f"{exc}. Lo ya bajado se conserva: se retoma después.", file=sys.stderr)
+                    return 3
+                except FetchError as exc:
+                    print(f"  {exc}", file=sys.stderr)
+                if count % 500 == 0:
+                    print(f"{label}: {count}/{len(jobs)} vistas")
+        done = sum(car_complete(root, car, selection[car]["fotos"]) for car in cars)
+        gigabytes = (source.bytes_read - before) / 1e9
+        print(f"{label}.zip: {done}/{len(cars)} autos completos; {gigabytes:.2f} GB leídos")
+        if done == len(cars):
+            print(f"  {label}.zip terminado y verificado: ya podés borrar su copia de Drive")
+        else:
+            failed += 1
     return 1 if failed else 0
+
+
+def command_status(args: argparse.Namespace) -> int:
+    root = Path(args.root)
+    _, selection = load_state(root)
+    annotations = load_annotations(root / "annotations.json")
+    per_zip: dict[str, list[int]] = {}
+    per_light: dict[str, list[int]] = {light: [0, 0] for light in LIGHTING}
+    for car, meta in selection.items():
+        done = car_complete(root, car, meta["fotos"])
+        for counts in (per_zip.setdefault(meta["zip"], [0, 0]), per_light[annotations[car]["luz"]]):
+            counts[0] += done
+            counts[1] += 1
+    for label in sorted(per_zip, key=lambda name: int(name.split("-")[0])):
+        done, total = per_zip[label]
+        print(f"{label:>10}  {done:>4}/{total:<4} autos completos" + ("  <- listo" if done == total else ""))
+    for light, (done, total) in per_light.items():
+        print(f"{light:>10}  {done:>4}/{total:<4} autos completos")
+    return 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("annotations", "index", "select", "pull"))
+    parser.add_argument(
+        "command", choices=("annotations", "index", "select", "drive-check", "verify", "pull", "status")
+    )
     parser.add_argument("--root", type=Path, default=os.environ.get("REID_DATA_DIR"), help="REID_DATA_DIR")
     parser.add_argument("--frames", type=int, default=12, help="vistas por auto")
     parser.add_argument(
@@ -345,6 +554,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--threads", type=int, default=8)
     parser.add_argument("--reverse", action="store_true", help="pull: empezar por la última vista")
+    parser.add_argument(
+        "--source",
+        choices=("public", "drive"),
+        default="public",
+        help="folder público o carpeta de Drive propia",
+    )
+    parser.add_argument("--drive-folder", default=None, help=f"id de la carpeta de Drive ({FOLDER_ENV})")
+    parser.add_argument(
+        "--only", nargs="+", default=None, metavar="ZIP", help="solo estos zips (p. ej. 1400-1600)"
+    )
     args = parser.parse_args(argv)
     if args.root is None:
         parser.error("indicá --root o definí REID_DATA_DIR")
@@ -360,9 +579,19 @@ def main(argv: list[str] | None = None) -> int:
         "annotations": command_annotations,
         "index": command_index,
         "select": command_select,
+        "drive-check": command_drive_check,
+        "verify": command_verify,
         "pull": command_pull,
+        "status": command_status,
     }
-    return commands[args.command](args)
+    try:
+        return commands[args.command](args)
+    except QuotaExceeded as exc:
+        print(f"{exc}. Lo ya bajado se conserva: se retoma después.", file=sys.stderr)
+        return 3
+    except FetchError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
