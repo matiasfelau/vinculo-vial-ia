@@ -432,8 +432,8 @@ def test_los_umbrales_por_defecto_y_el_de_redaccion_es_el_mas_bajo(base_env: pyt
 
     assert params["detector_min_conf"] == 0.35
     assert (
-        params["redaction_min_conf"] == 0.2
-    )  # el menor entre FACE_MIN_CONF (0,30) y PLATE_REDACT_MIN_CONF (0,20)
+        params["redaction_min_conf"] == 0.1
+    )  # el menor entre FACE_MIN_CONF (0,25) y PLATE_REDACT_MIN_CONF (0,10, desde el 16/11/2026)
 
     base_env.setenv("DETECTOR_MIN_CONF", "0.6")
     base_env.setenv("FACE_MIN_CONF", "0.05")

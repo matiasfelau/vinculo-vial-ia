@@ -57,7 +57,9 @@ class Settings(BaseSettings):
     damage_presence_t: float = Field(default=0.97, ge=0.0, le=1.0)
     # provisorio: barrido con SCRFD sobre WIDER FACE val y Open Images (tools/eval/README.md)
     face_min_conf: float = Field(default=0.25, ge=0.0, le=1.0)
-    plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
+    # 0,10 (16/11/2026; antes 0,20): con mosaico sube el recall de patentes de terceros de 87,4 % a 91,1 %
+    # en las 204 fotos de prueba, a cambio de tapar ~0,7 cajas más por foto (tools/eval/README.md)
+    plate_redact_min_conf: float = Field(default=0.10, ge=0.0, le=1.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     redact_workers: int = Field(default=3, ge=1)  # fotos que se planifican a la vez al redactar
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
@@ -75,14 +77,15 @@ class Settings(BaseSettings):
     tiling_tile_px: int = Field(default=640, ge=64)
     tiling_overlap: float = Field(default=0.25, ge=0.0, le=0.9)
 
-    # Modelos: `null` (default) o el nombre de un modelo de models/manifest.json
+    # Modelos: `null` o el nombre de un modelo de models/manifest.json (por defecto, solo el OCR es parseq)
     model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_face: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_segmenter: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     # EXPERIMENTAL y fuera de la cascada: vacío (no se cargan pesos) salvo para probar el modelo de rebajes
     model_curb: str = Field(default="", pattern=r"^([a-z0-9][a-z0-9_]*)?$")
     model_embedder: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
-    model_ocr: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    # parseq (16/11/2026): sin OCR R3 no compara y la patente reportada no se exceptúa al redactar
+    model_ocr: str = Field(default="parseq", pattern=MODEL_NAME_PATTERN)
     model_damage: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     models_dir: Path | None = None
     models_manifest: Path = Path("models/manifest.json")
