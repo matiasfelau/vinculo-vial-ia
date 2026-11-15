@@ -430,7 +430,7 @@ def test_un_archivo_que_no_es_el_detector_no_deja_arrancar(tmp_path: Path, weigh
 def test_los_umbrales_por_defecto_y_el_de_redaccion_es_el_mas_bajo(base_env: pytest.MonkeyPatch) -> None:
     params = adapter_params(load_settings())
 
-    assert params["detector_min_conf"] == 0.4
+    assert params["detector_min_conf"] == 0.35
     assert (
         params["redaction_min_conf"] == 0.2
     )  # el menor entre FACE_MIN_CONF (0,30) y PLATE_REDACT_MIN_CONF (0,20)
