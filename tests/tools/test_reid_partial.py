@@ -166,7 +166,7 @@ class FakeModels:
     vehicle = FakeDetector()
 
 
-def test_simulate_car_hace_patentes_solo_de_vistas_frontales_o_traseras_y_detalles(tmp_path: Path) -> None:
+def test_simulate_car_hace_patentes_solo_de_vistas_frontales_o_traseras(tmp_path: Path) -> None:
     import cv2
     import numpy as np
 
@@ -189,18 +189,16 @@ def test_simulate_car_hace_patentes_solo_de_vistas_frontales_o_traseras_y_detall
 
     items = result["items"]
     plates = [i for i in items if i["tipo"] == "patente"]
-    details = [i for i in items if i["tipo"] == "detalle"]
     assert result["stats"]["con_eje"] == 1
-    assert 1 <= len(plates) <= partial.PLATE_PER_CAR
+    assert 1 <= len(plates) == len(items) <= partial.PLATE_PER_CAR  # solo patentes: el detalle no se simula
     assert all(partial.is_front_or_rear(i["azimut"], side) for i in plates)  # vistas frontales o traseras
-    assert len(details) == partial.DETAIL_PER_CAR
     for item in items:
         assert (tmp_path / "out" / item["archivo"]).is_file()
         assert item["ancho"] > 0 and item["alto"] > 0 and len(item["ventana"]) == 4
     assert all(0.10 <= i["patente_sobre_vehiculo"] <= 0.30 for i in plates)
 
 
-def test_simulate_car_sin_eje_no_hace_patentes_pero_si_detalles(tmp_path: Path) -> None:
+def test_simulate_car_sin_eje_claro_no_hace_ninguna_foto(tmp_path: Path) -> None:
     import cv2
     import numpy as np
 
@@ -221,6 +219,9 @@ def test_simulate_car_sin_eje_no_hace_patentes_pero_si_detalles(tmp_path: Path) 
         "auto2", frames, tmp_path / "raw", tmp_path / "out", FakeModels(), CvImageDecoder(), seed=0
     )
 
-    assert result["stats"]["con_eje"] == 0
-    assert [i["tipo"] for i in result["items"]].count("patente") == 0
-    assert [i["tipo"] for i in result["items"]].count("detalle") == partial.DETAIL_PER_CAR
+    assert result["stats"]["con_eje"] == 0 and result["items"] == []
+
+
+def test_el_detalle_no_se_simula() -> None:
+    assert partial.KINDS == ("patente",)
+    assert not hasattr(partial, "detail_window") and not hasattr(partial, "DETAIL_FRACTION")

@@ -1,26 +1,30 @@
-"""Re-ID con 3DRealCar y pares parciales: AUC, U1 y S4 por tipo de par, luz y pares difíciles (y VeRi-776).
+"""Re-ID con 3DRealCar: general contra patente, con un único umbral calibrado en validación (y VeRi-776).
 
-Lo que decide R2 en el servicio no es solo "auto entero contra auto entero": la foto GENERAL se compara
-contra la de PLATE (trompa o cola) y contra la de DETAIL (una zona del auto). Esta medición usa tres
-tipos de pares sobre los recortes de `tools/training/reid/prepare.py` (vehículo dominante del detector
-v2, 0,35 de confianza, sin segmentador) y los simulados por `tools/training/reid/partial.py`:
+R2 compara la foto GENERAL contra la de PLATE (la trompa o la cola, cortada entre el capot y el
+parabrisas, con la patente al 8-15 % del ancho). Esta medición usa los recortes de
+`tools/training/reid/prepare.py` (vehículo dominante del detector v2, 0,35 de confianza, sin
+segmentador) y los simulados por `tools/training/reid/partial.py`:
 
-- **entero**: dos vistas del auto entero (separadas por al menos 30°).
-- **general_patente**: una vista entera contra un recorte de trompa o cola con la patente al 8-15 % del ancho.
-- **general_detalle**: una vista entera contra una zona del auto.
+- **general_patente** (el que decide R2): una vista entera contra un recorte de trompa o cola, de vistas
+  separadas por 30° o más. **Un umbral único**, calibrado en validación: el menor con el que al menos
+  `TARGET_S4` (70 %) de los pares de autos distintos queda como "otro auto" (S4 y U1 suben juntos con el
+  umbral, así que es el de menor U1), y que además deja la cota del 95 % de U1 de validación en `MAX_U1`
+  (2 %) o menos.
+- **entero** (solo referencia, no entra al umbral): dos vistas del auto entero.
 
-El umbral se calibra **en validación, con los pares de los tres tipos juntos** (el mayor umbral con la
-cota del 95 % de U1 <= 1 %) y se reporta en prueba. Se mide el modelo ajustado contra DINOv2 sin ajustar
-con los mismos recortes, y con `--veri-dir`, VeRi-776 como referencia (recortes de cámaras de
-vigilancia, con el umbral calibrado acá). R2 solo rechaza con certeza: ante la duda, GREEN. Todo sale en
-cifras; los datos quedan fuera del repo. Uso: ver `tools/eval/README.md`.
+Hay una sola comparación por alerta, así que U1 de este par es también el U1 por alerta. En prueba se
+reporta U1 con su cota, S4 total, en pares difíciles (misma marca y color) y por condición de luz, para
+el modelo ajustado y para el DINOv2 sin ajustar con los mismos recortes. Con `--veri-dir`, VeRi-776 como
+referencia (recortes de cámaras de vigilancia, con el umbral elegido acá). R2 solo rechaza con certeza:
+ante la duda, GREEN. Todo sale en cifras; los datos quedan fuera del repo. Uso: ver
+`tools/eval/README.md`.
 """
 
 import argparse
 import json
 import os
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -33,9 +37,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tools" / "training" / "reid"))
 
 from dataset import ANGLE_BINS, angle_bin, build_pairs  # noqa: E402
-from metrics import at_threshold, auc, calibrate  # noqa: E402
+from metrics import auc, calibrate, upper_bound  # noqa: E402
 from partial import cross_different_pairs, cross_same_pairs  # noqa: E402
 
+from vvi_ia.adapters.models.manifest import load_manifest  # noqa: E402
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models  # noqa: E402
 from vvi_ia.config import Settings  # noqa: E402
 from vvi_ia.main import adapter_params  # noqa: E402
@@ -45,14 +50,15 @@ BASELINE = "dinov2_vits14"
 TUNED = "dinov2_vits14_reid_v2"
 SERVICE_REID_T = Settings.model_fields["reid_t"].default  # el umbral que hoy usa el servicio
 LIGHTING = ("standard", "reflective", "dark")
-TYPES = ("entero", "general_patente", "general_detalle")
-MAX_U1 = 0.01
+TARGET_S4 = 0.70  # el S4 que se pide en validación para el umbral único del servicio (15/11/2026)
+MAX_U1 = 0.02  # la cota del 95 % de U1 que se acepta (el umbral de U1 del proyecto, 1 %, no cambia)
+PROJECT_U1 = 0.01
 DIFFERENT_LIMIT = 100_000
 HARD_LIMIT = 30_000
 Matrix = NDArray[np.float32]
 
 
-class PairType:
+class PairSet:
     """Los pares de un tipo en una partición: cosenos del mismo auto, de distintos y de los difíciles."""
 
     def __init__(
@@ -70,18 +76,45 @@ class PairType:
         self.angles = angles
 
 
-def embed_files(models: Any, folder: Path, names: Sequence[str], workers: int) -> Matrix:
-    """Embedding de cada recorte con el adaptador del servicio (el recorte completo es la máscara)."""
+class LazyModels:
+    """Los modelos del servicio, cargados recién cuando hacen falta (con los embeddings en caché, no)."""
+
+    def __init__(self, factory: Callable[[], Any]) -> None:
+        self._factory = factory
+        self._models: Any = None
+
+    def get(self) -> Any:
+        if self._models is None:
+            self._models = self._factory()
+        return self._models
+
+
+def embed_files(
+    models: LazyModels, folder: Path, names: Sequence[str], workers: int, cache: Path | None = None
+) -> Matrix:
+    """Embedding de cada recorte con el adaptador del servicio (el recorte completo es la máscara).
+
+    Con `cache` (un `.npy`), guarda la matriz y la reutiliza si ya existe con la misma cantidad de recortes.
+    """
+    if cache is not None and cache.is_file():
+        cached: Matrix = np.load(cache)
+        if cached.shape[0] == len(names):
+            return cached
+    embedder = models.get().embedder
 
     def one(name: str) -> NDArray[np.float32]:
         crop = cv2.imdecode(np.fromfile(str(folder / name), np.uint8), cv2.IMREAD_COLOR)
-        embedding = models.embedder.embed(crop, np.ones(crop.shape[:2], np.bool_))
+        embedding = embedder.embed(crop, np.ones(crop.shape[:2], np.bool_))
         if embedding is None:
             raise RuntimeError("el embedder no devolvió un vector")
         return np.asarray(embedding, np.float32)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return np.stack(list(pool.map(one, names)))
+        matrix: Matrix = np.stack(list(pool.map(one, names)))
+    if cache is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        np.save(cache, matrix)
+    return matrix
 
 
 def dots(a: Matrix, b: Matrix, pairs: Sequence[tuple[int, ...]]) -> NDArray[np.float64]:
@@ -98,18 +131,18 @@ def light_of_pairs(
     return np.array([lights_a[p[0]] if lights_a[p[0]] == lights_b[p[1]] else "mixta" for p in pairs])
 
 
-def build_types(
+def build_sets(
     whole: Sequence[Mapping[str, Any]],
-    partial: Mapping[str, Sequence[Mapping[str, Any]]],
+    plates: Sequence[Mapping[str, Any]],
     whole_matrix: Matrix,
-    partial_matrix: Mapping[str, Matrix],
+    plate_matrix: Matrix | None,
     seed: int,
-) -> dict[str, PairType]:
-    """Los tres tipos de pares de una partición."""
+) -> dict[str, PairSet]:
+    """Los pares de una partición: `entero` (referencia) y `general_patente` (el que decide R2)."""
     pairs = build_pairs(whole, seed=seed, different_limit=DIFFERENT_LIMIT, hard_limit=HARD_LIMIT)
     lights = [str(w["luz"]) for w in whole]
-    out: dict[str, PairType] = {
-        "entero": PairType(
+    out: dict[str, PairSet] = {
+        "entero": PairSet(
             dots(whole_matrix, whole_matrix, pairs.same),
             dots(whole_matrix, whole_matrix, pairs.different),
             dots(whole_matrix, whole_matrix, pairs.hard),
@@ -119,25 +152,21 @@ def build_types(
             np.array([angle for _, _, angle in pairs.same]),
         )
     }
-    cars_w = [str(w["auto"]) for w in whole]
-    brand_color = {str(w["auto"]): (str(w["marca"]), str(w["color"])) for w in whole}
-    for kind, name in (("patente", "general_patente"), ("detalle", "general_detalle")):
-        part = list(partial.get(kind, []))
-        if not part:
-            continue
-        brand_color.update({str(p["auto"]): (str(p["marca"]), str(p["color"])) for p in part})
-        cars_p = [str(p["auto"]) for p in part]
+    if plate_matrix is not None and len(plates):
+        cars_w = [str(w["auto"]) for w in whole]
+        cars_p = [str(p["auto"]) for p in plates]
+        brand_color = {str(r["auto"]): (str(r["marca"]), str(r["color"])) for r in (*whole, *plates)}
         same = cross_same_pairs(
             [(str(w["auto"]), float(w["azimut"])) for w in whole],
-            [(str(p["auto"]), float(p["azimut"])) for p in part],
+            [(str(p["auto"]), float(p["azimut"])) for p in plates],
         )
         different = cross_different_pairs(cars_w, cars_p, brand_color, DIFFERENT_LIMIT, seed)
         hard = cross_different_pairs(cars_w, cars_p, brand_color, HARD_LIMIT, seed, hard=True)
-        lights_p = [str(p["luz"]) for p in part]
-        out[name] = PairType(
-            dots(whole_matrix, partial_matrix[kind], [(i, j) for i, j, _ in same]),
-            dots(whole_matrix, partial_matrix[kind], different),
-            dots(whole_matrix, partial_matrix[kind], hard),
+        lights_p = [str(p["luz"]) for p in plates]
+        out["general_patente"] = PairSet(
+            dots(whole_matrix, plate_matrix, [(i, j) for i, j, _ in same]),
+            dots(whole_matrix, plate_matrix, different),
+            dots(whole_matrix, plate_matrix, hard),
             np.array([lights[i] for i, _, _ in same]),
             light_of_pairs(lights, lights_p, different),
             light_of_pairs(lights, lights_p, hard),
@@ -146,139 +175,154 @@ def build_types(
     return out
 
 
-def pooled(types: Mapping[str, PairType]) -> PairType:
-    """Todos los pares de todos los tipos juntos."""
-    parts = list(types.values())
-    cat = np.concatenate
-    return PairType(
-        cat([p.same for p in parts]),
-        cat([p.different for p in parts]),
-        cat([p.hard for p in parts]),
-        cat([p.same_light for p in parts]),
-        cat([p.different_light for p in parts]),
-        cat([p.hard_light for p in parts]),
-        cat([p.angles for p in parts]),
-    )
+def threshold_for_s4(different: NDArray[np.float64], target: float = TARGET_S4) -> float:
+    """El menor umbral con el que al menos `target` de los pares de autos distintos tienen coseno menor."""
+    ordered = np.sort(different)
+    index = int(np.ceil(target * ordered.size)) - 1
+    return float(np.nextafter(ordered[index], np.inf))
 
 
-def summarize(
-    same: NDArray[np.float64], different: NDArray[np.float64], thresholds: Mapping[str, float]
+def cell(
+    same: NDArray[np.float64], different: NDArray[np.float64], hard: NDArray[np.float64], t: float
 ) -> dict[str, Any]:
-    """AUC y U1 / S4 a cada umbral para un conjunto de pares."""
+    """U1 con su cota, S4 total y en difíciles de un conjunto de pares a un umbral."""
+    marked = int((same < t).sum())
     return {
-        "auc": auc(same, different),
-        **{n: at_threshold(same, different, t) for n, t in thresholds.items()},
+        "mismo_auto": int(same.size),
+        "U1": marked / same.size if same.size else None,
+        "U1_pares": marked,
+        "U1_cota_95": upper_bound(marked, int(same.size)),
+        "S4": float((different < t).mean()) if different.size else None,
+        "S4_dificiles": float((hard < t).mean()) if hard.size else None,
+        "distintos": int(different.size),
+        "dificiles": int(hard.size),
     }
 
 
-def block(pair: PairType, thresholds: Mapping[str, float]) -> dict[str, Any]:
-    """Todas las cifras de un conjunto de pares: total, difíciles, por luz y por ángulo."""
+def report_at(pair: PairSet, t: float) -> dict[str, Any]:
+    """Todas las cifras de un tipo de par a un umbral: total, por luz y por rango de ángulo."""
     out: dict[str, Any] = {
-        "pares": {
-            "mismo_auto": int(pair.same.size),
-            "distintos": int(pair.different.size),
-            "dificiles": int(pair.hard.size),
-        },
-        "todos": summarize(pair.same, pair.different, thresholds),
-        "dificiles": summarize(pair.same, pair.hard, thresholds),
+        "auc": auc(pair.same, pair.different),
+        "auc_dificiles": auc(pair.same, pair.hard),
+        "total": cell(pair.same, pair.different, pair.hard, t),
         "por_luz": {},
-        "por_luz_dificiles": {},
         "por_angulo": {},
     }
     for light in LIGHTING:
-        out["por_luz"][light] = summarize(
-            pair.same[pair.same_light == light], pair.different[pair.different_light == light], thresholds
-        )
-        out["por_luz_dificiles"][light] = summarize(
-            pair.same[pair.same_light == light], pair.hard[pair.hard_light == light], thresholds
+        out["por_luz"][light] = cell(
+            pair.same[pair.same_light == light],
+            pair.different[pair.different_light == light],
+            pair.hard[pair.hard_light == light],
+            t,
         )
     bins = np.array([angle_bin(a) or "" for a in pair.angles])
     for low, _ in ANGLE_BINS:
         label = angle_bin(low) or ""
+        marked = pair.same[bins == label]
         out["por_angulo"][label] = {
-            n: {
-                k: v
-                for k, v in at_threshold(pair.same[bins == label], pair.different, t).items()
-                if k.startswith("U1") or k == "pares_mismo_auto"
-            }
-            for n, t in thresholds.items()
+            "mismo_auto": int(marked.size),
+            "U1": float((marked < t).mean()) if marked.size else None,
         }
     return out
 
 
+def choose_threshold(val: PairSet) -> dict[str, Any]:
+    """El umbral único de R2 con los pares general-patente de validación.
+
+    El menor con S4 >= `TARGET_S4`. Se acepta solo si la cota del 95 % de U1 de validación es `MAX_U1` o
+    menos.
+    """
+    t = threshold_for_s4(val.different)
+    chosen = cell(val.same, val.different, val.hard, t)
+    return {
+        "umbral": t,
+        "validacion": chosen,
+        "cota_de_u1_en_validacion_aceptable": chosen["U1_cota_95"] is not None
+        and chosen["U1_cota_95"] <= MAX_U1,
+        "criterio": {"S4_minimo": TARGET_S4, "cota_de_U1_maxima": MAX_U1},
+        "referencia_cota_de_u1_1pct": calibrate(val.same, val.different, PROJECT_U1),
+    }
+
+
 def evaluate_model(
-    models: Any,
+    models: LazyModels,
+    version: str,
     root: Path,
-    parts: Mapping[str, Sequence[Mapping[str, Any]]],
-    partial: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]],
+    whole_items: Mapping[str, Sequence[Mapping[str, Any]]],
+    plate_items: Mapping[str, Sequence[Mapping[str, Any]]],
     workers: int,
     seed: int,
+    cache_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Un modelo: calibra en validación (los tres tipos juntos) y reporta en prueba y validación."""
-    types: dict[str, dict[str, PairType]] = {}
+    """Un modelo: elige el umbral en validación (general-patente) y reporta en prueba y en validación."""
+    key = version.replace("@", "_").replace("/", "_")
+
+    def cache_of(split: str, kind: str) -> Path | None:
+        return None if cache_dir is None else cache_dir / f"{key}_{split}_{kind}.npy"
+
+    sets: dict[str, dict[str, PairSet]] = {}
     for split in ("val", "test"):
-        whole_matrix = embed_files(
-            models, root / "crops-v2", [str(w["archivo"]) for w in parts[split]], workers
+        whole = embed_files(
+            models,
+            root / "crops-v2",
+            [str(w["archivo"]) for w in whole_items[split]],
+            workers,
+            cache_of(split, "entero"),
         )
-        partial_matrix = {
-            kind: embed_files(models, root / "partial-v2", [str(p["archivo"]) for p in rows], workers)
-            for kind, rows in partial[split].items()
-            if rows
-        }
-        types[split] = build_types(parts[split], partial[split], whole_matrix, partial_matrix, seed)
-    val_all = pooled(types["val"])
-    calibration = calibrate(val_all.same, val_all.different, MAX_U1)
-    per_type = {name: calibrate(p.same, p.different, MAX_U1) for name, p in types["val"].items()}
-    thresholds = {"REID_T_del_servicio": float(SERVICE_REID_T)}
-    if calibration.get("umbral") is not None:
-        thresholds["calibrado_en_val"] = float(calibration["umbral"])
-    strictest = [c["umbral"] for c in per_type.values() if c.get("umbral") is not None]
-    if strictest:
-        thresholds["calibrado_por_tipo_el_mas_bajo"] = float(min(strictest))
-    report: dict[str, Any] = {
-        "version": models.versions()["embedder"],
-        "calibracion_en_val_con_los_tres_tipos": calibration,
-        "calibracion_en_val_por_tipo": per_type,
-    }
+        plate = None
+        if plate_items[split]:
+            plate = embed_files(
+                models,
+                root / "partial-v2",
+                [str(p["archivo"]) for p in plate_items[split]],
+                workers,
+                cache_of(split, "patente"),
+            )
+        sets[split] = build_sets(whole_items[split], plate_items[split], whole, plate, seed)
+    choice = choose_threshold(sets["val"]["general_patente"])
+    t = float(choice["umbral"])
+    report: dict[str, Any] = {"version": version, "eleccion_en_validacion": choice}
     for split in ("test", "val"):
-        report[split] = {
-            "total": block(pooled(types[split]), thresholds),
-            **{name: block(p, thresholds) for name, p in types[split].items()},
+        report[split] = {name: report_at(pair, t) for name, pair in sets[split].items()}
+    test = report["test"]["general_patente"]["total"]
+    report["cumple_la_cota_de_u1_en_prueba"] = test["U1_cota_95"] is not None and test["U1_cota_95"] <= MAX_U1
+    report["a_los_umbrales_de_referencia"] = {
+        "REID_T_del_servicio": {
+            name: cell(p.same, p.different, p.hard, float(SERVICE_REID_T)) for name, p in sets["test"].items()
         }
+    }
     return report
 
 
-def detector_models(embedder: str, args: argparse.Namespace) -> Any:
-    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
-    return build_models(
-        {"embedder": embedder, "detector": DETECTOR},
-        args.manifest,
-        args.models_dir,
-        params=adapter_params(settings),
-    )
-
-
 def pct(value: float | None) -> str:
-    return "n/d" if value is None else f"{100 * value:.1f} %"
+    return "n/d" if value is None else f"{100 * value:.2f} %"
 
 
 def print_tables(report: Mapping[str, Any]) -> None:
     for name, entry in report["modelos"].items():
-        print(f"\n== {name} ({entry['version']}) — prueba ==")
-        print(f"calibración en val (tres tipos juntos): {entry['calibracion_en_val_con_los_tres_tipos']}")
-        for scope in ("total", *TYPES):
-            if scope not in entry["test"]:
+        choice = entry["eleccion_en_validacion"]
+        print(f"\n== {name} ({entry['version']}) ==")
+        print(
+            f"umbral {choice['umbral']:.4f} (validación: U1 {pct(choice['validacion']['U1'])}, cota "
+            f"{pct(choice['validacion']['U1_cota_95'])}, S4 {pct(choice['validacion']['S4'])})"
+        )
+        for scope in ("general_patente", "entero"):
+            data = entry["test"].get(scope)
+            if data is None:
                 continue
-            data = entry["test"][scope]
-            for key in ("todos", "dificiles"):
-                cell = data[key]
-                auc_value = None if cell["auc"] is None else round(cell["auc"], 4)
-                row = f"{scope:<16} {key:<10} AUC {auc_value}"
-                for threshold_name in [k for k in cell if k != "auc"]:
-                    c = cell[threshold_name]
-                    row += f" | {threshold_name}: U1 {pct(c['U1'])} (cota {pct(c['U1_cota_95'])})"
-                    row += f" S4 {pct(c['S4'])}"
-                print(row)
+            total = data["total"]
+            print(
+                f"prueba {scope:<16} AUC {data['auc']:.4f} | U1 {pct(total['U1'])} "
+                f"(cota {pct(total['U1_cota_95'])}, "
+                f"{total['U1_pares']} de {total['mismo_auto']}) | S4 {pct(total['S4'])} "
+                f"| difíciles {pct(total['S4_dificiles'])}"
+            )
+            for light, c in data["por_luz"].items():
+                print(
+                    f"    {light:<11} U1 {pct(c['U1'])} (cota {pct(c['U1_cota_95'])}, n {c['mismo_auto']}) "
+                    f"S4 {pct(c['S4'])} difíciles {pct(c['S4_dificiles'])}"
+                )
+        print(f"cumple la cota de U1 <= {MAX_U1:.0%} en prueba: {entry['cumple_la_cota_de_u1_en_prueba']}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -294,6 +338,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--per-track", type=int, default=3)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--cache-dir", type=Path, help="guardar y reutilizar los embeddings (fuera del repo)")
     parser.add_argument("--limit", type=int, help="recortes por partición (para probar)")
     args = parser.parse_args(argv)
     for flag, value in (
@@ -312,52 +357,72 @@ def main(argv: list[str] | None = None) -> int:
     if any(p.resolve().is_relative_to(REPO_ROOT) for p in (root, out_dir)):
         print("Los datos y la salida no pueden estar dentro del repositorio.", file=sys.stderr)
         return 1
-    whole_items = json.loads((root / "crops_v2.json").read_text(encoding="utf-8"))
-    partial_items = json.loads((root / "partial_v2.json").read_text(encoding="utf-8"))
-    parts = {s: [i for i in whole_items if i["particion"] == s] for s in ("val", "test")}
-    partial = {
-        s: {
-            k: [i for i in partial_items if i["particion"] == s and i["tipo"] == k]
-            for k in ("patente", "detalle")
-        }
-        for s in ("val", "test")
-    }
+    whole_all = json.loads((root / "crops_v2.json").read_text(encoding="utf-8"))
+    plate_all = [
+        i
+        for i in json.loads((root / "partial_v2.json").read_text(encoding="utf-8"))
+        if i["tipo"] == "patente"
+    ]
+    whole = {s: [i for i in whole_all if i["particion"] == s] for s in ("val", "test")}
+    plates = {s: [i for i in plate_all if i["particion"] == s] for s in ("val", "test")}
     if args.limit:
-        parts = {s: rows[: args.limit] for s, rows in parts.items()}
-        keep = {str(r["auto"]) for rows in parts.values() for r in rows}
-        partial = {
-            s: {k: [i for i in rows if i["auto"] in keep] for k, rows in d.items()}
-            for s, d in partial.items()
-        }
-    print(
-        {s: {"enteros": len(parts[s]), **{k: len(v) for k, v in partial[s].items()}} for s in parts},
-        flush=True,
-    )
-    report: dict[str, Any] = {"REID_T_del_servicio": SERVICE_REID_T, "max_U1": MAX_U1, "modelos": {}}
+        whole = {s: rows[: args.limit] for s, rows in whole.items()}
+        keep = {str(r["auto"]) for rows in whole.values() for r in rows}
+        plates = {s: [i for i in rows if i["auto"] in keep] for s, rows in plates.items()}
+    print({s: {"enteros": len(whole[s]), "patente": len(plates[s])} for s in whole}, flush=True)
+    manifest = load_manifest(args.manifest)
+    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+
+    def factory(embedder: str) -> Callable[[], Any]:
+        return lambda: build_models(
+            {"embedder": embedder, "detector": DETECTOR},
+            args.manifest,
+            args.models_dir,
+            params=adapter_params(settings),
+        )
+
+    report: dict[str, Any] = {
+        "REID_T_del_servicio": SERVICE_REID_T,
+        "criterio": {"S4": TARGET_S4, "cota_U1": MAX_U1},
+    }
+    report["modelos"] = {}
+    lazy: dict[str, LazyModels] = {}
     try:
-        built = {name: detector_models(name, args) for name in args.models}
+        for name in args.models:
+            entry = manifest.get(name)
+            if entry is None:
+                raise ModelSetupError(f"{name} no está en el manifest")
+            lazy[name] = LazyModels(factory(name))
+            version = f"{name}@{entry.sha256[:12]}"
+            report["modelos"][name] = evaluate_model(
+                lazy[name], version, root, whole, plates, args.workers, args.seed, args.cache_dir
+            )
+            print(
+                f"[{name}] umbral {report['modelos'][name]['eleccion_en_validacion']['umbral']:.4f}",
+                flush=True,
+            )
+        if args.veri_dir:
+            from reid_3drealcar import veri_crops, veri_report  # noqa: PLC0415
+
+            first = lazy[args.models[0]].get()
+            crops, images, discarded = veri_crops(
+                Path(args.veri_dir), args.per_track, args.seed, args.limit, first, args.workers
+            )
+            report["veri"] = {"recortes_usados": len(crops), "descartados": discarded, "modelos": {}}
+            for name in args.models:
+                thresholds = {
+                    "REID_T_del_servicio": float(SERVICE_REID_T),
+                    "elegido_en_3DRealCar": float(
+                        report["modelos"][name]["eleccion_en_validacion"]["umbral"]
+                    ),
+                }
+                report["veri"]["modelos"][name] = veri_report(
+                    crops, images, lazy[name].get(), thresholds, args.workers
+                )
+                print(f"[VeRi {name}] AUC {report['veri']['modelos'][name]['todos']['auc']}", flush=True)
     except ModelSetupError as exc:
         print(f"No se pudo empezar: {exc}", file=sys.stderr)
         return 1
-    calibrated: dict[str, float | None] = {}
-    for name, models in built.items():
-        report["modelos"][name] = evaluate_model(models, root, parts, partial, args.workers, args.seed)
-        calibrated[name] = report["modelos"][name]["calibracion_en_val_con_los_tres_tipos"].get("umbral")
-        print(f"[{name}] umbral calibrado en val: {calibrated[name]}", flush=True)
-    if args.veri_dir:
-        from reid_3drealcar import veri_crops, veri_report  # noqa: PLC0415
-
-        first = next(iter(built.values()))
-        crops, images, discarded = veri_crops(
-            Path(args.veri_dir), args.per_track, args.seed, args.limit, first, args.workers
-        )
-        report["veri"] = {"recortes_usados": len(crops), "descartados": discarded, "modelos": {}}
-        for name, models in built.items():
-            thresholds = {"REID_T_del_servicio": float(SERVICE_REID_T)}
-            if calibrated[name] is not None:
-                thresholds["calibrado_en_3DRealCar"] = float(calibrated[name])
-            report["veri"]["modelos"][name] = veri_report(crops, images, models, thresholds, args.workers)
-            print(f"[VeRi {name}] AUC {report['veri']['modelos'][name]['todos']['auc']}", flush=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "reid_parciales_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"

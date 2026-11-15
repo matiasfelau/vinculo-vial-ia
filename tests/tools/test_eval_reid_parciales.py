@@ -1,7 +1,6 @@
-"""tools/eval/reid_parciales.py: los tres tipos de pares, la calibración conjunta y los desgloses.
+"""tools/eval/reid_parciales.py: pares general-patente, umbral único por S4 y cifras por luz.
 
-Sintético: recortes lisos cuyo tono dice de qué auto son y un embedder falso que devuelve un vector
-según ese tono.
+Sintético: recortes lisos cuyo tono dice de qué auto son y un embedder falso que da un vector según ese tono.
 """
 
 import importlib.util
@@ -45,8 +44,9 @@ class FakeEmbedder:
 class FakeModels:
     embedder = FakeEmbedder()
 
-    def versions(self) -> dict[str, str]:
-        return {"embedder": "falso@1"}
+
+def lazy() -> Any:
+    return rp.LazyModels(lambda: FakeModels())
 
 
 def write(folder: Path, name: str, tone: int) -> None:
@@ -56,12 +56,12 @@ def write(folder: Path, name: str, tone: int) -> None:
 
 
 def make_world(
-    root: Path, cars_per_split: int = 30
-) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
-    parts: dict[str, list[dict[str, Any]]] = {"val": [], "test": []}
-    partial: dict[str, dict[str, list[dict[str, Any]]]] = {s: {"patente": [], "detalle": []} for s in parts}
+    root: Path, cars_per_split: int = 30, plates: int = 12
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]]]:
+    whole: dict[str, list[dict[str, Any]]] = {"val": [], "test": []}
+    plate: dict[str, list[dict[str, Any]]] = {"val": [], "test": []}
     index = 0
-    for split in parts:
+    for split in whole:
         for k in range(cars_per_split):
             index += 1
             car, tone = f"c{index}", index % DIM
@@ -77,44 +77,100 @@ def make_world(
             for view in range(4):
                 name = f"{car}/{view}.png"
                 write(root / "crops-v2", name, tone)
-                parts[split].append({**meta, "archivo": name, "azimut": view * 90.0 + 10, "foto": view})
-            for kind in ("patente", "detalle"):
-                name = f"{car}/{kind}.png"
+                whole[split].append({**meta, "archivo": name, "azimut": view * 90.0 + 10, "foto": view})
+            for n in range(plates):
+                name = f"{car}/patente{n}.png"
                 write(root / "partial-v2", name, tone)
-                partial[split][kind].append(
-                    {**meta, "archivo": name, "azimut": 45.0, "foto": 9, "tipo": kind}
-                )
-    return parts, partial
+                plate[split].append({**meta, "archivo": name, "azimut": 45.0, "foto": 9, "tipo": "patente"})
+    return whole, plate
 
 
-def test_evaluate_model_arma_los_tres_tipos_y_calibra_con_todos(tmp_path: Path) -> None:
-    parts, partial = make_world(tmp_path)
-
-    report = rp.evaluate_model(FakeModels(), tmp_path, parts, partial, workers=1, seed=0)
-
-    assert report["version"] == "falso@1"
-    assert set(report["test"]) == {"total", *rp.TYPES}
-    assert report["calibracion_en_val_con_los_tres_tipos"]["umbral"] is not None
-    assert set(report["calibracion_en_val_por_tipo"]) == set(rp.TYPES)
-    for scope in report["test"].values():
-        assert scope["todos"]["auc"] == 1.0  # el embedder falso separa perfecto
-        assert scope["pares"]["mismo_auto"] > 0 and scope["pares"]["distintos"] > 0
-        assert set(scope["por_luz"]) == set(rp.LIGHTING)
-    total = report["test"]["total"]["pares"]["mismo_auto"]
-    assert total == sum(report["test"][t]["pares"]["mismo_auto"] for t in rp.TYPES)
+def run(root: Path, whole: Any, plate: Any, cache: Path | None = None, models: Any = None) -> dict[str, Any]:
+    return rp.evaluate_model(
+        models or lazy(), "falso@1", root, whole, plate, workers=1, seed=0, cache_dir=cache
+    )
 
 
-def test_los_pares_parciales_respetan_la_separacion_angular(tmp_path: Path) -> None:
-    parts, partial = make_world(tmp_path, cars_per_split=3)
-    # las vistas enteras están a 10, 100, 190 y 280°; el parcial sale de la de 45°: todas separan >= 30°
-    whole = rp.embed_files(FakeModels(), tmp_path / "crops-v2", [w["archivo"] for w in parts["val"]], 1)
-    part = {
-        "patente": rp.embed_files(
-            FakeModels(), tmp_path / "partial-v2", [p["archivo"] for p in partial["val"]["patente"]], 1
-        )
-    }
+def test_el_umbral_es_el_menor_que_alcanza_el_s4_pedido() -> None:
+    different = np.linspace(-0.5, 0.5, 1000)  # 1000 pares de autos distintos, de -0,5 a 0,5
 
-    types = rp.build_types(parts["val"], {"patente": partial["val"]["patente"]}, whole, part, seed=0)
+    threshold = rp.threshold_for_s4(different, 0.70)
 
-    assert set(types) == {"entero", "general_patente"}
-    assert types["general_patente"].same.size == 3 * 4  # 3 autos x 4 vistas enteras
+    assert (different < threshold).mean() >= 0.70
+    assert (different < np.nextafter(threshold, -np.inf)).mean() < 0.70  # y no hay uno menor que lo alcance
+
+
+def test_evaluate_model_elige_el_umbral_con_general_patente_y_reporta_en_prueba(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path)
+
+    report = run(tmp_path, whole, plate)
+
+    choice = report["eleccion_en_validacion"]
+    assert choice["validacion"]["S4"] >= rp.TARGET_S4
+    assert choice["cota_de_u1_en_validacion_aceptable"] is True
+    assert set(report["test"]) == {"entero", "general_patente"}
+    patente = report["test"]["general_patente"]
+    assert (
+        patente["total"]["U1"] == 0.0 and patente["total"]["S4"] == 1.0
+    )  # el embedder falso separa perfecto
+    assert patente["auc"] == 1.0
+    assert set(patente["por_luz"]) == set(rp.LIGHTING)
+    assert patente["total"]["mismo_auto"] == sum(c["mismo_auto"] for c in patente["por_luz"].values())
+    assert report["cumple_la_cota_de_u1_en_prueba"] is True
+
+
+def test_el_detalle_no_entra_a_ninguna_cifra(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path)
+
+    report = run(tmp_path, whole, plate)
+
+    assert "general_detalle" not in report["test"] and "general_detalle" not in report["val"]
+    assert not hasattr(rp, "SCHEMES")
+
+
+def test_con_pocos_pares_la_cota_de_u1_de_validacion_no_se_acepta(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path, cars_per_split=4, plates=1)  # 16 pares del mismo auto: 3/16 > 2 %
+
+    report = run(tmp_path, whole, plate)
+
+    assert report["eleccion_en_validacion"]["cota_de_u1_en_validacion_aceptable"] is False
+
+
+def test_los_pares_de_patente_respetan_la_separacion_angular(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path, cars_per_split=3, plates=1)
+    # las vistas enteras están a 10, 100, 190 y 280°; la patente sale de la de 45°: todas separan >= 30°
+    folder, partial = tmp_path / "crops-v2", tmp_path / "partial-v2"
+    w = rp.embed_files(lazy(), folder, [r["archivo"] for r in whole["val"]], 1)
+    p = rp.embed_files(lazy(), partial, [r["archivo"] for r in plate["val"]], 1)
+
+    sets = rp.build_sets(whole["val"], plate["val"], w, p, seed=0)
+
+    assert set(sets) == {"entero", "general_patente"}
+    assert sets["general_patente"].same.size == 3 * 4  # 3 autos x 4 vistas enteras
+
+
+def test_el_cache_de_embeddings_se_reutiliza_sin_cargar_los_modelos(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path, cars_per_split=3, plates=1)
+    names = [w["archivo"] for w in whole["val"]]
+    cache = tmp_path / "c" / "m.npy"
+    first = rp.embed_files(lazy(), tmp_path / "crops-v2", names, 1, cache)
+
+    def boom() -> Any:
+        raise AssertionError("no tendría que cargar el modelo")
+
+    second = rp.embed_files(rp.LazyModels(boom), tmp_path / "crops-v2", names, 1, cache)
+
+    assert cache.is_file() and (first == second).all()
+
+
+def test_evaluate_model_con_todo_en_cache_no_carga_los_modelos(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path)
+    cache = tmp_path / "cache"
+    first = run(tmp_path, whole, plate, cache)
+
+    def boom() -> Any:
+        raise AssertionError("no tendría que cargar el modelo")
+
+    second = run(tmp_path, whole, plate, cache, models=rp.LazyModels(boom))
+
+    assert first["eleccion_en_validacion"]["umbral"] == second["eleccion_en_validacion"]["umbral"]

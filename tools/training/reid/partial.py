@@ -1,10 +1,10 @@
-"""Pares parciales de 3DRealCar: "vista general contra recorte parcial" para validación y prueba.
+"""Pares parciales de 3DRealCar: "vista general contra la foto de patente" para validación y prueba.
 
-En el servicio, R2 no compara solo autos enteros: la foto GENERAL se compara contra la de PLATE (la
-trompa o la cola, cortada entre el capot y el parabrisas, con la patente al 8-15 % del ancho) y contra
-la de DETAIL (una zona del auto con el auto alrededor). 3DRealCar solo tiene vistas del auto entero;
-esta herramienta **simula** esos dos encuadres a partir de ellas, con las mismas ventanas que los
-conjuntos de R1 (`tools/eval/capture_sets.py`).
+R2 compara la foto GENERAL contra la de PLATE: la trompa o la cola, cortada entre el capot y el
+parabrisas, con la patente al 8-15 % del ancho. 3DRealCar solo tiene vistas del auto entero; esta
+herramienta **simula** ese encuadre a partir de ellas, con la misma ventana que los conjuntos de R1
+(`tools/eval/capture_sets.py`). (La foto de detalle no se simula: R2 no la compara y probablemente se
+elimine del contrato.)
 
 **Cómo se arman** (por auto de validación y de prueba, con semilla fija):
 
@@ -19,18 +19,14 @@ conjuntos de R1 (`tools/eval/capture_sets.py`).
    vehículo. Se toman hasta `PLATE_PER_CAR` (las de mayor confianza, separadas al menos 30° entre sí) y
    se recorta la ventana 16:9 de `capture_sets.plate_window`: la patente al 8-15 % del ancho, el
    vehículo entero a lo ancho y cortado a la altura del capot.
-3. **Detalle.** Hasta `DETAIL_PER_CAR` vistas elegidas al azar (cualquier ángulo): una ventana de 30 a
-   55 % del ancho del vehículo con al menos el 85 % de la foto dentro de su caja
-   (`capture_sets.detail_window`).
-4. Cada recorte simulado se lleva a 1600 px de lado mayor y JPEG de <= 900 KB (lo que envía la app) y
+3. Cada recorte simulado se lleva a 1600 px de lado mayor y JPEG de <= 900 KB (lo que envía la app) y
    pasa por el mismo camino que una foto real: se reduce a 1024 px, el detector busca el vehículo
    dominante y se recorta su caja (**sin máscaras del segmentador**). Si el detector no encuentra un
    vehículo, el servicio no tendría embedding (duda, GREEN): se cuenta como "sin vehículo" y no entra a
    los pares.
 
 Salida (`--root`, fuera del repo): `partial-v2/` con los recortes en PNG y `partial_v2.json` con un
-elemento por recorte (auto, tipo, vista de origen, azimut, ventana) y `partial_v2_stats.json` con los
-conteos.
+elemento por recorte (auto, vista de origen, azimut, ventana) y `partial_v2_stats.json` con los conteos.
 """
 
 import argparse
@@ -63,11 +59,10 @@ MIN_ASPECT_FIT = 0.50  # R² mínimo del ajuste
 MIN_FRAMES_FOR_AXIS = 6
 PLATE_MIN_CONF = 0.30
 PLATE_PER_CAR = 2
-DETAIL_PER_CAR = 2
 MIN_SEPARATION_DEG = 30.0
 PLATE_TO_CAR_WIDTH = (0.10, 0.30)  # igual que `capture_sets.PLATE_TO_CAR_WIDTH`
 PARTITIONS = ("val", "test")
-KINDS = ("patente", "detalle")
+KINDS = ("patente",)
 
 
 def side_axis(azimuths: Sequence[float], aspects: Sequence[float]) -> tuple[float, float, float] | None:
@@ -238,8 +233,8 @@ def simulate_car(
     decoder: Any,
     seed: int,
 ) -> dict[str, Any]:
-    """Recortes parciales de un auto: patente y detalle. Devuelve los elementos del índice y los conteos."""
-    from capture_sets import crop_to_jpeg, detail_window, plate_window
+    """Recortes de patente de un auto (vistas frontales y traseras). Devuelve los elementos y los conteos."""
+    from capture_sets import crop_to_jpeg, plate_window
 
     rng = random.Random(f"{seed}|{car}")  # noqa: S311 - muestreo de ventanas, no criptografía
     stats: Counter[str] = Counter()
@@ -259,25 +254,23 @@ def simulate_car(
 
     items: list[dict[str, Any]] = []
 
-    def emit(
-        kind: str, frame: Mapping[str, Any], window: tuple[int, int, int, int], extra: dict[str, Any]
-    ) -> None:
+    def emit(frame: Mapping[str, Any], window: tuple[int, int, int, int], extra: dict[str, Any]) -> None:
         pixels, _ = view(frame)
         photo = decoder.decode(crop_to_jpeg(cv2.cvtColor(pixels, cv2.COLOR_RGB2BGR), window))
         found = largest_car_crop(photo, models)
         if found is None:
-            stats[f"{kind}_sin_vehiculo"] += 1
+            stats["patente_sin_vehiculo"] += 1
             return
         crop, conf = found
-        name = f"{int(frame['foto']):05d}_{kind}_{len(items)}.png"
+        name = f"{int(frame['foto']):05d}_patente_{len(items)}.png"
         target = out_root / car / name
         target.parent.mkdir(parents=True, exist_ok=True)
         cv2.imencode(".png", crop)[1].tofile(str(target))  # igual que prepare.py: el arreglo RGB tal cual
-        stats[f"{kind}_con_recorte"] += 1
+        stats["patente_con_recorte"] += 1
         items.append(
             {
                 "auto": car,
-                "tipo": kind,
+                "tipo": "patente",
                 "foto": int(frame["foto"]),
                 "azimut": float(frame["azimut"]),
                 "archivo": f"{car}/{name}",
@@ -320,29 +313,8 @@ def simulate_car(
                 stats["patente_sin_ventana"] += 1
                 continue
             emit(
-                "patente",
-                frame,
-                window[0],
-                {"patente_sobre_vehiculo": round(ratio, 3), "patente_conf": round(conf, 3)},
+                frame, window[0], {"patente_sobre_vehiculo": round(ratio, 3), "patente_conf": round(conf, 3)}
             )
-    # detalle: cualquier vista, elegida al azar
-    order = list(range(len(frames)))
-    rng.shuffle(order)
-    made = 0
-    for index in order:
-        if made == DETAIL_PER_CAR:
-            break
-        frame = frames[index]
-        pixels, found = view(frame)
-        if found is None:
-            continue
-        window = detail_window(found["auto"], (pixels.shape[1], pixels.shape[0]), rng)
-        if window is None:
-            stats["detalle_sin_ventana"] += 1
-            continue
-        before = len(items)
-        emit("detalle", frame, window[0], {"fraccion": round(window[1], 3)})
-        made += len(items) > before
     return {"items": items, "stats": dict(stats)}
 
 
@@ -382,14 +354,17 @@ def main(argv: list[str] | None = None) -> int:
         if row["particion"] in PARTITIONS:
             by_car.setdefault(row["auto"], []).append(row)
     names = sorted(by_car)[: args.limit] if args.limit else sorted(by_car)
-    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
-    models = build_models(
-        {"detector": args.detector}, args.manifest, args.models_dir, 2, adapter_params(settings)
-    )
-    decoder = CvImageDecoder()
     out_root = root / PARTIAL_DIR
     cache = out_root / "_por_auto"
     cache.mkdir(parents=True, exist_ok=True)
+    pending = [car for car in names if not (cache / f"{car}.json").is_file()]
+    models = decoder = None
+    if pending:  # los modelos solo se cargan si falta simular algún auto
+        settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+        models = build_models(
+            {"detector": args.detector}, args.manifest, args.models_dir, 2, adapter_params(settings)
+        )
+        decoder = CvImageDecoder()
     items: list[dict[str, Any]] = []
     totals: Counter[str] = Counter()
     for count, car in enumerate(names, 1):
@@ -401,6 +376,8 @@ def main(argv: list[str] | None = None) -> int:
             cached.write_text(json.dumps(result), encoding="utf-8")
         info = by_car[car][0]
         for item in result["items"]:
+            if item["tipo"] != "patente":  # las cachés viejas pueden traer detalles: se descartan
+                continue
             items.append(
                 {
                     **item,
@@ -412,15 +389,15 @@ def main(argv: list[str] | None = None) -> int:
                     "color": info["color"],
                 }
             )
-        totals.update(result["stats"])
+        totals.update({k: v for k, v in result["stats"].items() if not k.startswith("detalle")})
         totals["autos"] += 1
         if count % 25 == 0:
             print(f"{count}/{len(names)} autos", flush=True)
     (root / PARTIAL_INDEX).write_text(json.dumps(items), encoding="utf-8")
-    per = Counter((i["particion"], i["tipo"], i["luz"]) for i in items)
+    per = Counter((i["particion"], i["luz"]) for i in items)
     stats = {
         "totales": dict(totals),
-        "recortes": {f"{p}|{t}|{light}": n for (p, t, light), n in sorted(per.items())},
+        "recortes_de_patente": {f"{p}|{light}": n for (p, light), n in sorted(per.items())},
         "autos_con_algun_recorte": len({i["auto"] for i in items}),
     }
     (root / STATS_FILE).write_text(json.dumps(stats, indent=2), encoding="utf-8")
