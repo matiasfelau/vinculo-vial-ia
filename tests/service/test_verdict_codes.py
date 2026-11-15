@@ -71,7 +71,7 @@ def _no_vehicle(_: Scenario, models: FakeModels) -> None:
 
 
 def _burst_mismatch(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(85)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
 
 
 def _plate_mismatch(_: Scenario, models: FakeModels) -> None:
@@ -134,11 +134,11 @@ def _plate_without_reading(_: Scenario, models: FakeModels) -> None:
 
 
 def _burst_in_between(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(55)
 
 
 def _burst_not_comparable(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = None
+    models.embedder.by_marker_area[(PLATE, 8100)] = None
 
 
 def _no_damage(_: Scenario, models: FakeModels) -> None:

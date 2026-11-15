@@ -42,7 +42,7 @@ COLUMNS = ("archivo", "auto")
 DEFAULT_SEGMENTER = "rfdetr_seg_coco"
 DEFAULT_EMBEDDER = "dinov2_vits14"
 CURRENT_T_LOW = (
-    0.075  # el valor por defecto de REID_T en `config.py` (un solo umbral: otro auto si cos < REID_T)
+    0.0638  # el valor por defecto de REID_T en `config.py` (un solo umbral: otro auto si cos < REID_T)
 )
 CURRENT_T_HIGH = 0.70  # el límite alto que usaba el modelo anterior; solo informativo
 DEFAULT_MAX_FALSE_FRAUD = 0.01

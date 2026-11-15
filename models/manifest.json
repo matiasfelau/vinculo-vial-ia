@@ -128,7 +128,7 @@
       },
       "source": "facebook/dinov2-small ajustado con los 2.009 autos usables de 3DRealCar (Du et al., ICCV 2025, Apache-2.0): 1.401 de entrenamiento, recortes del detector v2 con 0,35 de auto y sin segmentador, con tools/training/reid/train.py (CosFace, FP32, acumulacion de gradiente, parada temprana; mejor epoca 6) y exportado con export.py",
       "commercial": "yes",
-      "notes": "NO ACTIVADO: el servicio sigue con dinov2_vits14 y REID_T sin cambios hasta que se apruebe. Reemplaza en la practica a dinov2_vits14_reid (primera version, 411 autos, detector v1), que queda registrado sin tocar. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero); ONNX contra PyTorch: diferencia maxima 6,7e-7 por componente y coseno minimo 0,9999999. Su REID_T se calibra aparte (tools/eval/reid_parciales.py), con pares enteros y parciales. El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
+      "notes": "ACTIVADO el 15/11/2026 (MODEL_EMBEDDER en .env.example) con REID_T 0,0638: R2 compara solo GENERAL contra PLATE, con la caja del vehiculo dominante del detector, sin mascaras. Reemplaza en la practica a dinov2_vits14_reid (primera version, 411 autos, detector v1), que queda registrado sin tocar. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero); ONNX contra PyTorch: diferencia maxima 6,7e-7 por componente y coseno minimo 0,9999999. Su REID_T se calibro en validacion con los pares general-patente (tools/eval/reid_parciales.py): el menor umbral con S4 >= 70 %, con la cota de U1 <= 2 %. El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
     },
     {
       "name": "scrfd_10g",
