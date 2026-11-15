@@ -95,6 +95,7 @@ def test_settings_se_construye_con_kwargs() -> None:
         evidence_bucket="b",
         ia_hpke_private_key=BASE_ENV["IA_HPKE_PRIVATE_KEY"],  # type: ignore[arg-type]
         env="local",
+        model_ocr="null",  # el default (parseq) exige MODELS_DIR; este test no depende del entorno
     )
     assert settings.evidence_bucket == "b"
 
