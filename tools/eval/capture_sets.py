@@ -664,13 +664,14 @@ def class_id(descriptions_csv: Path, name: str) -> str | None:
 
 
 def images_with_label(image_labels_csv: Path, label_id: str) -> set[str]:
-    """Fotos con esa etiqueta de imagen confirmada (`Confidence` 1)."""
-    import pandas as pd
+    """Fotos con esa etiqueta de imagen confirmada (`Confidence` 1). Sin pandas: sirve en los tests."""
+    import csv
 
     found: set[str] = set()
-    columns = ["ImageID", "LabelName", "Confidence"]
-    for chunk in pd.read_csv(image_labels_csv, usecols=columns, chunksize=1_000_000):
-        found.update(chunk.loc[(chunk["LabelName"] == label_id) & (chunk["Confidence"] == 1), "ImageID"])
+    with image_labels_csv.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["LabelName"] == label_id and float(row["Confidence"]) == 1.0:  # "1" o "1.0"
+                found.add(row["ImageID"])
     return found
 
 
