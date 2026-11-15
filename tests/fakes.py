@@ -162,12 +162,16 @@ class FakeDamageDetector:
 
 
 class FakeFaceDetector:
+    """Módulo experimental: la cascada no lo llama (`calls` lo prueba). Por defecto, None como el nulo."""
+
     version = "fake-face"
 
     def __init__(self, by_marker: dict[int, list[Box] | None] | None = None) -> None:
         self.by_marker = by_marker or {}
+        self.calls = 0
 
     def detect(self, img: Pixels) -> list[Box] | None:
+        self.calls += 1
         return self.by_marker.get(marker_of(img))
 
 
@@ -219,11 +223,11 @@ def happy_models() -> FakeModels:
         embedder=embedder,
         plate=FakePlateReader({GENERAL: (REPORTED_PLATE, 0.9), PLATE: (REPORTED_PLATE, 0.95)}),
         damage=FakeDamageDetector({detail_marker(i): [Box(10, 10, 50, 50, 0.8)] for i in range(3)}),
-        face=FakeFaceDetector({m: [] for m in (GENERAL, PLATE, CONTEXT, *map(detail_marker, range(3)))}),
+        face=FakeFaceDetector(),  # None en todas las fotos, como el nulo: la redacción no depende de él
     )
 
 
-REDACTION = RedactionSettings(required=True, face_min_conf=0.30, plate_min_conf=0.20, max_side_px=1600)
+REDACTION = RedactionSettings(required=True, plate_min_conf=0.20, max_side_px=1600)
 
 
 class FakeWriter:

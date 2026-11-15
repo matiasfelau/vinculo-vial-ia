@@ -1,4 +1,4 @@
-"""Re-ID con 3DRealCar: general contra patente, con un único umbral calibrado en validación (y VeRi-776).
+"""Re-ID con 3DRealCar: general contra patente, con un único umbral calibrado en validación.
 
 R2 compara la foto GENERAL contra la de PLATE (la trompa o la cola, cortada entre el capot y el
 parabrisas, con la patente al 8-15 % del ancho). Esta medición usa los recortes de
@@ -14,8 +14,7 @@ segmentador) y los simulados por `tools/training/reid/partial.py`:
 
 Hay una sola comparación por alerta, así que U1 de este par es también el U1 por alerta. En prueba se
 reporta U1 con su cota, S4 total, en pares difíciles (misma marca y color) y por condición de luz, para
-el modelo ajustado y para el DINOv2 sin ajustar con los mismos recortes. Con `--veri-dir`, VeRi-776 como
-referencia (recortes de cámaras de vigilancia, con el umbral elegido acá). R2 solo rechaza con certeza:
+el modelo ajustado y para el DINOv2 sin ajustar con los mismos recortes. R2 solo rechaza con certeza:
 ante la duda, GREEN. Todo sale en cifras; los datos quedan fuera del repo. Uso: ver
 `tools/eval/README.md`.
 """
@@ -341,10 +340,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="MODELS_DIR")
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / "models" / "manifest.json")
     parser.add_argument("--models", nargs="+", default=[BASELINE, TUNED], help="embedders a medir")
-    parser.add_argument(
-        "--veri-dir", type=Path, default=os.environ.get("VERI_DIR"), help="VeRi-776 (VERI_DIR)"
-    )
-    parser.add_argument("--per-track", type=int, default=3)
     parser.add_argument("--workers", type=int, default=3)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--cache-dir", type=Path, help="guardar y reutilizar los embeddings (fuera del repo)")
@@ -380,7 +375,7 @@ def main(argv: list[str] | None = None) -> int:
         plates = {s: [i for i in rows if i["auto"] in keep] for s, rows in plates.items()}
     print({s: {"enteros": len(whole[s]), "patente": len(plates[s])} for s in whole}, flush=True)
     manifest = load_manifest(args.manifest)
-    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+    settings = Settings.model_construct(plate_tiling=False)
 
     def factory(embedder: str) -> Callable[[], Any]:
         return lambda: build_models(
@@ -410,25 +405,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"[{name}] umbral {report['modelos'][name]['eleccion_en_validacion']['umbral']:.4f}",
                 flush=True,
             )
-        if args.veri_dir:
-            from reid_3drealcar import veri_crops, veri_report  # noqa: PLC0415
-
-            first = lazy[args.models[0]].get()
-            crops, images, discarded = veri_crops(
-                Path(args.veri_dir), args.per_track, args.seed, args.limit, first, args.workers
-            )
-            report["veri"] = {"recortes_usados": len(crops), "descartados": discarded, "modelos": {}}
-            for name in args.models:
-                thresholds = {
-                    "REID_T_del_servicio": float(SERVICE_REID_T),
-                    "elegido_en_3DRealCar": float(
-                        report["modelos"][name]["eleccion_en_validacion"]["umbral"]
-                    ),
-                }
-                report["veri"]["modelos"][name] = veri_report(
-                    crops, images, lazy[name].get(), thresholds, args.workers
-                )
-                print(f"[VeRi {name}] AUC {report['veri']['modelos'][name]['todos']['auc']}", flush=True)
     except ModelSetupError as exc:
         print(f"No se pudo empezar: {exc}", file=sys.stderr)
         return 1
