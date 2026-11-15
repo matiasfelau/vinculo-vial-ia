@@ -1,12 +1,14 @@
 """Arma los recortes de auto de 3DRealCar tal como los ve el embedder del servicio, y la partición.
 
 Para cada foto bajada con `fetch.py pull` hace lo que hace la cascada sin segmentador: reduce la foto a
-`MODEL_MAX_SIDE_PX` (1024), corre el detector (`rfdetr_openimages`, con su confianza mínima), se queda con la
-caja
-`car` más grande y recorta esa caja (el embedder la achica a 224 x 224 con el mismo preproceso del servicio).
-Solo usa el RGB. Guarda cada recorte como PNG (sin pérdida) en `crops/<auto>/` y escribe `crops.json` con el
-ángulo de vista de cada foto (a partir de la pose de la cámara), las anotaciones del auto y su partición
-(agrupada por auto, estratificada por luz, tipo y color, con semilla fija).
+`MODEL_MAX_SIDE_PX` (1024), corre el detector (por defecto `rfdetr_openimages_v2` con la confianza de
+auto del servicio, 0,35), se queda con la caja del vehículo dominante (la `car` más grande) y recorta
+esa caja (el embedder la achica a 224 x 224 con el mismo preproceso del servicio). Sin máscaras del
+segmentador. Solo usa el RGB. Guarda cada recorte como PNG (sin pérdida) en `crops-v2/<auto>/` y escribe
+`crops_v2.json` con el ángulo de vista de cada foto (a partir de la pose de la cámara), las anotaciones
+del auto y su partición (agrupada por auto, estratificada por luz, tipo y color, con semilla fija; la
+asignación ya hecha en `split.json` no se mueve). Solo entran los autos con todas sus vistas elegidas
+bajadas.
 
 Los datos quedan fuera del repositorio. Uso: ver `tools/training/reid/README.md`.
 """
@@ -23,43 +25,29 @@ from typing import Any
 import cv2
 import numpy as np
 from dataset import Car, azimuths, group_split, load_frozen, save_split
-from fetch import LIGHTING, is_complete, load_annotations
+from fetch import LIGHTING, car_complete, is_complete, load_annotations
+from partial import largest_car_crop
 
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import build_models
 from vvi_ia.config import Settings
-from vvi_ia.domain.model import BoxLabel
 from vvi_ia.main import adapter_params
-from vvi_ia.service.validate_evidence import reduce_for_models
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MODEL_MAX_SIDE_PX = 1024  # el del servicio
-DETECTOR = "rfdetr_openimages"
+DETECTOR = "rfdetr_openimages_v2"
+CROPS_DIR = "crops-v2"
+INDEX_FILE = "crops_v2.json"
 
 _worker: dict[str, Any] = {}
 
 
-def init_worker(manifest: str, models_dir: str, threads: int) -> None:
+def init_worker(manifest: str, models_dir: str, threads: int, detector: str) -> None:
     settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
     _worker["models"] = build_models(
-        {"detector": DETECTOR}, Path(manifest), Path(models_dir), threads, adapter_params(settings)
+        {"detector": detector}, Path(manifest), Path(models_dir), threads, adapter_params(settings)
     )
     _worker["decoder"] = CvImageDecoder()
-
-
-def largest_car_crop(pixels: np.ndarray[Any, Any], models: Any) -> tuple[np.ndarray[Any, Any], float] | None:
-    """Recorte de la caja `car` más grande en la foto reducida (como el servicio), con su confianza."""
-    view = reduce_for_models(pixels, MODEL_MAX_SIDE_PX)
-    shown = pixels if view is None else view
-    boxes = [b for b in (models.vehicle.detect(shown) or ()) if b.label == BoxLabel.CAR]
-    if not boxes:
-        return None
-    box = max(boxes, key=lambda b: b.area)
-    x1, y1 = max(0, int(box.x1)), max(0, int(box.y1))
-    x2, y2 = min(shown.shape[1], round(box.x2)), min(shown.shape[0], round(box.y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return shown[y1:y2, x1:x2].copy(), box.conf
 
 
 def process_car(job: tuple[str, str, str]) -> dict[str, Any]:
@@ -121,6 +109,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--threads", type=int, default=2, help="hilos de ONNX Runtime por proceso")
     parser.add_argument("--seed", type=int, default=0, help="semilla de la partición")
+    parser.add_argument("--detector", default=DETECTOR, help="MODEL_DETECTOR para los recortes")
+    parser.add_argument("--crops-dir", default=CROPS_DIR, help="carpeta de recortes dentro de --root")
+    parser.add_argument("--index", default=INDEX_FILE, help="índice de recortes dentro de --root")
     parser.add_argument("--limit", type=int, help="solo los primeros N autos (para probar)")
     args = parser.parse_args(argv)
     for flag, value in (("--root", args.root), ("--models-dir", args.models_dir)):
@@ -137,14 +128,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     selection = json.loads((root / "selection.json").read_text(encoding="utf-8"))
     annotations = load_annotations(root / "annotations.json")
-    names = [car for car in sorted(selection) if (root / "raw" / car).is_dir()]
+    # solo los autos con todas sus vistas elegidas (una bajada interrumpida deja autos a medias)
+    names = [
+        car
+        for car in sorted(selection)
+        if (root / "raw" / car).is_dir() and car_complete(root, car, selection[car]["fotos"])
+    ]
     names = names[: args.limit] if args.limit else names
-    jobs = [(car, str(root / "raw"), str(root / "crops")) for car in names]
+    jobs = [(car, str(root / "raw"), str(root / args.crops_dir)) for car in names]
     results: dict[str, dict[str, Any]] = {}
     with ProcessPoolExecutor(
         max_workers=args.workers,
         initializer=init_worker,
-        initargs=(str(args.manifest), str(args.models_dir), args.threads),
+        initargs=(str(args.manifest), str(args.models_dir), args.threads, args.detector),
     ) as pool:
         for count, result in enumerate(pool.map(process_car, jobs), 1):
             results[result["auto"]] = result
@@ -184,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                     "confianza": frame["confianza"],
                 }
             )
-    (root / "crops.json").write_text(json.dumps(out), encoding="utf-8")
+    (root / args.index).write_text(json.dumps(out), encoding="utf-8")
     dropped = sum(r["sin_auto"] for r in results.values())
     total = dropped + len(out)
     per_split = Counter(item["particion"] for item in out)

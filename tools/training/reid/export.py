@@ -33,7 +33,7 @@ OUTPUT_NAME = "last_hidden_state"
 MAX_ABS_DIFF = 1e-3  # por componente del embedding normalizado
 MIN_COSINE = 0.9999
 SAMPLES = 64
-DEFAULT_NAME = "dinov2_vits14_reid"
+DEFAULT_NAME = "dinov2_vits14_reid_v2"
 
 
 class Tokens(torch.nn.Module):
@@ -53,6 +53,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--root", type=Path, default=os.environ.get("REID_DATA_DIR"), help="REID_DATA_DIR")
     parser.add_argument("--out-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="MODELS_DIR")
     parser.add_argument("--name", default=DEFAULT_NAME)
+    parser.add_argument("--index", default="crops_v2.json", help="índice de recortes dentro de --root")
+    parser.add_argument("--crops-dir", default="crops-v2", help="carpeta de recortes dentro de --root")
     parser.add_argument("--force", action="store_true", help="pisar el archivo si ya existe")
     args = parser.parse_args(argv)
     for flag, value in (("--root", args.root), ("--out-dir", args.out_dir)):
@@ -85,8 +87,8 @@ def main(argv: list[str] | None = None) -> int:
             dynamo=False,
         )
     session = OnnxSession(target.read_bytes(), intra_op_threads=0)
-    items = load_items(Path(args.root))["val"][:SAMPLES]
-    dataset = CropSet(Path(args.root), items, {}, train=False)
+    items = load_items(Path(args.root), args.index)["val"][:SAMPLES]
+    dataset = CropSet(Path(args.root), items, {}, train=False, crops_dir=args.crops_dir)
     reference = Embedder(backbone).eval()
     worst_diff, worst_cosine = 0.0, 1.0
     for index in range(len(dataset)):
