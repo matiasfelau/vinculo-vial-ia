@@ -177,10 +177,10 @@ Pares: **general contra patente** del mismo auto con una separación mínima de 
 salió el recorte de patente, y de autos distintos (todos y difíciles: misma marca y color). Los pares de auto entero se
 arman como siempre y quedan solo como referencia.
 
-**Umbral.** Un **único umbral** calibrado en validación con los pares general-patente: el menor con el que **S4 >= 70 %** (S4 y U1
-suben juntos con el umbral, así que es el de menor U1; criterio del 15/11/2026), siempre que la cota del 95 % de U1 de validación sea
-<= 2 %. El umbral de U1 del proyecto (1 %) no cambia. Como hay una sola comparación por alerta, el U1 por par es también el U1 por alerta.
-Si el U1 de prueba supera esa cota, el modelo no se activa. R2 solo rechaza con certeza; ante la duda, GREEN.
+**Umbral.** Un **único umbral** calibrado en validación con los pares general-patente. Activo (15/11/2026): **0,2565, el mayor con la cota del
+95 % de U1 en 1 % o menos** (en prueba: U1 3 de 778, cota 0,99 %, S4 98,0 %). Opción conservadora: **0,0638, el menor con S4 >= 70 %** (U1 0 de 778, S4 69,6 %).
+Como hay una sola comparación por alerta, el U1 por par es también el U1 por alerta. R2 solo rechaza con certeza; ante la duda, GREEN. Resultados y
+límites en [tools/eval/README.md](../../eval/README.md#re-id-con-3drealcar-general-contra-patente-reid_parcialespy).
 
 ## Pérdida: CosFace
 

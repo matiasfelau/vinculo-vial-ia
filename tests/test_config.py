@@ -13,7 +13,7 @@ def test_carga_valida_con_valores_por_defecto(base_env: pytest.MonkeyPatch) -> N
     assert settings.input_queue == "ia.alert-evidence-uploaded.q"
     assert settings.workers == 2
     assert settings.redaction_required is True
-    assert settings.reid_t == 0.0638 and settings.damage_presence_t == 0.97
+    assert settings.reid_t == 0.2565 and settings.damage_presence_t == 0.97
     assert settings.model_curb == "" and settings.model_selection()["curb"] == "null"
 
 
@@ -206,7 +206,7 @@ def test_la_imagen_no_instala_extras_ni_copia_pesos() -> None:
 
 
 def test_env_example_activa_el_embedder_ajustado_con_su_umbral() -> None:
-    """15/11/2026: MODEL_EMBEDDER=dinov2_vits14_reid_v2 y REID_T 0,0638 (calibrado para él) van juntos."""
+    """15/11/2026: MODEL_EMBEDDER=dinov2_vits14_reid_v2 y REID_T 0,2565 (calibrado para él) van juntos."""
     from pathlib import Path
 
     from vvi_ia.adapters.models.manifest import load_manifest
@@ -217,6 +217,6 @@ def test_env_example_activa_el_embedder_ajustado_con_su_umbral() -> None:
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#") and "=" in line)
 
     assert values["MODEL_EMBEDDER"] == "dinov2_vits14_reid_v2"
-    assert float(values["REID_T"]) == 0.0638 == Settings.model_fields["reid_t"].default
+    assert float(values["REID_T"]) == 0.2565 == Settings.model_fields["reid_t"].default
     entry = load_manifest(root / "models" / "manifest.json").get("dinov2_vits14_reid_v2")
     assert entry is not None and entry.ports == ("embedder",)
