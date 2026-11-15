@@ -1,4 +1,4 @@
-"""16/11/2026: el producto solo usa datos con camino comercial: dos datasets no comerciales salieron del repo."""
+"""16/11/2026: el producto solo usa datos con camino comercial; dos datasets no comerciales salieron."""
 
 from pathlib import Path
 
