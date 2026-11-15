@@ -52,7 +52,7 @@ from rapidfuzz.distance import Levenshtein
 from vvi_ia.adapters.imaging import CvImageDecoder
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.domain.model import EvidenceImage, EvidenceRole
-from vvi_ia.domain.plate import TO_DIGIT, TO_LETTER, canonicalize
+from vvi_ia.domain.plate import TO_DIGIT, TO_LETTER, canonicalize, has_known_structure
 from vvi_ia.service.ports import ImageDecodeError
 from vvi_ia.service.validate_evidence import crop_box
 
@@ -190,14 +190,34 @@ def leave_one_out(
     return lists
 
 
+def flagged(
+    variant: Variant,
+    label: str,
+    reading: Reading,
+    confusions: frozenset[Pair],
+    gate: float,
+    t_char: float,
+    structure: bool,
+) -> bool:
+    """¿La variante declara MISMATCH? Con `structure`, una lectura sin el largo ni la estructura de ABC123 o
+    AB123CD es ilegible (duda) y nunca da MISMATCH (regla del 14/11/2026, ya en `plate_check`)."""
+    if structure and not has_known_structure(reading.text):
+        return False
+    return variant(differences(label, reading), reading, confusions, gate, t_char)
+
+
 def evaluate(
     readings: Sequence[Reading],
     lists: Sequence[frozenset[Pair]],
     variant: Variant,
     gate: float,
     t_char: float,
+    structure: bool = False,
 ) -> dict[str, Any]:
-    """S5 (pares cruzados) y U2 (lecturas contra su propia etiqueta) de una variante."""
+    """S5 (pares cruzados) y U2 (lecturas contra su propia etiqueta) de una variante.
+
+    U2 se da sobre todas las lecturas y sobre las que están en alcance (Mercosur y anterior).
+    """
     scope = [(i, r) for i, r in enumerate(readings) if r.in_scope and r.text]
     labels = sorted({r.label for _, r in scope})
     detected = pairs = 0
@@ -206,20 +226,53 @@ def evaluate(
             if label == reading.label:
                 continue
             pairs += 1
-            detected += variant(differences(label, reading), reading, lists[i], gate, t_char)
-    flagged = sum(
-        variant(differences(r.label, r), r, lists[i], gate, t_char) for i, r in enumerate(readings) if r.text
-    )
-    total = sum(1 for r in readings if r.text)
+            detected += flagged(variant, label, reading, lists[i], gate, t_char, structure)
+    own = [
+        (i, r, flagged(variant, r.label, r, lists[i], gate, t_char, structure))
+        for i, r in enumerate(readings)
+        if r.text
+    ]
+    flagged_all = sum(f for _, _, f in own)
+    flagged_scope = sum(f for _, r, f in own if r.in_scope)
+    total = len(own)
+    in_scope = sum(1 for _, r, _ in own if r.in_scope)
     return {
+        "estructura": structure,
         "S5_detectadas": detected,
         "S5_pares": pairs,
         "S5": round(detected / pairs, 4) if pairs else None,
-        "U2_marcadas": flagged,
+        "U2_marcadas": flagged_all,
         "U2_lecturas": total,
-        "U2": round(flagged / total, 4) if total else None,
-        "U2_cota_95": upper_bound(flagged, total),
+        "U2": round(flagged_all / total, 4) if total else None,
+        "U2_cota_95": upper_bound(flagged_all, total),
+        "U2_en_alcance_marcadas": flagged_scope,
+        "U2_en_alcance_lecturas": in_scope,
+        "U2_en_alcance_cota_95": upper_bound(flagged_scope, in_scope),
     }
+
+
+def other_formats(readings: Sequence[Reading], gate: float) -> list[dict[str, Any]]:
+    """Las lecturas de formatos fuera de alcance (motos de dos líneas): antes y con la regla de estructura.
+
+    Solo largos y confianza, nunca el texto.
+    """
+    rows = []
+    for reading in readings:
+        if reading.in_scope or not reading.text:
+            continue
+        before = flagged(v0, reading.label, reading, frozenset(), gate, 0.0, False)
+        after = flagged(v0, reading.label, reading, frozenset(), gate, 0.0, True)
+        rows.append(
+            {
+                "largo_etiqueta": len(reading.label),
+                "largo_lectura": len(reading.text),
+                "confianza": round(reading.conf, 3),
+                "estructura_conocida": has_known_structure(reading.text),
+                "MISMATCH_antes": before,
+                "MISMATCH_con_estructura": after,
+            }
+        )
+    return rows
 
 
 def read_all(args: argparse.Namespace) -> list[Reading]:
@@ -271,14 +324,15 @@ def build_report(readings: Sequence[Reading]) -> dict[str, Any]:
     def add(
         name: str, variant: Variant, lists: Sequence[frozenset[Pair]], gate: float, t_char: float
     ) -> None:
-        rows.append(
-            {
-                "variante": name,
-                "OCR_MIN_CONF": gate if variant is not v2 else None,
-                "t_char": t_char if variant is v2 else None,
-                **evaluate(readings, lists, variant, gate, t_char),
-            }
-        )
+        for structure in (False, True):
+            rows.append(
+                {
+                    "variante": name,
+                    "OCR_MIN_CONF": gate if variant is not v2 else None,
+                    "t_char": t_char if variant is v2 else None,
+                    **evaluate(readings, lists, variant, gate, t_char, structure),
+                }
+            )
 
     for gate in GATES:
         add("V0 actual (difiere en 2 o más)", v0, empty, gate, 0.0)
@@ -301,6 +355,7 @@ def build_report(readings: Sequence[Reading]) -> dict[str, Any]:
         "lista_aprendida_minimo": MIN_PAIR_COUNT,
         "lista_a_priori": sorted(f"{a}/{b}" for a, b in APRIORI_PAIRS),
         "variantes": rows,
+        "otros_formatos": other_formats(readings, CURRENT_MIN_CONF),
     }
 
 
