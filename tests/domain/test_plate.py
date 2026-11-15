@@ -1,6 +1,6 @@
 import pytest
 
-from vvi_ia.domain.plate import PlateCheck, canonicalize, plate_check
+from vvi_ia.domain.plate import PlateCheck, canonicalize, has_known_structure, plate_check
 
 MIN_CONF = 0.6
 
@@ -45,8 +45,13 @@ def test_distancia_uno_es_fuzzy() -> None:
     assert plate_check("AB123CD", "AB129CD", 0.9, MIN_CONF) == PlateCheck.FUZZY
 
 
-def test_distancia_uno_por_largo_distinto_es_fuzzy() -> None:
-    assert plate_check("AB123CD", "AB123C", 0.9, MIN_CONF) == PlateCheck.FUZZY
+def test_distancia_uno_por_un_caracter_distinto_es_fuzzy() -> None:
+    assert plate_check("AB123CD", "AB123CE", 0.9, MIN_CONF) == PlateCheck.FUZZY
+
+
+def test_una_lectura_sin_el_largo_de_ningun_formato_es_ilegible_no_fuzzy() -> None:
+    """Falta un carácter: no es ABC123 ni AB123CD, así que es duda (ilegible), no una patente casi igual."""
+    assert plate_check("AB123CD", "AB123C", 0.9, MIN_CONF) == PlateCheck.UNREADABLE
 
 
 def test_distancia_dos_es_mismatch() -> None:
@@ -90,5 +95,29 @@ def test_la_normalizacion_por_posicion_vale_para_los_dos_formatos(reported: str,
 
 
 def test_la_normalizacion_necesita_el_mismo_largo() -> None:
-    """Con un carácter de menos no hay posiciones que comparar: la confusión cuenta como otra diferencia."""
-    assert plate_check("AB012CD", "ABO1CD", 0.9, MIN_CONF) == PlateCheck.MISMATCH
+    """Con un carácter de menos no hay posiciones que comparar ni formato: la lectura es ilegible (duda)."""
+    assert plate_check("AB012CD", "ABO1CD", 0.9, MIN_CONF) == PlateCheck.UNREADABLE
+
+
+@pytest.mark.parametrize("text", ["ABC123", "AB123CD", "A8C1Z3", "AB1Z3CD", "ABO123", "AB12SCD"])
+def test_has_known_structure_acepta_los_dos_formatos_y_sus_confusiones(text: str) -> None:
+    assert has_known_structure(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", "870", "A07", "870EPB", "ABC12", "ABC1234", "AB123CDE", "1234567", "ABCDEFG", "AB-3CD", "ABC12C3"],
+)
+def test_has_known_structure_rechaza_lo_que_no_es_abc123_ni_ab123cd(text: str) -> None:
+    assert not has_known_structure(text)
+
+
+def test_una_patente_de_dos_lineas_leida_a_medias_no_puede_ser_mismatch() -> None:
+    """Moto (formato fuera de alcance): PARSeq lee solo una línea, con confianza alta. Antes salía RED."""
+    assert plate_check("870EPB", "870", 0.977, MIN_CONF) == PlateCheck.UNREADABLE
+    assert plate_check("A077BEH", "A07", 0.97, MIN_CONF) == PlateCheck.UNREADABLE
+
+
+def test_una_lectura_completa_de_otra_patente_sigue_siendo_mismatch() -> None:
+    assert plate_check("AB123CD", "XY987ZW", 0.95, MIN_CONF) == PlateCheck.MISMATCH
+    assert plate_check("ABC123", "XYZ987", 0.95, MIN_CONF) == PlateCheck.MISMATCH

@@ -118,7 +118,10 @@ def test_readable_plates_descarta_las_fotos_sin_auto_patente_o_lectura_segura(tm
 
 def test_la_salida_dentro_del_repo_se_rechaza(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = cascade.main(
-        ["--data-dir", str(tmp_path), "--out-dir", str(REPO_ROOT / "salida"), "--models-dir", str(tmp_path)]
+        [
+            *("--data-dir", str(tmp_path), "--out-dir", str(REPO_ROOT / "salida")),
+            *("--models-dir", str(tmp_path), "--detail-dir", str(tmp_path)),
+        ]
     )
 
     assert code == 1 and "repositorio" in capsys.readouterr().err
@@ -126,7 +129,10 @@ def test_la_salida_dentro_del_repo_se_rechaza(tmp_path: Path, capsys: pytest.Cap
 
 def test_sin_fotos_no_arranca(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = cascade.main(
-        ["--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "o"), "--models-dir", str(tmp_path)]
+        [
+            *("--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "o")),
+            *("--models-dir", str(tmp_path), "--detail-dir", str(tmp_path)),
+        ]
     )
 
     assert code == 1 and "No hay fotos" in capsys.readouterr().err

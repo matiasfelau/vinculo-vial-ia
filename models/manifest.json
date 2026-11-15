@@ -34,6 +34,23 @@
       "notes": "Un solo modelo para los puertos detector (car, wheel, plate) y face. Columnas de labels en el orden car, wheel, plate, face. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels. Nunca XL ni 2XL (PML 1.0). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
     },
     {
+      "name": "rfdetr_openimages_v2",
+      "version": "rf-detr-small@openimages-v7-v2",
+      "ports": ["detector"],
+      "file": "rfdetr_openimages_v2.onnx",
+      "sha256": "6bcad50b33c56c8f8a2dbb54a404688a34e7d68d6c19eba8063dfa9c36c3ee13",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "RF-DETR Small ajustado con un subconjunto de Open Images V7 (anotaciones CC BY 4.0, imágenes CC BY 2.0), con tools/training/detector_v2/v2_train.py y exportado con v2_export.py. Sin datos de COCO ni de otras fuentes; excluye la prueba de v1 y las negativas de la evaluación (exclusion_check.json).",
+      "commercial": "yes",
+      "notes": "Detector v2, el que usa el servicio por defecto (.env.example, decision del 14/11/2026); v1 (rfdetr_openimages) queda como respaldo y se elige por MODEL_DETECTOR. Solo sirve al puerto detector (no tiene rostro ni rueda). Columnas de labels en el orden de classes: car, truck y van cuentan como car; plate como plate; bus (colectivo) y las confusoras son salidas que no se devuelven. La ambulancia se entreno como van. Open Images anota muchas pickups como Truck, asi que truck cuenta completo. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels. Nunca XL ni 2XL (PML 1.0). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca.",
+      "classes": ["car", "truck", "van", "bus", "plate", "airplane", "boat", "bicycle", "motorcycle", "wheelchair", "traffic_sign", "clock"]
+    },
+    {
       "name": "parseq",
       "version": "parseq-bb5792a6@1902db043c02",
       "ports": ["ocr"],

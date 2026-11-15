@@ -1,5 +1,9 @@
 """Primeros planos de patente realistas: la misma patente a tres niveles de zoom, y qué señales encienden.
 
+**Histórico (12/11/2026):** mide una regla de presencia anterior (la patente o la rueda como señal, CarDD como
+foto de detalle) con exclusiones manuales de negativas. La vigente es `capture_sets.py` y `capture_r1.py`.
+
+
 Los recortes de `presence.py` (patente con medio ancho de margen: la patente ocupa el 50 % del ancho) son más
 ajustados que la foto que saca la app. Acá se arma otro set a partir de las **imágenes completas**:
 

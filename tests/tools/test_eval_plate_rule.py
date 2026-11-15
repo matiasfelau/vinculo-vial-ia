@@ -170,7 +170,7 @@ def scores() -> tuple[dict[str, list[Any]], dict[str, list[Any]], dict[str, list
         "plate_z40": [BOTH, BOTH, PLATE],
         "plate_z60": [BOTH, CAR, BOTH],
     }
-    names = {"negativas_nuevas": ["a", "b", "c", "381d3671020dca70"]}
+    names = {"negativas": ["n0", "n1"], "negativas_nuevas": ["a", "b", "c", "381d3671020dca70"]}
     return base, zooms, names
 
 
@@ -197,6 +197,23 @@ def test_sweep_cuenta_rechazos_por_zoom_negativas_por_rol_y_u3() -> None:
     )
     assert p1["u3_medio_zooms"] is not None
     assert p1["cumple_s1"]  # con tan pocas fotos el tope de 5 no se alcanza
+
+
+def test_las_negativas_excluidas_por_revision_se_sacan_de_nuevas_sin_fondo_y_de_vistas() -> None:
+    base, zooms, names = scores()
+    base["negativas"] = [CAR, NOTHING]
+    names["negativas"] = ["vista-con-camion", "limpia"]
+    names["negativas_nuevas"] = ["a", "b", "c", "sin-auto-pero-con-un-colectivo"]
+
+    rows = rule.sweep(
+        base, zooms, names, excluded_stems=["vista-con-camion", "sin-auto-pero-con-un-colectivo"]
+    )
+    row = next(r for r in rows if r["decisor"] == "or" and r["regla"] == "P1" and rule.is_current(r))
+
+    assert row["negativas_aceptadas"]["general"]["vistas"] == 1
+    assert row["negativas_aceptadas"]["general"]["vistas_sin_excluidas"] == 0
+    assert row["negativas_aceptadas"]["general"]["nuevas"] == 2  # a (patente no) y b: el auto y la de 0,5
+    assert row["negativas_aceptadas"]["general"]["nuevas_sin_fondo"] == 1  # sin la del colectivo
 
 
 def test_la_mejor_que_cumple_s1_minimiza_u3_y_no_existe_si_ninguna_cumple() -> None:

@@ -72,6 +72,7 @@ def test_summarize_corrige_la_precision_sin_reemplazar_la_oficial() -> None:
     assert row["aciertos"] == 6 and row["precision_oficial"] == 0.6
     assert row["precision_corregida"] == 0.8  # (6 + 2) / 10
     assert row["precision_corregida_con_dudosos"] == 0.9
+    assert row["precision_corregida_otros_vehiculos_son_aciertos"] == 0.8  # no hay "otro vehículo": igual
     assert row["por_categoria"][fp_audit.ERROR] == 1
     with pytest.raises(ValueError, match="faltan"):
         fp_audit.summarize(report, fps, {"f0": fp_audit.REAL}, "car")
@@ -90,6 +91,7 @@ def test_combine_es_el_micro_promedio_de_las_clases() -> None:
     assert out["precision_oficial"] == round(8 / 14, 4)
     assert out["precision_corregida"] == round(11 / 14, 4)
     assert out["precision_corregida_con_dudosos"] == round(12 / 14, 4)
+    assert out["precision_corregida_otros_vehiculos_son_aciertos"] == round(11 / 14, 4)
 
 
 def test_sheets_y_corrected_de_punta_a_punta_con_herencia(tmp_path: Path) -> None:

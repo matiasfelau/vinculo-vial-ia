@@ -1,13 +1,26 @@
-"""Detector RF-DETR entrenado con Open Images V7: autos, ruedas, patentes y rostros en una sola sesión.
+"""Detector RF-DETR entrenado con Open Images V7, en una sola sesión ONNX.
 
-Una misma sesión ONNX sirve a dos puertos: `detector` (`VehicleDetector`: `car`, `wheel` y `plate`) y
-`face` (`FaceDetector`). Los dos adaptadores comparten un núcleo que corre el modelo una vez por foto:
-si el servicio llama a los dos con la misma imagen, la segunda llamada reutiliza el resultado.
+Hay dos modelos. **v1** (`rfdetr_openimages`) detecta autos, ruedas, patentes y rostros y sirve a dos
+puertos: `detector` (`VehicleDetector`: `car`, `wheel` y `plate`) y `face` (`FaceDetector`). Los dos
+adaptadores comparten un núcleo que corre el modelo una vez por foto: si el servicio llama a los dos con la
+misma imagen, la segunda llamada reutiliza el resultado. El camino `MODEL_FACE=rfdetr_openimages` existe
+solo para v1.
+
+**v2** (`rfdetr_openimages_v2`) sirve solo al puerto `detector`. Sus clases salen del manifest (`classes`, en
+el orden de las columnas de `labels`): `car`, `truck` y `van` cuentan todas como `car` (presencia de un
+vehículo), `plate` como `plate`, y el resto solo existe para que el modelo aprenda a no confundirlo: no se
+devuelve. Eso incluye el colectivo (`bus`, decisión del 14/11/2026: no es un vehículo para R1) y las
+confusoras (avión, barco, bicicleta, moto, silla de ruedas, cartel, reloj). No tiene rostro ni rueda. Si una
+consulta puntúa en dos clases de presencia, se devuelve una sola caja `car`, con la mayor.
+
+Limitaciones del mapeo: Open Images no distingue un flete de un camión pesado y anota muchas pickups como
+`Truck`, así que `truck` se mantiene completo y cuenta como vehículo. Y la ambulancia se entrenó como `van`
+(no es una salida propia): sigue contando, y para que no cuente habría que reentrenar.
 
 Preproceso igual al de `RFDETR.predict()` (la foto completa a la resolución del modelo, normalizada con
 ImageNet). El ONNX (`tools/training/detector/export.py`) devuelve `dets` (cajas cxcywh normalizadas) y
-`labels` (logits por clase). Las columnas de `labels` siguen el orden de `LABELS`, que es el orden en
-que `tools/training/detector/dataset.py` declara las categorías: no se puede cambiar sin reentrenar.
+`labels` (logits por clase). En v1 las columnas siguen el orden de `LABELS`, que es el orden en que
+`tools/training/detector/dataset.py` declara las categorías: no se puede cambiar sin reentrenar.
 
 Mosaico opcional (`tiling.py`): con `face_tiling` o `plate_tiling` la foto grande se recorre también en
 tiles y se fusionan las cajas de rostros o de patentes. Es más lento (una inferencia por tile) y solo
@@ -20,7 +33,7 @@ a propósito porque el dominio decide cuáles tapar y ante la duda se tapa.
 import logging
 import threading
 import weakref
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import cv2
@@ -42,12 +55,22 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "rfdetr_openimages"
 FACE = "face"
+MODEL_NAME_V2 = "rfdetr_openimages_v2"
 LABELS: Mapping[int, str] = {0: BoxLabel.CAR, 1: BoxLabel.WHEEL, 2: BoxLabel.PLATE, 3: FACE}
+# Clase del modelo → caja que se devuelve. Una clase que no está acá (una confusora) no se devuelve.
+ROLES: Mapping[str, str] = {
+    "car": BoxLabel.CAR,
+    "truck": BoxLabel.CAR,
+    "van": BoxLabel.CAR,
+    "wheel": BoxLabel.WHEEL,
+    "plate": BoxLabel.PLATE,
+    FACE: FACE,
+}
 VEHICLE_LABELS = frozenset({BoxLabel.CAR, BoxLabel.WHEEL, BoxLabel.PLATE})
 OUTPUT_NAMES = ("dets", "labels")
 DETECTOR_MIN_CONF_PARAM = "detector_min_conf"
 REDACTION_MIN_CONF_PARAM = "redaction_min_conf"
-DEFAULT_DETECTOR_MIN_CONF = 0.40
+DEFAULT_DETECTOR_MIN_CONF = 0.35
 DEFAULT_REDACTION_MIN_CONF = 0.10
 FACE_TILING_PARAM = "face_tiling"
 PLATE_TILING_PARAM = "plate_tiling"
@@ -83,7 +106,13 @@ def decode_boxes(
     thresholds: Mapping[str, float],
     names: Mapping[int, str] = LABELS,
 ) -> list[Box]:
-    """Cajas en píxeles de la foto original `size = (alto, ancho)`, de más a menos confiables."""
+    """Cajas en píxeles de la foto original `size = (alto, ancho)`, de más a menos confiables.
+
+    `names` dice qué clase es cada columna y solo se decodifican las que lista. Varias columnas pueden dar la
+    misma caja (`ROLES`: auto, camión y van son `car`): cada consulta aporta una sola caja por
+    tipo, con la mayor de sus confianzas. Una clase que no está en `ROLES` es su propio tipo (así la usa el
+    detector de daños); las confusoras de v2 no se listan en `names` (ver `detector_columns`).
+    """
     if dets.ndim != BOXES_NDIM or dets.shape[0] != 1 or dets.shape[2] != BOX_VALUES:
         raise ValueError("forma inesperada de dets")
     if labels.ndim != BOXES_NDIM or labels.shape[:2] != dets.shape[:2] or labels.shape[2] <= max(names):
@@ -92,11 +121,13 @@ def decode_boxes(
         raise ValueError("la salida del modelo no es finita")
     height, width = size
     scale = np.array([width, height, width, height], np.float32)
-    boxes: list[Box] = []
+    columns: dict[str, list[int]] = {}
     for column, name in names.items():
-        scores = 1.0 / (
-            1.0 + np.exp(-np.clip(labels[0, :, column].astype(np.float32), -LOGIT_CLIP, LOGIT_CLIP))
-        )
+        columns.setdefault(ROLES.get(name, name), []).append(column)
+    boxes: list[Box] = []
+    for name, label_columns in columns.items():
+        logits = labels[0][:, label_columns].astype(np.float32).max(axis=1)
+        scores = 1.0 / (1.0 + np.exp(-np.clip(logits, -LOGIT_CLIP, LOGIT_CLIP)))
         for query in np.nonzero(scores > thresholds[name])[0]:
             cx, cy, box_width, box_height = dets[0, query]
             corners = np.array(
@@ -181,6 +212,25 @@ class RfDetrDetections:
         self._full.put(img, boxes)
         return list(boxes)
 
+    def detect_by_class(self, img: Pixels) -> dict[str, list[Box]] | None:
+        """Las cajas de cada clase del modelo por separado, sin fundirlas (para evaluar; sin memoria).
+
+        `detect_all` devuelve una sola caja `car` por consulta (la mayor de camión, van y auto). Para saber
+        qué clase dejó pasar una foto hace falta verlas aparte: cada clase del modelo que se devuelve (`car`,
+        `truck`, `van`, `plate`...) con sus cajas. `None` si el modelo falla.
+        """
+        try:
+            tensor = preprocess(img, *self._input_size)
+            dets, labels = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
+            size = (img.shape[0], img.shape[1])
+            return {
+                name: decode_boxes(dets, labels, size, self._thresholds, {column: name})
+                for column, name in self._names.items()
+            }
+        except Exception as exc:
+            logger.warning("falló la inferencia del detector", extra={"error": type(exc).__name__})
+            return None
+
     def detect_tiled(self, img: Pixels) -> list[Box] | None:
         """El pase entero (reutilizado de `detect_all`) más los tiles de las clases con mosaico.
 
@@ -229,6 +279,10 @@ class RfDetrVehicleDetector:
         boxes = self._core.detect_all(img)
         return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
 
+    def detect_by_class(self, img: Pixels) -> dict[str, list[Box]] | None:
+        """Las cajas por clase del modelo, sin fundir (evaluación: qué clase dejó pasar una foto)."""
+        return self._core.detect_by_class(img)
+
     def detect_plates(self, img: Pixels) -> list[Box] | None:
         """El pase entero más las patentes que encuentra el mosaico (solo con `PLATE_TILING`)."""
         boxes = self._core.detect_tiled(img)
@@ -273,6 +327,25 @@ def _tiling(params: Mapping[str, Any]) -> Tiling | None:
     )
 
 
+def detector_columns(declared: Sequence[str]) -> dict[int, str]:
+    """Columnas que se decodifican, de las `classes` que declara el manifest (en el orden de la salida).
+
+    Las confusoras (avión, barco, reloj…) ocupan una columna pero no se devuelven: quedan afuera.
+    """
+    return {column: name for column, name in enumerate(declared) if name in ROLES}
+
+
+def _names(ctx: ModelContext) -> Mapping[int, str]:
+    """Clase de cada columna: las `classes` del manifest o, si no las declara, las de v1."""
+    declared = ctx.model.entry.classes
+    if declared is None:
+        return LABELS
+    columns = detector_columns(declared)
+    if BoxLabel.CAR not in {ROLES[name] for name in columns.values()}:
+        raise ValueError("el modelo no declara ninguna clase de auto")
+    return columns
+
+
 def _core(ctx: ModelContext) -> RfDetrDetections:
     """El núcleo del modelo: se construye una vez y lo comparten los dos puertos."""
     if "detector_core" not in ctx.model.shared:
@@ -287,6 +360,7 @@ def _core(ctx: ModelContext) -> RfDetrDetections:
             session.input_names[0],
             (shape[2], shape[3]),
             _thresholds(ctx.params),
+            names=_names(ctx),
             tiling=_tiling(ctx.params),
         )
         # Inferencia de prueba sobre una imagen gris: si el archivo no se comporta como el modelo
@@ -301,6 +375,12 @@ def _core(ctx: ModelContext) -> RfDetrDetections:
 
 @register("detector", MODEL_NAME)
 def build_vehicle(ctx: ModelContext) -> RfDetrVehicleDetector:
+    return RfDetrVehicleDetector(_core(ctx), ctx.model.version)
+
+
+@register("detector", MODEL_NAME_V2)
+def build_vehicle_v2(ctx: ModelContext) -> RfDetrVehicleDetector:
+    """v2: solo `detector`. No se registra para `face`: `MODEL_FACE=rfdetr_openimages_v2` no arranca."""
     return RfDetrVehicleDetector(_core(ctx), ctx.model.version)
 
 

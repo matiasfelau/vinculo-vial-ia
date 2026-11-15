@@ -1,6 +1,7 @@
 """Latencia de la cascada completa por alerta, en CPU y con los modelos reales.
 
-Arma alertas con fotos reales de tus datasets (autos con patente de Open Images y daños de CarDD) y corre el
+Arma alertas con fotos de tus datasets (autos con patente y zonas del vehículo, como las que arma
+`capture_sets.py` con el encuadre de 1-2 m; CarDD no se usa) y corre el
 caso de uso `ValidateEvidence` de punta a punta: la misma cascada y los mismos adaptadores que el servicio,
 de a una alerta por vez. La foto GENERAL y la PLATE son la misma (un auto con patente visible) y la patente
 reportada es la que lee el OCR, para que la cascada llegue a todas las etapas, incluida la redacción, en
@@ -45,14 +46,14 @@ from vvi_ia.service.payload import EvidenceItem, EvidenceUploaded
 from vvi_ia.service.validate_evidence import ValidateEvidence
 
 SELECTION = {
-    "detector": "rfdetr_openimages",
+    "detector": "rfdetr_openimages_v2",
     "face": "scrfd_10g",
     "segmenter": "rfdetr_seg_coco",
     "embedder": "dinov2_vits14",
     "ocr": "parseq",
-    "damage": "rfdetr_cardd",
+    "damage": "null",  # el daño no cuenta en ninguna regla de la cascada
 }
-RELAXED = {"reid_t": -1.0, "damage_presence_t": 0.0}
+RELAXED = {"reid_t": -1.0}
 PLATE_READ_CONF = 0.9  # la patente reportada tiene que ser la que lee el OCR con seguridad
 MIN_READABLE = 12
 STAGES = ("load", "vehicle", "burst", "plate", "context", "redaction")
@@ -217,9 +218,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="MODEL_SEGMENTER=null: los autos salen de las cajas del detector",
     )
-    parser.add_argument(
-        "--no-damage", action="store_true", help="MODEL_DAMAGE=null (sin caja de daño en DETAIL)"
-    )
+    parser.add_argument("--detector", help="MODEL_DETECTOR (por defecto rfdetr_openimages_v2)")
     parser.add_argument("--redact-workers", type=int, help="REDACT_WORKERS (por defecto el del servicio)")
     parser.add_argument(
         "--real-thresholds",
@@ -231,16 +230,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         help="reescala las fotos a este lado mayor en px (p. ej. 4000 para fotos de celular de 4000 x 3000)",
     )
-    parser.add_argument("--general-dir", type=Path, help="autos (por defecto <data-dir>/damage-fp/images)")
-    parser.add_argument("--detail-dir", type=Path, help="daños (por defecto <data-dir>/cardd-detector/test)")
+    parser.add_argument(
+        "--general-dir", type=Path, help="autos con patente (por defecto <data-dir>/damage-fp/images)"
+    )
+    parser.add_argument(
+        "--detail-dir", type=Path, required=True, help="zonas del vehículo (los `detail` de capture_sets)"
+    )
     args = parser.parse_args(argv)
     for flag, value in (("--out-dir", args.out_dir), ("--models-dir", args.models_dir)):
         if value is None:
             parser.error(f"indicá {flag} o definí su variable de entorno")
-    if args.data_dir is None and (args.general_dir is None or args.detail_dir is None):
-        parser.error("indicá --data-dir (TRAIN_DATA_DIR) o --general-dir y --detail-dir")
+    if args.data_dir is None and args.general_dir is None:
+        parser.error("indicá --data-dir (TRAIN_DATA_DIR) o --general-dir")
     args.general_dir = args.general_dir or Path(args.data_dir) / "damage-fp" / "images"
-    args.detail_dir = args.detail_dir or Path(args.data_dir) / "cardd-detector" / "test"
     return args
 
 
@@ -281,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
     if Path(args.out_dir).resolve().is_relative_to(REPO_ROOT):
         print("La salida no puede estar dentro del repositorio.", file=sys.stderr)
         return 1
-    folders = {"autos": args.general_dir, "daños": args.detail_dir}
+    folders = {"autos": args.general_dir, "detalles": args.detail_dir}
     pools = {name: photos_in(Path(folder)) for name, folder in folders.items()}
     for name, pool in pools.items():
         if not pool or Path(folders[name]).resolve().is_relative_to(REPO_ROOT):
@@ -301,9 +303,10 @@ def main(argv: list[str] | None = None) -> int:
         **relaxed,
     )
     selection = dict(SELECTION)
-    for flag, port in ((args.no_segmenter, "segmenter"), (args.no_damage, "damage")):
-        if flag:
-            selection[port] = "null"
+    if args.no_segmenter:
+        selection["segmenter"] = "null"
+    if args.detector:
+        selection["detector"] = args.detector
     try:
         models = build_models(
             selection, args.manifest, args.models_dir, args.threads, adapter_params(settings)
@@ -344,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
 
     def pick_detail() -> Path:
         while True:
-            path = prepare(rng.choice(pools["daños"]))
+            path = prepare(rng.choice(pools["detalles"]))
             if shows_a_part(path):
                 return path
 
@@ -371,7 +374,6 @@ def main(argv: list[str] | None = None) -> int:
     report: dict[str, Any] = {
         "modelos": models.versions(),
         "segmentador": not args.no_segmenter,
-        "dano": not args.no_damage,
         "hilos_onnx": args.threads,
         "redaccion": not args.no_redaction,
         "mosaico_patentes": args.plate_tiling == "on",

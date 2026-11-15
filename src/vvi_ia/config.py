@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     redact_max_side_px: int = Field(default=1600, ge=1)
     redact_workers: int = Field(default=3, ge=1)  # fotos que se planifican a la vez al redactar
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
-    detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
+    detector_min_conf: float = Field(default=0.35, ge=0.0, le=1.0)
     # Presencia de auto en cada foto: ocupa al menos esta fracción de la foto (tools/eval/presence.py)
     presence_min_area: float = Field(default=0.05, ge=0.0, le=1.0)
     # Lado mayor al que se reduce cada foto antes de los modelos; las cajas vuelven a la resolución original
