@@ -34,11 +34,7 @@ SIZE = 100
 REPORTED_PLATE = "TST123"
 BUCKET = "bucket-de-prueba"
 
-GENERAL, PLATE, CONTEXT = 10, 20, 40
-
-
-def detail_marker(index: int) -> int:
-    return 30 + index
+GENERAL, PLATE = 10, 20
 
 
 def marker_of(img: Pixels) -> int:
@@ -193,8 +189,6 @@ class FakeModels:
 
 def happy_models() -> FakeModels:
     """Modelos que producen GREEN en CRASHED y en PARKED_ON_GARAGE (patente = REPORTED_PLATE)."""
-    curb = rect(80, 86, 0, 20) | rect(80, 86, 81, 100)
-    cut = rect(80, 86, 20, 81)
     embedder = FakeEmbedder()
     embedder.by_marker_area = {
         (GENERAL, 8100): vec(
@@ -207,22 +201,18 @@ def happy_models() -> FakeModels:
             {
                 GENERAL: [car_box(), plate_box()],
                 PLATE: [car_box(), plate_box(0.95)],
-                CONTEXT: [car_box(), Box(35, 60, 45, 80, 0.9, BoxLabel.WHEEL)],
-                **{detail_marker(i): [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR)] for i in range(3)},
             }
         ),
         cars=FakeCarSegmenter(
             {
                 GENERAL: [CarInstance(rect(10, 90, 10, 90))],
                 PLATE: [CarInstance(rect(10, 90, 10, 90))],
-                CONTEXT: [CarInstance(rect(40, 80, 30, 70)), CarInstance(rect(20, 40, 0, 20))],
-                **{detail_marker(i): [] for i in range(3)},  # en un primer plano no se segmenta ningún auto
             }
         ),
-        curb=FakeCurbSegmenter({CONTEXT: (curb, cut)}),
+        curb=FakeCurbSegmenter({}),
         embedder=embedder,
         plate=FakePlateReader({GENERAL: (REPORTED_PLATE, 0.9), PLATE: (REPORTED_PLATE, 0.95)}),
-        damage=FakeDamageDetector({detail_marker(i): [Box(10, 10, 50, 50, 0.8)] for i in range(3)}),
+        damage=FakeDamageDetector({}),
         face=FakeFaceDetector(),  # None en todas las fotos, como el nulo: la redacción no depende de él
     )
 
@@ -322,17 +312,13 @@ class Scenario:
         self.payload = self.payload.model_copy(update={"pat_enc_ia": base64.b64encode(raw).decode()})
 
 
-def build_scenario(alert_type: AlertType = AlertType.CRASHED, details: int = 1) -> Scenario:
+def build_scenario(alert_type: AlertType = AlertType.CRASHED) -> Scenario:
     alert_id = str(uuid.uuid4())
     store = FakeStore()
     roles: list[tuple[EvidenceRole, int, int]] = [
         (EvidenceRole.GENERAL, 0, GENERAL),
         (EvidenceRole.PLATE, 0, PLATE),
     ]
-    if alert_type == AlertType.CRASHED:
-        roles += [(EvidenceRole.DETAIL, i, detail_marker(i)) for i in range(details)]
-    else:
-        roles.append((EvidenceRole.CONTEXT, 0, CONTEXT))
     items: list[EvidenceItem] = []
     for role, index, marker in roles:
         ciphertext = FakeDecryptor.seal(f"IMG{marker}".encode(), alert_id)

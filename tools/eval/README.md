@@ -15,6 +15,12 @@ Todo lo que se evalúa acá usa **fotos con patentes y caras de terceros**. Por 
 Antes de empezar hay que tener hecho "Antes de empezar" de [tools/export/README.md](../export/README.md)
 (dependencias instaladas) y el modelo exportado en `MODELS_DIR`.
 
+> **US-15 (15/11/2026): toda alerta tiene dos fotos, GENERAL (el auto) y PLATE (la patente).** Los roles DETAIL y CONTEXT
+> dejaron de existir en el servicio: una parte `detail` o `context` es evidencia inválida. Las reglas R1, R2 y R3 no
+> cambian; solo desaparece la comparación de DETAIL y CONTEXT, porque esas fotos ya no existen. Las mediciones de abajo
+> que hablan de DETAIL, CONTEXT o de alertas de 3 y 5 fotos son el registro de lo que se midió en su momento y **no se
+> rehicieron**; los conjuntos `detail` de `capture_sets.py` siguen sirviendo para medir primeros planos de partes del auto.
+
 ## OCR de patentes (`ocr.py`)
 
 Mide qué tan bien lee `parseq` las patentes del dataset "patentes" de Roboflow
@@ -811,20 +817,19 @@ detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 Mide cuánto tarda **una alerta entera** en CPU con los modelos reales: el mismo caso de uso, los mismos
 adaptadores y el mismo ONNX que el servicio, de a una alerta por vez. Se arma con autos de Open Images (la
 foto GENERAL y la PLATE son la misma, con la patente que lee el OCR como patente reportada, para que la
-cascada llegue a todas las etapas en lugar de cortarse en un RED) y zonas del vehículo como foto de detalle.
+cascada llegue a todas las etapas en lugar de cortarse en un RED). Desde US-15 las alertas son de dos fotos.
 **CarDD no se usa** (decisión del 12/11/2026): las fotos salen de `capture_sets.py` (ver "R1 con el encuadre de 1-2 m").
 El detector por defecto es v2 (`--detector` elige otro) y el daño no está en la cascada.
 
 ```powershell
 $env:EVAL_OUT = "D:\vv-eval\out\cascade"
 $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --general-dir D:\vv-eval\capture-12m\plate --detail-dir D:\vv-eval\capture-12m\detail --alerts 40
+uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --general-dir D:\vv-eval\capture-12m\plate --alerts 40
 ```
 
 | Opción | Para qué |
 |---|---|
 | `--alerts N` | Alertas por escenario (20 por defecto), más una de calentamiento que no cuenta. |
-| `--detail-dir CARPETA` | **Obligatoria**: las fotos de detalle (los `detail` de `capture_sets.py`). |
 | `--general-dir CARPETA` | Autos con patente (por defecto `<TRAIN_DATA_DIR>\damage-fp\images`; la serie `plate` de `capture_sets.py` sirve). |
 | `--detector NOMBRE` | `MODEL_DETECTOR` (por defecto `rfdetr_openimages_v2`). |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
@@ -834,10 +839,14 @@ uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --general
 | `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
 | `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
 
-Mide tres escenarios (CRASHED de 3 fotos, CRASHED de 5 y PARKED_ON_GARAGE de 3) y muestra la mediana, el p95 y el
+Mide dos escenarios (CRASHED y PARKED_ON_GARAGE, de dos fotos cada uno: general y patente) y muestra la mediana, el p95 y el
 máximo de cada alerta, y la mediana de cada etapa (`load`, `vehicle`, `burst`, `plate`, `context`, `redaction`).
 
 ### Resultados de referencia
+
+> Las tablas de esta sección y de las siguientes son **anteriores a US-15** y miden alertas de 3 y 5 fotos (con
+> detalle o contexto); no se repitieron con dos fotos. Una alerta de dos fotos hace menos trabajo que la de 3, así que su
+> latencia es menor que la de la fila de 3 fotos; hay que medirla de nuevo con `cascade.py` en el hardware real.
 
 Medianas por alerta en un AMD Ryzen 5 3600 (6 núcleos), con los modelos de la configuración de redacción
 (`rfdetr_openimages` para autos y patentes, `scrfd_10g` para rostros, redacción activa, rebajes simulados),
@@ -1492,7 +1501,7 @@ Los 330 y 1 615 ms de media del detector (un pase y con mosaico) de una repetici
 
 **Decisión (11/11/2026): la clase `wheel` salió de la regla R1.** `_has_car` cuenta ahora un `car` del detector (y, en
 PLATE y DETAIL, una `plate`), una instancia del segmentador si lo hay y, en DETAIL, el daño si lo hay. Los helpers de
-`tools/eval` (`presence.SERVICE_RULE`, `cascade.has_part`) siguen la misma regla; `presence.service_rules(wheel=True)`
+`tools/eval` (`presence.SERVICE_RULE`) siguen la misma regla; `presence.service_rules(wheel=True)`
 reconstruye la anterior para comparar. Las tablas de arriba (a, b, c1, c2) son de antes de esa decisión y se dejan tal cual.
 Sin la rueda, la regla oficial (sin segmentador ni daño) rechaza 5 / 1 / 29 válidas (GENERAL / PLATE / DETAIL) y acepta
 15 / 20 / 20 de las 1 200 fotos sin auto nuevas.
@@ -2107,10 +2116,9 @@ positivos de auto que no lo son casi no existen (2 de 74: un scooter y un cartel
 > `REID_T` = **0,2565** (el mayor umbral con la cota de U1 <= 1 % en validación). La opción conservadora, **0,0638**
 > (el menor con S4 >= 70 %), queda documentada abajo.
 
-**Alcance de R2 (decisión del 15/11/2026): R2 compara solo la foto GENERAL contra la de PLATE.** La foto de detalle probablemente se elimine
-del contrato, así que no se calibra, no se mide y no se simula (se descartó su simulación, que ya se había ajustado). En el servicio, DETAIL y
-CONTEXT no se comparan: sin un umbral calibrado para esas comparaciones, no pueden dar `BURST_MISMATCH`. La validación de roles de foto del servicio
-(qué fotos exige cada tipo de alerta) **no se tocó**: el cambio de contrato se decide aparte.
+**Alcance de R2 (decisión del 15/11/2026): R2 compara solo la foto GENERAL contra la de PLATE.** La foto de detalle no se calibra, no se mide y
+no se simula (se descartó su simulación, que ya se había ajustado). Con US-15 (15/11/2026) el contrato la eliminó: las alertas traen
+exactamente dos fotos, GENERAL y PLATE, y la validación de roles de foto del servicio solo acepta esas dos.
 
 **Qué compara R2 en el servicio.** El recorte de la **caja del vehículo dominante del detector** (v2, auto 0,35), **sin máscaras del segmentador**: es
 el recorte con el que se calibró. El segmentador (`rfdetr_seg_coco`) sigue decidiendo la presencia (R1) pero ya no interviene en R2.
@@ -2289,19 +2297,20 @@ con el recorte de la caja, el umbral calibrado (0,074) es casi el actual (0,075)
 - **U1 es optimista:** los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma
   luz), así que se parecen más que dos fotos de personas distintas en momentos distintos. El S4 de los pares difíciles, no.
 - **Puede haber diferencias con el parque automotor argentino:** las marcas y modelos están anotados en chino (BYD, Changan...).
-- **No hay primeros planos de partes del auto:** el recorte de DETAIL (un primer plano) no es comparable; el servicio ya
-  lo trata como "sin auto que comparar".
+- **No hay primeros planos de partes del auto:** el recorte de un primer plano no es comparable. Desde US-15 el servicio
+  ya no recibe fotos de detalle.
 - **Pocos autos de prueba** (59, sin reflectivos): las cotas de los grupos chicos (luz estándar, 26 autos) son anchas.
 - Ajustado con la partición de entrenamiento (293 autos de luz estándar y oscura): hay que repetirlo con los reflectivos.
 
 ## Veredicto de la IA: solo GREEN o RED
 
-La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
+La IA emite **GREEN o RED**; ya no hay amarillo. Toda alerta (CRASHED y PARKED_ON_GARAGE) lleva exactamente dos fotos,
+GENERAL y PLATE, y la redacción procesa las dos (sin las dos redactadas no hay veredicto aprobable). RED solo con evidencia firme:
 
 | Regla | Código | Cuándo |
 |---|---|---|
-| R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay un vehículo (la misma regla para GENERAL, PLATE, DETAIL y CONTEXT): una caja `car` del detector o una instancia del segmentador (det ∨ seg) que ocupa al menos `PRESENCE_MIN_AREA` de la foto. La patente, la rueda y el daño no cuentan. |
-| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,2565, calibrado solo con 3DRealCar). Dudoso o no comparable: GREEN. |
+| R1 | `NO_VEHICLE` (fraude) | En alguna de las dos fotos no hay un vehículo (la misma regla para GENERAL y PLATE): una caja `car` del detector o una instancia del segmentador (det ∨ seg) que ocupa al menos `PRESENCE_MIN_AREA` de la foto. La patente, la rueda y el daño no cuentan. |
+| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que GENERAL y PLATE son otro auto (coseno < `REID_T`, provisorio: 0,2565, calibrado solo con 3DRealCar). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
 | R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE`, `VALIDATION_FAILED` | Sin fraude: foto ilegible, no se pudo redactar todas las fotos, o el mensaje terminó en la DLQ sin veredicto (`VALIDATION_FAILED`, ver abajo). |
 | R5 | (sin códigos) | Todo lo demás: GREEN. |
@@ -2319,8 +2328,8 @@ como en cualquier veredicto: una redelivery repite el mismo aviso y Alert lo ded
 - El aviso lleva solo el `alert_id`, el `eventId` de causa y el código; nunca se loguea el payload ni `pat_enc_ia`.
 
 Salieron de la cascada el chequeo de **rebajes** (experimental y en construcción: `MODEL_CURB` vacío, sin pesos) y el
-chequeo de **daño**: el daño tampoco cuenta como presencia en DETAIL (decisión del 12/11/2026), que sigue exactamente la
-regla de GENERAL. Verificar el daño o la rampa es trabajo futuro. `DAMAGE_PRESENCE_T` queda solo como la confianza
+chequeo de **daño**: el daño no cuenta como presencia en ninguna foto (decisión del 12/11/2026). Verificar el daño o la
+rampa es trabajo futuro. `DAMAGE_PRESENCE_T` queda solo como la confianza
 mínima del adaptador de daño (`MODEL_DAMAGE`, experimental).
 
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)

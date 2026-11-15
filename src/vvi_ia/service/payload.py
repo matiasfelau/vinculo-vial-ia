@@ -13,20 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from vvi_ia.domain.model import AlertType, EvidenceRole
 
 MAX_PAT_ENC_IA_CHARS = 1024
-MAX_DETAIL_PHOTOS = 3
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
+# Todo tipo de alerta pide exactamente dos fotos: GENERAL (el auto) y PLATE (la patente).
+_TWO_PHOTOS: Mapping[EvidenceRole, range] = {
+    EvidenceRole.GENERAL: range(1, 2),
+    EvidenceRole.PLATE: range(1, 2),
+}
 _ROLE_COUNTS: Mapping[AlertType, Mapping[EvidenceRole, range]] = {
-    AlertType.CRASHED: {
-        EvidenceRole.GENERAL: range(1, 2),
-        EvidenceRole.PLATE: range(1, 2),
-        EvidenceRole.DETAIL: range(1, MAX_DETAIL_PHOTOS + 1),
-    },
-    AlertType.PARKED_ON_GARAGE: {
-        EvidenceRole.GENERAL: range(1, 2),
-        EvidenceRole.PLATE: range(1, 2),
-        EvidenceRole.CONTEXT: range(1, 2),
-    },
+    AlertType.CRASHED: _TWO_PHOTOS,
+    AlertType.PARKED_ON_GARAGE: _TWO_PHOTOS,
 }
 
 
@@ -82,9 +78,6 @@ class EvidenceUploaded(BaseModel):
     def _evidence_matches_alert_type(self) -> Self:
         allowed = _ROLE_COUNTS[self.alert_type]
         counts = Counter(item.role for item in self.evidence)
-        for role in counts:
-            if role not in allowed:
-                raise ValueError(f"el rol {role} no corresponde a {self.alert_type}")
         for role, valid in allowed.items():
             if counts[role] not in valid:
                 raise ValueError(f"cantidad inválida de fotos con rol {role}")

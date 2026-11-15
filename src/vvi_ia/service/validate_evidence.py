@@ -308,13 +308,12 @@ class ValidateEvidence:
             reported = self._reported_plate(payload)
 
         run = _Run(models=self._models)
-        by_role = {role: [i for i in images if i.role == role] for role in EvidenceRole}
-        general, plate_img = by_role[EvidenceRole.GENERAL][0], by_role[EvidenceRole.PLATE][0]
+        general = next(i for i in images if i.role == EvidenceRole.GENERAL)
+        plate_img = next(i for i in images if i.role == EvidenceRole.PLATE)
         codes: Codes = []
 
         with _timed(durations, "vehicle"):
-            ordered = [general, plate_img, *by_role[EvidenceRole.DETAIL], *by_role[EvidenceRole.CONTEXT]]
-            if not self._vehicle_present(run, ordered, codes):
+            if not self._vehicle_present(run, [general, plate_img], codes):
                 return self._finish(payload, codes, Scores(), durations)
         with _timed(durations, "burst"):
             similarity = self._burst(run, general, plate_img, codes)
@@ -368,12 +367,11 @@ class ValidateEvidence:
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
         """R1. `False` si en alguna foto no hay evidencia de un vehículo (RED, fraude): se corta la cascada.
 
-        La regla es la misma para todas las fotos (GENERAL, PLATE, DETAIL y CONTEXT): tiene que haber un
-        vehículo, que es una caja `car` del detector o una instancia del segmentador (det ∨ seg). Ni la
-        patente ni la rueda ni una caja de daño cuentan como presencia: alcanza una patente arrancada o
-        impresa para hacer pasar cualquier imagen. DETAIL no tiene una regla propia (verificar el daño o la
-        rampa es trabajo futuro). Solo hay NO_VEHICLE si todos los modelos consultados respondieron y
-        ninguno encontró nada; si no se pudo decidir, no se penaliza.
+        La regla es la misma para las dos fotos (GENERAL y PLATE): tiene que haber un vehículo, que es una
+        caja `car` del detector o una instancia del segmentador (det ∨ seg). Ni la patente ni la rueda ni
+        una caja de daño cuentan como presencia: alcanza una patente arrancada o impresa para hacer pasar
+        cualquier imagen. Verificar el daño o la rampa es trabajo futuro. Solo hay NO_VEHICLE si todos los
+        modelos consultados respondieron y ninguno encontró nada; si no se pudo decidir, no se penaliza.
         """
         for image in images:
             if self._has_car(run, image) is False:
@@ -382,7 +380,7 @@ class ValidateEvidence:
         return True
 
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
-        """¿Hay un vehículo que ocupe al menos `presence_min_area` de la foto? Igual en todos los roles.
+        """¿Hay un vehículo que ocupe al menos `presence_min_area` de la foto? Igual en las dos fotos.
 
         Cuenta una caja `car` del detector o una instancia de auto del segmentador. `None` si no se pudo
         decidir (sin hallazgos y algún modelo sin respuesta).
@@ -403,8 +401,8 @@ class ValidateEvidence:
         """R2: ¿GENERAL y PLATE muestran el mismo auto? Devuelve la similitud si se calculó.
 
         Es la **única** comparación de re-ID (la de la foto general contra la de patente: la trompa o la
-        cola, cortada entre el capot y el parabrisas); DETAIL y CONTEXT no se comparan. Se compara el
-        recorte de la caja del vehículo dominante del detector, sin máscaras. Solo hay BURST_MISMATCH si
+        cola, cortada entre el capot y el parabrisas). Se compara el recorte de la caja del vehículo
+        dominante del detector, sin máscaras. Solo hay BURST_MISMATCH si
         la re-ID confirma que es otro auto (coseno menor que `REID_T`); si no se puede comparar (el
         detector no ve un vehículo o no hay embedding), no hay código.
         """
