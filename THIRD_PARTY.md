@@ -85,6 +85,7 @@ Dependencias de ejecución de `pyproject.toml` (licencia según los metadatos de
 | COCO | Solo a través de los pesos preentrenados de RF-DETR-Seg (el dataset no se descarga) | Anotaciones CC BY 4.0; las imágenes tienen las licencias de Flickr de cada foto | Los pesos los publica Roboflow con Apache-2.0; las licencias de las imágenes no se auditaron |
 | 3DRealCar | Ajuste de la re-identificación (`dinov2_vits14_reid_v2`) y calibración de `REID_T` | Apache-2.0 | `yes` |
 | "patentes" (Roboflow Universe) | Evaluación del OCR y calibración de `OCR_MIN_CONF`; no se usa para entrenar | CC BY 4.0 | `yes`, con atribución |
+| "Patentes Argentinas - Master" (Roboflow Universe) | Evaluación del OCR (300 patentes recortadas y etiquetadas a mano); no se usa para entrenar | Public Domain, declarada por quien lo publicó | `yes`; el origen de las fotos no se auditó (solo se evalúa con él y no se distribuye) |
 | Fotos de referencia propias | Solo para medir el encuadre de captura (1-2 m); no calibran ningún umbral y no entran a ningún conjunto | Propias | No aplica |
 
 Los datasets viven fuera del repositorio y de la imagen.
@@ -140,6 +141,27 @@ Los datasets viven fuera del repositorio y de la imagen.
   caja y las etiquetas se normalizaron (mayúsculas, solo letras y dígitos). Además, se
   corrigieron etiquetas y se excluyeron fotos ilegibles mediante un archivo de correcciones
   (`label_overrides.csv`) que se guarda fuera del repositorio; el export original no se modificó.
+
+#### "Patentes Argentinas - Master" (Roboflow Universe)
+
+- **Uso:** evaluación del OCR: 300 patentes recortadas y etiquetadas a mano para medir la lectura de PARSeq (conjunto
+  armado con `tools/eval/ocr_set.py`). No se usa para entrenar.
+- **Proyecto:** `xenon-bo5e9/patentes-argentinas-master`,
+  <https://universe.roboflow.com/xenon-bo5e9/patentes-argentinas-master>. Versión v1 del 19/06/2025, exportada en
+  formato COCO el 08/01/2026: 656 fotos y 800 cajas de una sola clase (`patente`).
+- **Licencia:** Public Domain, según la declara quien lo publicó en Roboflow Universe.
+- **Cita:** xenon. *Patentes Argentinas - Master* (v1, 2025-06-19). Roboflow Universe.
+  <https://universe.roboflow.com/xenon-bo5e9/patentes-argentinas-master>. Lo publica un usuario de Roboflow; no tiene
+  artículo asociado.
+- **Cambios respecto del original:** cada caja se recortó con un 15 % de margen; se descartaron las cajas de menos de
+  40x24 píxeles, las fotos y las patentes que ya están en el dataset "patentes" (con el que se calibró el OCR) y los
+  duplicados y casi duplicados; de lo que quedó se eligieron 300 con semilla fija, al menos 50 de noche. El export
+  original no se modificó. Los recortes, las etiquetas y las hojas de contacto viven fuera del repositorio
+  (`EVAL_DATA_DIR/ocr-ar-set`).
+- **Límites:** "Public Domain" lo declara quien subió el dataset, que no necesariamente es el titular de las fotos:
+  muchas parecen tomadas de la web (se ven marcas de agua y muestras de patentes), y no se auditó su origen. Por eso se
+  usa solo para evaluar y no se distribuye ni se versiona. Incluye patentes de dos líneas (motos), que el servicio no
+  lee, y muestras gráficas de patentes que no son fotos.
 
 ## 2. Módulos experimentales (fuera del producto)
 
