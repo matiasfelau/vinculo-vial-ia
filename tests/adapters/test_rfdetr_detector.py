@@ -513,16 +513,31 @@ def outputs_v2(
 NAMES_V2 = detector_columns(CLASSES_V2)  # sin las confusoras, que ocupan columna pero no se devuelven
 
 
-def test_v2_camion_van_y_colectivo_cuentan_como_auto() -> None:
+def test_v2_camion_y_van_cuentan_como_auto() -> None:
     dets, labels = outputs_v2(
         ("truck", 0.9, (0.3, 0.5, 0.3, 0.4)),
         ("van", 0.8, (0.6, 0.5, 0.3, 0.4)),
-        ("bus", 0.7, (0.9, 0.5, 0.1, 0.4)),
     )
 
     boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
 
-    assert [(box.label, round(box.conf, 2)) for box in boxes] == [("car", 0.9), ("car", 0.8), ("car", 0.7)]
+    assert [(box.label, round(box.conf, 2)) for box in boxes] == [("car", 0.9), ("car", 0.8)]
+
+
+def test_v2_el_colectivo_no_cuenta_como_vehiculo() -> None:
+    """Decisión del 14/11/2026: `bus` es una salida del modelo pero no una presencia (cambia el mapeo)."""
+    dets, labels = outputs_v2(("bus", 0.99, (0.5, 0.5, 0.6, 0.5)))
+
+    assert "bus" not in NAMES_V2.values()
+    assert decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2) == []
+
+
+def test_v2_un_colectivo_no_borra_el_auto_de_otra_consulta() -> None:
+    dets, labels = outputs_v2(("car", 0.9, (0.3, 0.5, 0.3, 0.4)), ("bus", 0.95, (0.7, 0.5, 0.3, 0.4)))
+
+    boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
+
+    assert [(b.label, round(b.conf, 2)) for b in boxes] == [("car", 0.9)]
 
 
 def test_v2_las_confusoras_no_devuelven_cajas() -> None:
@@ -550,6 +565,31 @@ def test_v2_una_confusora_no_borra_el_auto_de_otra_consulta() -> None:
     boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
 
     assert [box.label for box in boxes] == ["car"]
+
+
+def test_detect_by_class_separa_camion_van_y_auto_y_no_devuelve_el_colectivo() -> None:
+    dets, labels = outputs_v2(
+        ("car", 0.9, (0.2, 0.5, 0.2, 0.4)),
+        ("truck", 0.8, (0.5, 0.5, 0.2, 0.4)),
+        ("van", 0.7, (0.8, 0.5, 0.2, 0.4)),
+        ("bus", 0.99, (0.5, 0.5, 0.2, 0.2)),
+    )
+    shared = RfDetrDetections(FakeSession((dets, labels)), "input", (16, 24), THRESHOLDS, names=NAMES_V2)
+
+    found = shared.detect_by_class(np.zeros((40, 80, 3), np.uint8))
+
+    assert found is not None and set(found) == {"car", "truck", "van", "plate"}
+    assert [round(b.conf, 2) for b in found["car"]] == [0.9]
+    assert [round(b.conf, 2) for b in found["truck"]] == [0.8]
+    assert [round(b.conf, 2) for b in found["van"]] == [0.7]
+    assert found["plate"] == []
+    assert {b.label for boxes in found.values() for b in boxes} == {"car"}
+
+
+def test_detect_by_class_con_un_modelo_que_falla_devuelve_none() -> None:
+    shared = RfDetrDetections(FakeSession(RuntimeError("x")), "input", (16, 24), THRESHOLDS, names=NAMES_V2)
+
+    assert shared.detect_by_class(np.zeros((40, 80, 3), np.uint8)) is None
 
 
 def _constant_onnx(dets: NDArray[Any], labels: NDArray[Any]) -> bytes:
@@ -617,7 +657,7 @@ def test_v2_sin_clases_de_auto_en_el_manifest_no_arranca(tmp_path: Path) -> None
         build_models({"detector": MODEL_NAME_V2}, manifest, models_dir)
 
 
-def test_el_manifest_del_repo_declara_v2_sin_activarlo_y_deja_v1_intacto() -> None:
+def test_el_manifest_del_repo_declara_v2_como_defecto_y_deja_v1_intacto_como_respaldo() -> None:
     manifest = load_manifest(REPO_ROOT / "models" / "manifest.json")
     v1, v2 = manifest.get(MODEL_NAME), manifest.get(MODEL_NAME_V2)
 
@@ -627,6 +667,5 @@ def test_el_manifest_del_repo_declara_v2_sin_activarlo_y_deja_v1_intacto() -> No
     assert v2.ports == ("detector",) and v2.sha256 is not None and v2.file == f"{MODEL_NAME_V2}.onnx"
     assert v2.classes is not None and v2.classes[:5] == ("car", "truck", "van", "bus", "plate")
     assert not {"face", "wheel"} & set(v2.classes)
-    assert "rfdetr_openimages_v2" not in (REPO_ROOT / ".env.example").read_text(
-        encoding="utf-8"
-    )  # no se activa por defecto
+    env = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    assert "MODEL_DETECTOR=rfdetr_openimages_v2" in env  # v2 es el detector por defecto (14/11/2026)

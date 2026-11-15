@@ -1,17 +1,17 @@
 # Detector v2: presencia de vehículo, patente y confusoras (sin rostro ni rueda)
 
-El **detector v2** (`rfdetr_openimages_v2`) reemplaza, cuando se decida, al v1 (`rfdetr_openimages`) en el puerto
-`detector`. **No está activado**: v1 sigue siendo el modelo del servicio y se elige por `MODEL_DETECTOR`. v2 entra al
-`models/manifest.json` con su SHA-256 y se puede seleccionar por configuración (`MODEL_DETECTOR=rfdetr_openimages_v2`).
+El **detector v2** (`rfdetr_openimages_v2`) es **el detector por defecto del servicio** desde el 14/11/2026
+(`MODEL_DETECTOR=rfdetr_openimages_v2` en `.env.example`) y reemplaza al v1 (`rfdetr_openimages`) en el puerto `detector`.
+v1 queda en `models/manifest.json` con su SHA-256 como respaldo y se vuelve a él cambiando `MODEL_DETECTOR`; ya no se mide.
 Los pesos no van a git.
 
 | | v1 | v2 |
 |---|---|---|
 | Clases | `car`, `wheel`, `plate`, `face` | `car`, `truck`, `van`, `bus`, `plate` y siete confusoras |
 | Puertos | `detector` y `face` | solo `detector` |
-| Presencia de vehículo | `car` | `car`, `truck`, `van` o `bus` (el adaptador devuelve una caja `car`) |
+| Presencia de vehículo | `car` | `car` (con taxi), `truck` o `van` (el adaptador devuelve una caja `car`); `bus` no cuenta |
 | Rostro, rueda | sí | no (decisión del 11/11/2026) |
-| Confusoras | no | avión, barco, bicicleta, moto, silla de ruedas, cartel de tránsito, reloj: no se devuelven |
+| Confusoras | no | colectivo (salida propia, no se devuelve), avión, barco, bicicleta, moto, silla de ruedas, cartel de tránsito, reloj: no se devuelven |
 | Fotos de fondo | no | sí: sin ninguna anotación |
 
 Las confusoras no cuentan como presencia: existen para que el modelo aprenda que un avión, una moto o un reloj no
@@ -39,7 +39,15 @@ en v1: el preentrenamiento no se cambia, lo que se ajusta es el detector.)
 
 `Taxi` y `Ambulance` cuelgan de `Land vehicle` (son hermanas de `Car`, no hijas): se mapearon igual porque son
 vehículos de calle; si no, una foto con un taxi anotado solo como `Taxi` enseñaría que ese taxi no es un vehículo.
-Es una decisión mía; se cambia en `OPEN_IMAGES_CLASSES`. Las confusoras se verificaron en `classes.csv` y en la
+Es una decisión mía; se cambia en `OPEN_IMAGES_CLASSES`.
+
+**Qué cuenta como vehículo en el servicio (14/11/2026): auto (con taxi), van y camión.** Es el mapeo del adaptador
+(`ROLES` en `rfdetr_detector.py`), no el del entrenamiento: `bus` es una salida propia del modelo y el adaptador no la
+devuelve, así que un colectivo no cuenta. **Limitaciones:** (1) **la ambulancia se entrenó como `van`**, no es una
+salida propia, así que **sigue contando**; que no cuente exige reentrenar (por ejemplo, mandarla a las fotos de fondo
+o a una confusora). No se hizo. (2) **Open Images no distingue un flete de un camión pesado y anota muchas pickups como
+`Truck`**, así que `truck` se mantiene completo: una pickup válida cuenta, y también un camión pesado que nadie
+fotografiaría como un auto. Las confusoras se verificaron en `classes.csv` y en la
 jerarquía: las siete existen como clases con cajas en Open Images V7.
 
 **Qué se bajó** (`v2_download.py`, semilla 0): por etapa se eligen fotos donde aparece la clase y cada foto conserva
@@ -109,14 +117,14 @@ consultas, en tres semillas) antes de guardarlo y muestra el SHA-256 que va en e
 es el registrado en el manifest. La comparación con v1 sobre la prueba de v1 está en
 [tools/eval/README.md](../../eval/README.md#detector-v2-contra-v1).
 
-## Usarlo (sin activarlo por defecto)
+## Usarlo
 
-En el `.env` local, solo para probarlo:
+Es el detector por defecto de `.env.example` (decisión del 14/11/2026):
 
 ```dotenv
 MODEL_DETECTOR=rfdetr_openimages_v2
-MODEL_FACE=null          # v2 no tiene rostros: los rostros los cubre otro modelo (por ejemplo scrfd_10g)
+MODEL_FACE=scrfd_10g     # v2 no tiene rostros: los rostros los cubre otro modelo
 MODELS_DIR=./models/weights
 ```
 
-`.env.example` no se toca.
+Para volver a v1 (respaldo, ya no se mide): `MODEL_DETECTOR=rfdetr_openimages`.

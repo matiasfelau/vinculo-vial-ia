@@ -13,6 +13,10 @@ La jerarquía sale de `hierarchy.json` de Open Images V7 (anotada acá a mano, v
 - `Taxi` y `Ambulance` cuelgan de `Land vehicle` (hermanas de `Car`, no hijas). Se mapean igual, porque son
   vehículos de calle que se ven como un auto o una van: si no, una foto con un taxi anotado solo como `Taxi`
   enseñaría que ese taxi no es un vehículo. `Taxi` → `car`, `Ambulance` → `van`.
+- Qué cuenta como vehículo en el servicio (14/11/2026) lo decide el adaptador (`ROLES`), no este archivo:
+  auto (con taxi), van y camión. `bus` es una salida del modelo que el adaptador no devuelve, así que el
+  colectivo no cuenta. `Ambulance` se entrenó como `van` y sigue contando (para que no cuente habría que
+  reentrenar). Open Images anota muchas pickups como `Truck`: el camión se mantiene completo.
 - Confusoras: `Boat` (con `Barge`, `Gondola`, `Canoe`), `Airplane`, `Bicycle`, `Motorcycle`, `Wheelchair`,
   `Traffic sign` (con `Stop sign`) y `Clock` (con `Alarm clock`, `Digital clock`, `Wall clock`).
 """

@@ -7,10 +7,15 @@ misma imagen, la segunda llamada reutiliza el resultado. El camino `MODEL_FACE=r
 solo para v1.
 
 **v2** (`rfdetr_openimages_v2`) sirve solo al puerto `detector`. Sus clases salen del manifest (`classes`, en
-el orden de las columnas de `labels`): `car`, `truck`, `van` y `bus` cuentan todas como `car` (presencia de
-un vehículo), `plate` como `plate`, y las clases confusoras (avión, barco, bicicleta, moto, silla de ruedas,
-cartel, reloj) solo existen para que el modelo aprenda a no confundirlas: no se devuelven. No tiene rostro ni
-rueda. Si una consulta puntúa en dos clases de presencia, se devuelve una sola caja `car`, con la mayor.
+el orden de las columnas de `labels`): `car`, `truck` y `van` cuentan todas como `car` (presencia de un
+vehículo), `plate` como `plate`, y el resto solo existe para que el modelo aprenda a no confundirlo: no se
+devuelve. Eso incluye el colectivo (`bus`, decisión del 14/11/2026: no es un vehículo para R1) y las
+confusoras (avión, barco, bicicleta, moto, silla de ruedas, cartel, reloj). No tiene rostro ni rueda. Si una
+consulta puntúa en dos clases de presencia, se devuelve una sola caja `car`, con la mayor.
+
+Limitaciones del mapeo: Open Images no distingue un flete de un camión pesado y anota muchas pickups como
+`Truck`, así que `truck` se mantiene completo y cuenta como vehículo. Y la ambulancia se entrenó como `van`
+(no es una salida propia): sigue contando, y para que no cuente habría que reentrenar.
 
 Preproceso igual al de `RFDETR.predict()` (la foto completa a la resolución del modelo, normalizada con
 ImageNet). El ONNX (`tools/training/detector/export.py`) devuelve `dets` (cajas cxcywh normalizadas) y
@@ -57,7 +62,6 @@ ROLES: Mapping[str, str] = {
     "car": BoxLabel.CAR,
     "truck": BoxLabel.CAR,
     "van": BoxLabel.CAR,
-    "bus": BoxLabel.CAR,
     "wheel": BoxLabel.WHEEL,
     "plate": BoxLabel.PLATE,
     FACE: FACE,
@@ -105,7 +109,7 @@ def decode_boxes(
     """Cajas en píxeles de la foto original `size = (alto, ancho)`, de más a menos confiables.
 
     `names` dice qué clase es cada columna y solo se decodifican las que lista. Varias columnas pueden dar la
-    misma caja (`ROLES`: auto, camión, van y colectivo son `car`): cada consulta aporta una sola caja por
+    misma caja (`ROLES`: auto, camión y van son `car`): cada consulta aporta una sola caja por
     tipo, con la mayor de sus confianzas. Una clase que no está en `ROLES` es su propio tipo (así la usa el
     detector de daños); las confusoras de v2 no se listan en `names` (ver `detector_columns`).
     """
@@ -208,6 +212,25 @@ class RfDetrDetections:
         self._full.put(img, boxes)
         return list(boxes)
 
+    def detect_by_class(self, img: Pixels) -> dict[str, list[Box]] | None:
+        """Las cajas de cada clase del modelo por separado, sin fundirlas (para evaluar; sin memoria).
+
+        `detect_all` devuelve una sola caja `car` por consulta (la mayor de camión, van y auto). Para saber
+        qué clase dejó pasar una foto hace falta verlas aparte: cada clase del modelo que se devuelve (`car`,
+        `truck`, `van`, `plate`...) con sus cajas. `None` si el modelo falla.
+        """
+        try:
+            tensor = preprocess(img, *self._input_size)
+            dets, labels = self._session.run(OUTPUT_NAMES, {self._input_name: tensor})
+            size = (img.shape[0], img.shape[1])
+            return {
+                name: decode_boxes(dets, labels, size, self._thresholds, {column: name})
+                for column, name in self._names.items()
+            }
+        except Exception as exc:
+            logger.warning("falló la inferencia del detector", extra={"error": type(exc).__name__})
+            return None
+
     def detect_tiled(self, img: Pixels) -> list[Box] | None:
         """El pase entero (reutilizado de `detect_all`) más los tiles de las clases con mosaico.
 
@@ -255,6 +278,10 @@ class RfDetrVehicleDetector:
     def detect(self, img: Pixels) -> list[Box] | None:
         boxes = self._core.detect_all(img)
         return None if boxes is None else [box for box in boxes if box.label in VEHICLE_LABELS]
+
+    def detect_by_class(self, img: Pixels) -> dict[str, list[Box]] | None:
+        """Las cajas por clase del modelo, sin fundir (evaluación: qué clase dejó pasar una foto)."""
+        return self._core.detect_by_class(img)
 
     def detect_plates(self, img: Pixels) -> list[Box] | None:
         """El pase entero más las patentes que encuentra el mosaico (solo con `PLATE_TILING`)."""
