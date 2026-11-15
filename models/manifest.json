@@ -115,6 +115,22 @@
       "notes": "NO ACTIVADO: el servicio sigue con dinov2_vits14 hasta que se apruebe. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero). Se ajusta con recortes de la caja car del detector, sin segmentador; su REID_T se calibra aparte. Ajustado solo con autos de luz estandar y oscura (faltan los reflectivos). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
     },
     {
+      "name": "dinov2_vits14_reid_v2",
+      "version": "dinov2-small@3drealcar-cosface-v2",
+      "ports": ["embedder"],
+      "file": "dinov2_vits14_reid_v2.onnx",
+      "sha256": "39c304b28dee0ca5641fc1df8875d6abe638a998a43096d95045b45c2a26887d",
+      "license": "Apache-2.0 (modelo y 3DRealCar)",
+      "paper": {
+        "title": "DINOv2: Learning Robust Visual Features without Supervision",
+        "venue": "TMLR",
+        "year": 2024
+      },
+      "source": "facebook/dinov2-small ajustado con los 2.009 autos usables de 3DRealCar (Du et al., ICCV 2025, Apache-2.0): 1.401 de entrenamiento, recortes del detector v2 con 0,35 de auto y sin segmentador, con tools/training/reid/train.py (CosFace, FP32, acumulacion de gradiente, parada temprana; mejor epoca 6) y exportado con export.py",
+      "commercial": "yes",
+      "notes": "NO ACTIVADO: el servicio sigue con dinov2_vits14 y REID_T sin cambios hasta que se apruebe. Reemplaza en la practica a dinov2_vits14_reid (primera version, 411 autos, detector v1), que queda registrado sin tocar. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero); ONNX contra PyTorch: diferencia maxima 6,7e-7 por componente y coseno minimo 0,9999999. Su REID_T se calibra aparte (tools/eval/reid_parciales.py), con pares enteros y parciales. El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
+    },
+    {
       "name": "scrfd_10g",
       "version": "scrfd-10g-bnkps@insightface-buffalo_l",
       "ports": ["face"],

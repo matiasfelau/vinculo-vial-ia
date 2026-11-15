@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "dinov2_vits14"
 REID_MODEL_NAME = "dinov2_vits14_reid"
+REID_MODEL_NAME_V2 = "dinov2_vits14_reid_v2"
 INPUT_SIDE = 224
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -81,6 +82,7 @@ class DinoV2Embedder:
 
 @register("embedder", MODEL_NAME)
 @register("embedder", REID_MODEL_NAME)
+@register("embedder", REID_MODEL_NAME_V2)
 def build(ctx: ModelContext) -> DinoV2Embedder:
     session = ctx.model.session
     if len(session.input_names) != 1:
