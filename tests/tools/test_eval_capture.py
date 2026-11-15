@@ -490,3 +490,24 @@ def test_best_sin_ninguna_que_cumpla_devuelve_none() -> None:
     signals["sinvehiculo"] = [sig(car=[[0.99, 0.9]])] * 40  # todas se aceptan con cualquier umbral
 
     assert cr.best(cr.sweep(signals, [False] * 40)) is None
+
+
+def test_u2_es_el_rechazo_de_una_alerta_de_dos_fotos_general_y_patente() -> None:
+    rates = {
+        "general": {"tasa": 0.10, "cota_95": 0.20},
+        "plate": {"tasa": 0.05, "cota_95": 0.10},
+        "detail": {"tasa": 0.50, "cota_95": 0.60},  # el detalle no cuenta en una alerta de 2 fotos
+    }
+
+    assert cr.u3(rates, "tasa", cr.ALERT_2) == round(1 - 0.90 * 0.95, 4)
+    assert cr.u3(rates, "cota_95", cr.ALERT_2) == round(1 - 0.80 * 0.90, 4)
+
+
+def test_evaluate_incluye_u2_sin_el_detalle() -> None:
+    signals = synthetic()
+    signals["detail"] = [sig()] * 20  # el detalle se rechaza siempre
+
+    result = cr.evaluate(signals, [False] * 40, 0.5, None)
+
+    assert result["u3"]["todas"]["estimada"] > 0.9
+    assert result["u2"]["todas"]["estimada"] == round(1 - 0.9 * 0.9, 4)  # general y patente rechazan 2 de 20

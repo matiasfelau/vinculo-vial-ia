@@ -2002,7 +2002,136 @@ groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto 
   `car` del detector: con ese recorte, `REID_T` = 0,075 sigue dejando U1 en 0,1 % en VeRi y en 0,3 % en 3DRealCar (ver
   "Re-ID con 3DRealCar", abajo), pero detecta muy pocos autos distintos (S4 de 0,1 % y 5 %).
 
-## Re-ID con 3DRealCar (`reid_3drealcar.py`)
+## Re-ID con 3DRealCar: general contra patente (`reid_parciales.py`)
+
+> **Medición vigente de re-ID (15/11/2026).** La sección siguiente ("Re-ID con 3DRealCar") es la de la primera versión (411 autos,
+> detector v1, pares de auto entero) y queda como historia. **`dinov2_vits14_reid_v2` está activado** (`MODEL_EMBEDDER` en `.env.example`) con
+> `REID_T` = 0,0638.
+
+**Alcance de R2 (decisión del 15/11/2026): R2 compara solo la foto GENERAL contra la de PLATE.** La foto de detalle probablemente se elimine
+del contrato, así que no se calibra, no se mide y no se simula (se descartó su simulación, que ya se había ajustado). En el servicio, DETAIL y
+CONTEXT no se comparan: sin un umbral calibrado para esas comparaciones, no pueden dar `BURST_MISMATCH`. La validación de roles de foto del servicio
+(qué fotos exige cada tipo de alerta) **no se tocó**: el cambio de contrato se decide aparte.
+
+**Qué compara R2 en el servicio.** El recorte de la **caja del vehículo dominante del detector** (v2, auto 0,35), **sin máscaras del segmentador**: es
+el recorte con el que se calibró. El segmentador (`rfdetr_seg_coco`) sigue decidiendo la presencia (R1) pero ya no interviene en R2.
+
+Esta medición usa el dataset completo de 3DRealCar (**2 009 autos usables**: 1 321 de luz estándar, 424 reflectivos y 264 oscuros). Los pares son:
+
+- **general_patente** (el que decide R2): una vista entera contra un recorte **simulado** de trompa o cola con la patente al 8-15 % del ancho,
+  de vistas separadas por 30° o más. Se simula a partir de las vistas del auto entero con la ventana de patente de los conjuntos de R1
+  (`capture_sets.plate_window`), eligiendo las vistas frontales y traseras por la pose; cómo se arman, paso a paso, está en
+  [tools/training/reid](../training/reid/README.md#pares-parciales);
+- **entero** (solo referencia, no entra al umbral): dos vistas del auto entero.
+
+```powershell
+$env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-patente"
+uv run --frozen --extra dev --extra tools python tools/eval/reid_parciales.py --models dinov2_vits14 dinov2_vits14_reid_v2 --veri-dir D:\vv-eval\veri\VeRi
+```
+
+### Datos y partición
+
+La descarga terminó sin cortes de cuota: los 10 zips se leyeron desde la copia propia de Drive, con verificación de CRC y de la
+cantidad de autos de cada zip. (3DRealCar repite 17 autos entre `200-400.zip` y `1200-1400.zip`: `fetch.py verify` los acepta si el índice
+los tiene en otro zip con las mismas vistas, y se bajan una sola vez.) La partición **conserva la asignación congelada** (los 411 autos
+de antes no se movieron, y los 59 de prueba siguen siendo de prueba) y sortea los autos nuevos estratificados por luz, tipo y color:
+
+| Partición | Autos | Estándar | Reflectiva | Oscura | Recortes enteros |
+|---|---|---|---|---|---|
+| Entrenamiento | 1 401 (69,7 %) | 914 | 300 | 187 | 16 705 |
+| Validación | 305 (15,2 %) | 204 | 62 | 39 | 3 631 |
+| Prueba | 303 (15,1 %) | 203 | 62 | 38 | 3 614 |
+| **Total** | **2 009** | **1 321** | **424** | **264** | **23 950** |
+
+De 24 108 fotos, el detector v2 no encontró un vehículo en 158 (0,7 %). **Recortes de patente simulados** (validación y prueba, 608 autos): 175 en
+128 autos, **93 en validación (estándar 72, reflectiva 15, oscura 6) y 82 en prueba (63, 15 y 4)**. Solo 284 de los 608 autos tuvieron un ajuste claro del
+aspecto contra el azimut (amplitud >= 20 % y R² >= 0,5), y de sus 1 373 vistas frontales o traseras el detector vio una patente utilizable en 475 (35 %);
+121 de esas no admitieron la ventana de patente. **Hay pocos pares de patente: 871 del mismo auto en validación y 778 en prueba** (37 en luz oscura).
+
+### Entrenamiento
+
+DINOv2 ViT-S/14 ajustado con CosFace sobre los **1 401 autos de entrenamiento** (16 705 recortes del detector v2), con el procedimiento de
+la primera versión (FP32, lote 16 con acumulación de 4, lr 2e-5, parada temprana con paciencia 3). Sobre validación (pares de autos
+enteros, S4 con U1 <= 1 %): sin ajustar 12,3 %; época 1: 76,1 %; 2: 80,1 %; 3: 81,5 %; 4: 83,7 %; 5: 84,5 %; **6: 86,0 % (la mejor)**; 7: 85,5 %;
+8: 84,8 %; 9: 83,8 % → parada temprana. El ONNX (`dinov2_vits14_reid_v2`) reproduce a PyTorch: diferencia máxima de 6,7e-7 por componente
+y coseno mínimo de 0,9999999; SHA-256 `39c304b2...6887d` en `models/manifest.json`. (La primera corrida se cortó en la época 2 por
+falta de memoria de la máquina; `train.py` ahora guarda `last.pt` por época y sigue con `--resume`.)
+
+### Umbral
+
+**Un único umbral, calibrado en validación con los 871 pares general-patente del mismo auto y 100 000 de autos distintos:** el **menor** con el que al
+menos el **70 %** de los pares de autos distintos queda como "otro auto" (S4 >= 70 %), que es el de menor U1 (S4 y U1 suben juntos con el umbral), y
+con la cota del 95 % de U1 de validación en **2 % o menos**. **R2 solo rechaza con certeza; ante la duda, GREEN.** El umbral de U1 del proyecto (**1 %**)
+**no cambia**; el 2 % es la cota que se aceptó para activar el modelo. Resultado: **0,0638** (validación: U1 0 de 871, cota 0,34 %; S4 70,0 %; S4 en
+difíciles 38,4 %). Como hay una sola comparación por alerta (GENERAL contra PLATE), **U1 por par es también U1 por alerta**.
+
+### Resultados en prueba (umbral 0,0638 elegido en validación; cotas del 95 % de una cola)
+
+Prueba: 778 pares del mismo auto general-patente, 100 000 de autos distintos y 3 736 difíciles (misma marca y color).
+
+| | AUC | **U1** (cota) | **S4** | S4 en difíciles |
+|---|---|---|---|---|
+| **DINOv2 ajustado (`dinov2_vits14_reid_v2`)** | **0,9991** | **0,00 %** (0 de 778; cota ≤ **0,39 %**) | **69,6 %** | **46,2 %** |
+| DINOv2 sin ajustar (su umbral para S4 >= 70 %: 0,393) | 0,646 | 54,8 % (cota 57,7 %) | 67,2 % | 58,5 % |
+| Referencia: pares de auto entero (ajustado, mismo umbral) | 0,996 | 0,27 % (cota 0,34 %) | 69,7 % | 42,1 % |
+
+- **U1 cumple con holgura la cota pedida** (≤ 2 %) y también el 1 % del proyecto: **0 de 778, cota 0,39 %**; por alerta es lo mismo. **No hace falta
+  tolerancia en U1**; **S4 queda "válido con tolerancia"**: 69,6 % en prueba contra el 70 % pedido (70,0 % en validación), y 46,2 % en los pares difíciles. El
+  dueño siempre revisa las fotos.
+- **Por qué el DINOv2 sin ajustar no sirve:** con el mismo criterio (S4 >= 70 %) marca como distinto al 55 % de los pares del mismo auto; con el umbral que
+  deja U1 en 1 % (0,064), su S4 es de 12,8 % en validación.
+
+**Por condición de luz** (ajustado, 0,0638):
+
+| Luz | Pares del mismo auto | U1 (cota) | S4 | S4 en difíciles |
+|---|---|---|---|---|
+| Estándar | 601 | 0,00 % (≤ 0,50 %) | 68,5 % | 48,6 % (n = 2 285) |
+| Reflectiva | 140 | 0,00 % (≤ 2,14 %) | 64,6 % | 44,6 % (n = 168) |
+| Oscura | 37 | 0,00 % (≤ 8,11 %) | 54,6 % | 0,0 % (n = 12) |
+
+Las cifras de luz oscura salen de muy pocos pares (37 del mismo auto, 604 de distintos y 12 difíciles): las cotas son anchas y el S4 en difíciles no
+dice nada. Por rango de ángulo entre la vista entera y la de patente (30-60°, 60-90°, 90-135°, 135-180°) U1 es 0 en los cuatro (132, 158, 217 y 271 pares).
+Con el `REID_T` anterior del servicio (0,075) el modelo ajustado da U1 0 de 778 y S4 73,1 % (46,2 % → 49,5 % en difíciles).
+
+**Qué pasaría con un umbral más alto (información; no se aplicó).** Los pares general-patente se separan tanto (AUC 0,999) que "el menor umbral con S4 >= 70 %"
+deja mucho S4 sin usar con el mismo U1. En validación, el mayor umbral con la cota de U1 en 1 % o menos es **0,2565** (S4 98,1 %); en prueba ese umbral da
+U1 0,39 % (3 de 778, cota 0,99 %), S4 98,0 % y 90,5 % en difíciles. Con 0,15, U1 0,26 % (cota 0,81 %) y S4 89,7 %. Se eligió 0,0638 por el criterio pedido y
+porque los pares de patente son simulados y de una misma sesión (U1 optimista): subir el umbral se decide con fotos propias.
+
+### U por alerta de R1 con 2 fotos (general + patente), con `car` 0,35 y segmentador 0,50
+
+Recalculado con las señales de `capture_r1.py` (ver "R1 con el encuadre de 1-2 m"): rechazos independientes entre las dos fotos,
+`1 − (1 − pG)(1 − pP)`; la cota usa las cotas de cada tipo (conservadora).
+
+| Conjunto | GENERAL rechazadas | PLATE rechazadas | **U2 por alerta** (cota) |
+|---|---|---|---|
+| Mitad B (la de reporte) | 0 de 200 | 0 de 150 | **0,0 %** (≤ 3,47 %) |
+| Todas (A y B) | 0 de 400 | 0 de 300 | 0,0 % (≤ 1,74 %) |
+
+Con los umbrales anteriores (`car` 0,40) eran 1,17 % (cota 5,4 %) en B y 0,92 % (cota 3,24 %) en todas. (La alerta de 3 fotos del 14/11, con detalle, daba
+4,5 %: el detalle era el que más se rechazaba.)
+
+### VeRi-776 como referencia
+
+4 490 recortes de cámaras de vigilancia (521 descartados por no tener auto detectado), con el mismo recorte del detector. **AUC 0,777 con el modelo
+ajustado contra 0,667 sin ajustar** (difíciles: 0,621 contra 0,536). **El umbral calibrado en 3DRealCar no se traslada a VeRi-776**: con el 0,0638 el modelo
+ajustado marca como distinto solo el 0,40 % de los pares de autos distintos (S4 de 70 % en 3DRealCar) y deja U1 en 0,07 % (cota 0,10 %); en los difíciles,
+S4 de 0,08 %. Calibrado en VeRi con la misma regla de U1 <= 1 % (cota 1,00 %): S4 de 3,1 % el ajustado y 3,6 % el no ajustado. Mejora el ordenamiento, no el
+umbral: VeRi (cámaras de vigilancia de baja resolución, de otro dominio) es solo una referencia, y el umbral del servicio vale para fotos de celular como las
+de 3DRealCar hasta validarlo con fotos propias.
+
+### Limitaciones
+
+- **U1 es optimista**: los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma luz).
+- **El parque automotor puede ser distinto del argentino** (marcas y modelos de las calles donde se capturó 3DRealCar, anotados en chino).
+- **Los pares de patente son simulados**, a partir de recortes de vistas del auto entero y no de fotos con el encuadre de la app; la patente de una foto
+  real (resolución, desenfoque, reflejos) no está representada.
+- **Pocos pares de patente** (778 en prueba, 37 en luz oscura) y solo la mitad de los autos tuvo un eje claro por la pose: las cotas por luz son anchas.
+- Una sola partición (semilla 0); el modelo se eligió por la mejor época de validación con pares enteros, no con los de patente.
+- **R2 usa en el servicio la caja del detector sin máscaras** (lo calibrado); la comparación con el recorte enmascarado por el segmentador no se midió.
+- No se probó el modelo con fotos propias de celular: el umbral es **provisorio** hasta validarlo con ellas.
+
+## Re-ID con 3DRealCar (`reid_3drealcar.py`): primera versión (histórica)
 
 Compara DINOv2 ViT-S/14 **sin ajustar** (`dinov2_vits14`) con el **ajustado** con 3DRealCar (`dinov2_vits14_reid`, ver
 [tools/training/reid](../training/reid/README.md)), los dos sobre el **recorte de la caja `car` del detector** (la cascada

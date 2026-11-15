@@ -193,10 +193,10 @@ def happy_models() -> FakeModels:
     cut = rect(80, 86, 20, 81)
     embedder = FakeEmbedder()
     embedder.by_marker_area = {
-        (GENERAL, 6400): vec(0),
-        (PLATE, 6400): vec(10),
-        (CONTEXT, 1600): vec(5),
-        (CONTEXT, 400): vec(90),
+        (GENERAL, 8100): vec(
+            0
+        ),  # R2 compara la caja del vehículo dominante del detector (90 x 90), sin máscara
+        (PLATE, 8100): vec(10),
     }
     return FakeModels(
         vehicle=FakeVehicleDetector(

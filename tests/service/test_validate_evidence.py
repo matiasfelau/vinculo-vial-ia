@@ -199,7 +199,7 @@ def test_mismo_auto_en_ambas_fotos_no_agrega_codigos() -> None:
 
 def test_autos_distintos_son_burst_mismatch() -> None:
     models = happy_models()
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(80)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(80)
 
     result = _run(build_scenario(), models)
 
@@ -248,47 +248,10 @@ def test_un_detalle_con_el_mismo_auto_no_suma_codigos() -> None:
     assert result.verdict == Verdict.GREEN and result.reason_codes == ()
 
 
-def test_un_detalle_de_otro_auto_es_burst_mismatch() -> None:
-    result = _run(build_scenario(), _detail_with_car(happy_models(), 85))
-
-    assert _codes(result) == {R.BURST_MISMATCH}
-    assert result.verdict == Verdict.RED and is_fraud(result.reason_codes)
-
-
-def test_el_mismatch_se_detecta_en_cualquiera_de_los_detalles() -> None:
-    models = _detail_with_car(_detail_with_car(happy_models(), 5, 0), 85, 2)
-
-    assert _codes(_run(build_scenario(CRASHED, details=3), models)) == {R.BURST_MISMATCH}
-
-
 def test_un_detalle_sin_auto_segmentado_no_se_compara() -> None:
     models = happy_models()  # en un primer plano no se segmenta ningún auto
 
     assert _codes(_run(build_scenario(), models)) == set()
-
-
-def test_el_contexto_de_otro_auto_es_burst_mismatch() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(85)
-    models.embedder.by_marker_area[(CONTEXT, 400)] = vec(80)
-
-    assert R.BURST_MISMATCH in _codes(_run(build_scenario(GARAGE), models))
-
-
-def test_el_embedding_del_contexto_se_calcula_una_sola_vez_por_auto() -> None:
-    models = happy_models()
-    calls: list[int] = []
-    original = models.embedder.embed
-
-    def counting(img: object, mask: object) -> object:
-        calls.append(marker_of(img))  # type: ignore[arg-type]
-        return original(img, mask)  # type: ignore[arg-type]
-
-    models.embedder.embed = counting  # type: ignore[method-assign]
-
-    _run(build_scenario(GARAGE), models)
-
-    assert calls.count(CONTEXT) == 2  # los dos autos del contexto, una vez cada uno
 
 
 def test_sha256_distinto_es_evidence_unreadable() -> None:
@@ -577,7 +540,7 @@ def test_ningun_auto_es_no_vehicle_y_corta_la_cascada() -> None:
 @pytest.mark.parametrize("angle", [55, 48])  # coseno 0,57 y 0,67: entre 0,50 y 0,70 (antes: dudoso)
 def test_una_similitud_intermedia_es_green(angle: float) -> None:
     models = happy_models()
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(angle)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(angle)
 
     result = _run(build_scenario(), models)
 
@@ -587,7 +550,7 @@ def test_una_similitud_intermedia_es_green(angle: float) -> None:
 def test_sin_embedding_o_sin_auto_segmentado_no_se_compara_y_es_green() -> None:
     for marker in (PLATE, GENERAL):
         models = happy_models()
-        models.embedder.by_marker_area[(marker, 6400)] = None
+        models.embedder.by_marker_area[(marker, 8100)] = None
 
         assert _run(build_scenario(), models).verdict == Verdict.GREEN
     models = happy_models()
@@ -596,23 +559,11 @@ def test_sin_embedding_o_sin_auto_segmentado_no_se_compara_y_es_green() -> None:
     assert _run(build_scenario(), models).verdict == Verdict.GREEN
 
 
-def test_un_detalle_con_similitud_intermedia_es_green() -> None:
-    assert _run(build_scenario(), _detail_with_car(happy_models(), 55)).verdict == Verdict.GREEN
-
-
-def test_un_detalle_sin_embedding_o_con_segmentador_caido_es_green() -> None:
-    assert _run(build_scenario(), _detail_with_car(happy_models(), None)).verdict == Verdict.GREEN
-    models = happy_models()
-    models.cars.by_marker[detail_marker(0)] = None
-
-    assert _run(build_scenario(), models).verdict == Verdict.GREEN
-
-
 def test_el_umbral_de_reid_es_uno_solo() -> None:
     from dataclasses import replace
 
     models = happy_models()
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)  # coseno 0,57
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(55)  # coseno 0,57
     scenario = build_scenario()
 
     def verdict_with(t: float) -> Verdict:
@@ -672,7 +623,7 @@ def test_plate_sin_auto_segmentado_no_cruza_lecturas() -> None:
 def test_patente_mismatch_y_otro_auto_acumulan_codigos_de_fraude() -> None:
     models = happy_models()
     models.plate.by_marker[PLATE] = ("ZZ999ZZ", 0.95)
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(85)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
 
     result = _run(build_scenario(), models)
 
@@ -695,14 +646,6 @@ def test_un_contexto_con_el_auto_lejos_del_rebaje_es_green() -> None:
     models = happy_models()
     models.cars.by_marker[CONTEXT] = [CarInstance(rect(40, 80, 90, 99)), CarInstance(rect(20, 40, 0, 20))]
     models.embedder.by_marker_area[(CONTEXT, 40 * 9)] = vec(5)
-
-    assert _run(build_scenario(GARAGE), models).verdict == Verdict.GREEN
-
-
-def test_un_contexto_sin_embedder_es_green() -> None:
-    models = happy_models()
-    models.embedder.by_marker_area[(CONTEXT, 1600)] = None
-    models.embedder.by_marker_area[(CONTEXT, 400)] = None
 
     assert _run(build_scenario(GARAGE), models).verdict == Verdict.GREEN
 
@@ -811,57 +754,12 @@ def test_sin_segmentador_la_reid_compara_el_recorte_de_la_caja_del_detector() ->
     assert R.BURST_MISMATCH in _codes(different) and different.verdict == Verdict.RED
 
 
-def test_sin_segmentador_cada_detalle_se_compara_con_el_auto_de_su_caja() -> None:
-    models = _boxed_models()
-    marker = detail_marker(0)
-    models.vehicle.by_marker[marker] = [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR)]  # 6400 px
-    models.embedder.by_marker_area[(marker, 6400)] = vec(85)  # otro auto
-
-    assert R.BURST_MISMATCH in _codes(_run(build_scenario(), models))
-    models.embedder.by_marker_area[(marker, 6400)] = vec(5)  # el mismo
-
-    assert _run(build_scenario(), models).reason_codes == ()
-
-
-def test_sin_segmentador_las_patentes_no_son_autos_para_la_reid() -> None:
-    models = _boxed_models()
-    marker = detail_marker(0)  # un primer plano con el auto (80 x 80 px) y una patente (50 x 20 px)
-    models.vehicle.by_marker[marker] = [Box(0, 0, 80, 80, 0.9, BoxLabel.CAR), plate_box()]
-    embedded: list[int] = []
-    real_embed = models.embedder.embed
-
-    def recording(img: Pixels, mask: Mask) -> Vector | None:
-        embedded.append(int(mask.sum()))
-        return real_embed(img, mask)
-
-    models.embedder.embed = recording  # type: ignore[method-assign]
-    models.embedder.by_marker_area[(marker, 6400)] = vec(5)
-
-    result = _run(build_scenario(), models)
-
-    assert result.reason_codes == ()
-    assert 6400 in embedded and 1000 not in embedded  # se compara el auto; la caja de la patente no
-    assert plate_box().area == 1000
-
-
 def test_sin_segmentador_y_con_el_detector_caido_no_se_penaliza() -> None:
     models = _without_segmenter(happy_models())
     models.vehicle.by_marker[GENERAL] = None
     models.damage.by_marker = {}
 
     assert R.NO_VEHICLE not in _codes(_run(build_scenario(), models))
-
-
-def test_con_segmentador_sus_instancias_mandan_aunque_no_haya_ninguna() -> None:
-    """Un segmentador que responde `[]` no se completa con las cajas del detector (modo experimental)."""
-    models = happy_models()
-    models.vehicle.by_marker[PLATE] = [car_box(), plate_box(0.95)]
-    models.cars.by_marker[PLATE] = []
-    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
-
-    result = _run(build_scenario(), models)
-
-    assert R.BURST_MISMATCH not in _codes(result)  # PLATE sin auto segmentado: no hay con qué comparar
 
 
 def test_las_mascaras_de_las_cajas_estan_en_las_coordenadas_de_la_foto_reducida() -> None:
@@ -892,3 +790,79 @@ def test_las_mascaras_de_las_cajas_estan_en_las_coordenadas_de_la_foto_reducida(
     assert (xs.min(), xs.max() + 1, ys.min(), ys.max() + 1) == (5, 75, 10, 60)
     assert cars[0].conf == pytest.approx(0.9)
     assert run.car_instances(image) is cars  # con caché
+
+
+# --- R2 compara solo GENERAL contra PLATE, con la caja del vehículo dominante del detector ---------
+
+
+def _record_embeddings(models: FakeModels) -> list[tuple[int, int]]:
+    """Qué se le pide al embedder: `(foto, área de la máscara)`."""
+    asked: list[tuple[int, int]] = []
+    real = models.embedder.embed
+
+    def recording(img: Pixels, mask: Mask) -> Vector | None:
+        asked.append((marker_of(img), int(mask.sum())))
+        return real(img, mask)
+
+    models.embedder.embed = recording  # type: ignore[method-assign]
+    return asked
+
+
+@pytest.mark.parametrize("scenario", [build_scenario(CRASHED, details=3), build_scenario(GARAGE)])
+def test_r2_solo_embebe_general_y_plate(scenario: object) -> None:
+    models = happy_models()
+    asked = _record_embeddings(models)
+
+    result = _run(scenario, models)  # type: ignore[arg-type]
+
+    assert {marker for marker, _ in asked} == {GENERAL, PLATE}  # DETAIL y CONTEXT no se comparan
+    assert result.reason_codes == ()
+
+
+def test_un_detalle_de_otro_auto_no_produce_burst_mismatch() -> None:
+    """R2 no mira el detalle: sin umbral calibrado para esa comparación no puede dar fraude."""
+    result = _run(build_scenario(), _detail_with_car(happy_models(), 85))
+
+    assert result.verdict == Verdict.GREEN and result.reason_codes == ()
+
+
+def test_un_contexto_de_otro_auto_no_produce_burst_mismatch() -> None:
+    models = happy_models()
+    models.embedder.by_marker_area[(CONTEXT, 1600)] = vec(85)
+    models.embedder.by_marker_area[(CONTEXT, 400)] = vec(80)
+
+    assert R.BURST_MISMATCH not in _codes(_run(build_scenario(GARAGE), models))
+
+
+def test_con_segmentador_la_reid_usa_la_caja_del_detector_sin_mascara() -> None:
+    """Con el segmentador activo (R1), R2 compara la caja del detector (90 x 90), no su máscara (80 x 80)."""
+    models = happy_models()
+    asked = _record_embeddings(models)
+
+    _run(build_scenario(), models)
+
+    assert (GENERAL, 8100) in asked and (PLATE, 8100) in asked
+    assert (GENERAL, 6400) not in asked and (
+        PLATE,
+        6400,
+    ) not in asked  # las máscaras del segmentador son de 80 x 80
+
+
+def test_con_segmentador_sin_instancias_en_plate_la_reid_compara_la_caja_del_detector() -> None:
+    models = happy_models()
+    models.cars.by_marker[PLATE] = []  # el segmentador no ve un auto, el detector sí (R1 acepta det o seg)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
+
+    result = _run(build_scenario(), models)
+
+    assert R.BURST_MISMATCH in _codes(result)
+
+
+def test_la_patente_no_es_un_vehiculo_para_la_reid() -> None:
+    models = happy_models()
+    asked = _record_embeddings(models)
+
+    _run(build_scenario(), models)
+
+    assert all(area == 8100 for _, area in asked)  # solo la caja del auto; la de la patente (50 x 20) no
+    assert plate_box().area == 1000

@@ -308,6 +308,43 @@ def test_verify_detecta_un_auto_de_menos_y_pull_no_baja_nada(
     assert not (tmp_path / "raw").exists()
 
 
+def test_verify_acepta_autos_repetidos_en_otro_zip_del_indice(
+    tmp_path: Path, server: FakeDrive, wired: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """3DRealCar repite autos entre zips (17 de 200-400 están en 1200-1400): el índice los asigna a uno."""
+    make_state(tmp_path, source_for(server))
+    index = json.loads((tmp_path / "index.json").read_text())
+    index[CARS[3]]["zip"] = "1200-1400"  # el índice lo asignó al otro zip; la copia de este zip lo trae igual
+    (tmp_path / "index.json").write_text(json.dumps(index))
+
+    assert run("verify", tmp_path) == 0
+    assert "sobra" not in capsys.readouterr().err
+
+
+def test_verify_sigue_rechazando_un_auto_de_mas_que_no_esta_en_el_indice(
+    tmp_path: Path, server: FakeDrive, wired: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_state(tmp_path, source_for(server))
+    extra = "2024_05_09_10_00_00"
+    server.files["id-zip"] = (f"{LABEL}.zip", build_zip(cars=[*CARS, extra]))
+
+    assert run("verify", tmp_path) == 1
+    assert f"sobra el auto {extra}" in capsys.readouterr().err
+
+
+def test_verify_rechaza_un_repetido_con_otras_vistas(
+    tmp_path: Path, server: FakeDrive, wired: list[Any], capsys: pytest.CaptureFixture[str]
+) -> None:
+    make_state(tmp_path, source_for(server))
+    index = json.loads((tmp_path / "index.json").read_text())
+    index[CARS[3]]["zip"] = "1200-1400"
+    index[CARS[3]]["fotos"].popitem()  # en el otro zip tiene una vista menos: no es el mismo auto
+    (tmp_path / "index.json").write_text(json.dumps(index))
+
+    assert run("verify", tmp_path) == 1
+    assert f"sobra el auto {CARS[3]}" in capsys.readouterr().err
+
+
 def test_verify_detecta_una_vista_que_cambio_de_crc(
     tmp_path: Path, server: FakeDrive, wired: list[Any], capsys: pytest.CaptureFixture[str]
 ) -> None:

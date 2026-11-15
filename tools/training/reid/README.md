@@ -17,17 +17,22 @@ decisión aparte (ver "Resultados" en [tools/eval/README.md](../../eval/README.m
 - **Los pesos no van a git:** se montan desde `MODELS_DIR` en solo lectura y su `sha256` se registra en
   `models/manifest.json`.
 - Solo se usan las fotos RGB y la pose de la cámara (para el ángulo de vista). Nada del escaneo 3D.
-- **Cuota de Google Drive.** Cada tramo del dataset pesa 55 a 110 GB y se baja por pedidos por rango (solo las fotos
-  elegidas), pero Drive limita las descargas por archivo y respondió "Quota exceeded" a mitad de la bajada. Quedaron 406
-  autos completos (175 de luz estándar y 231 oscuros) y **ningún reflectivo**. `fetch.py pull` retoma lo que falta cuando la
-  cuota se libera (el pedido espera entre reintentos y escribe cada archivo entero o no lo escribe).
+- **Descarga completa (15/11/2026).** Se bajaron los 10 zips desde la copia propia de Drive (`fetch.py pull --source drive`, un zip
+  por vez, sin cortes de cuota): **2 009 autos usables** (1 321 de luz estándar, 424 reflectivos y 264 oscuros), con CRC y conteo de
+  autos verificados por zip. 3DRealCar repite 17 autos entre `200-400.zip` y `1200-1400.zip`: la verificación acepta un auto de más si
+  el índice lo tiene en otro zip con las mismas vistas. (La primera versión, con 411 autos, se había cortado por la cuota del folder
+  público de Google y no tenía ningún reflectivo.) Cada tramo del dataset pesa 55 a 110 GB, pero solo se leen las vistas elegidas
+  (1,4 a 3,6 GB por zip).
 
 ## Qué ve el embedder
 
-Lo mismo que en la cascada sin segmentador: la foto se reduce a `MODEL_MAX_SIDE_PX` (1024), el detector
-(`rfdetr_openimages`) busca autos y se recorta la **caja `car` más grande**; el adaptador achica ese recorte a
-224 x 224 (sin respetar la proporción) y lo normaliza. `prepare.py` guarda esos recortes en PNG (sin pérdida) y el
-entrenamiento los lee con el mismo preproceso (`vvi_ia.adapters.models.dinov2.preprocess`).
+Lo mismo que en la cascada sin segmentador: la foto se reduce a `MODEL_MAX_SIDE_PX` (1024), el detector busca vehículos
+y se recorta la **caja del vehículo dominante** (la `car` más grande); el adaptador achica ese recorte a 224 x 224
+(sin respetar la proporción) y lo normaliza. **Desde el 15/11/2026 el detector es v2** (`rfdetr_openimages_v2`, con la
+confianza de auto del servicio, 0,35; v1 ya no se usa para esto) y **sin máscaras del segmentador**. `prepare.py` guarda
+esos recortes en PNG (sin pérdida) en `crops-v2/` y escribe `crops_v2.json`; el entrenamiento los lee con el mismo
+preproceso (`vvi_ia.adapters.models.dinov2.preprocess`). Los recortes de la primera versión (`crops/`, `crops.json`,
+detector v1) quedan sin usar.
 
 ## Pasos
 
@@ -94,23 +99,34 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
      3 y lo bajado se conserva: se retoma después con el mismo comando.
    - Al terminar, borrá la clave de la cuenta de servicio y dejá de compartir la carpeta.
 
-3. **Recortes, ángulos y partición:**
+3. **Recortes, ángulos y partición** (después de bajar todo: la partición se congela al correrlo):
 
    ```powershell
    uv run --frozen --extra dev --extra tools python tools/training/reid/prepare.py --workers 3 --threads 2
    ```
 
-   Escribe `crops/` y `crops.json`. La **partición** es agrupada por auto (ningún auto está en dos particiones),
+   Escribe `crops-v2/` y `crops_v2.json` (solo entran los autos con todas sus vistas elegidas bajadas). La **partición** es agrupada por auto (ningún auto está en dos particiones),
    estratificada por luz, tipo de carrocería y color, con semilla fija (`--seed`, 0 por defecto): 70 % entrenamiento,
    15 % validación y 15 % prueba. La partición se **congela** en `split.json`: al sumar autos (otro zip, más autos
    estándar) los que ya estaban no cambian de partición y solo se sortean los nuevos, de modo que cada estrato
    vuelva a quedar en 70/15/15. Para empezar de cero hay que borrar `split.json` y `crops.json`.
+
+   **Pares de patente** (validación y prueba; ver "Pares de patente" abajo):
+
+   ```powershell
+   uv run --frozen --extra dev --extra tools python tools/training/reid/partial.py
+   ```
+
+   Escribe `partial-v2/`, `partial_v2.json` y `partial_v2_stats.json` (solo patentes).
 
 4. **Entrenar** (GTX 1660 de 6 GB, FP32, lote chico con acumulación; cerrá antes lo que use la GPU):
 
    ```powershell
    uv run --frozen --extra dev --extra tools python tools/training/reid/train.py
    ```
+
+   `train.py` guarda `last.pt` en cada época: si la corrida se corta (por ejemplo, por falta de memoria de la máquina), se sigue
+   donde quedó con `--resume`.
 
 5. **Exportar a ONNX y verificar** que reproduce a PyTorch:
 
@@ -121,8 +137,8 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
    Imprime el `sha256` para `models/manifest.json` y falla (borrando el archivo) si la diferencia máxima por
    componente del embedding pasa de 1e-3 o el coseno mínimo entre ONNX y PyTorch baja de 0,9999.
 
-6. **Medir** contra el modelo sin ajustar, en 3DRealCar y en VeRi-776: ver
-   [tools/eval/README.md](../../eval/README.md#re-id-con-3drealcar-reid_3drealcarpy).
+6. **Medir** contra el modelo sin ajustar, con los pares general-patente y en VeRi-776: ver
+   [tools/eval/README.md](../../eval/README.md#re-id-con-3drealcar-general-contra-patente-reid_parcialespy).
 
 ## Pares, ángulos y métricas
 
@@ -136,6 +152,35 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
   **S4:** pares de autos distintos detectados. Las cotas del 95 % son Clopper-Pearson (con 0 fallas, 3/N).
 - **Calibración:** el mayor umbral cuya cota del 95 % de U1 sobre validación no pasa de 1 %; con eso fijo se reporta
   el S4 sobre prueba.
+
+## Pares de patente
+
+R2 compara la foto GENERAL contra la de PLATE (la trompa o la cola, cortada entre el capot y el parabrisas, con la patente
+al 8-15 % del ancho); **no compara DETAIL ni CONTEXT** (decisión del 15/11/2026: la foto de detalle probablemente se elimine, así
+que no se calibra, no se mide y no se simula). 3DRealCar solo tiene vistas del auto entero, así que `partial.py` **simula** la foto de
+patente a partir de ellas, solo para **validación y prueba** (el entrenamiento sigue con autos enteros):
+
+1. **Vistas frontales y traseras por la pose.** El auto es una caja más ancha de costado que de frente. Con el azimut de
+   cada vista (de la pose de ARKit) y la relación ancho/alto de la caja del vehículo, se ajusta `aspecto ≈ c + a·cos(2·az) +
+   b·sin(2·az)`: el máximo cae en el azimut de la vista de costado y las frontales y traseras están a ±90°. Se aceptan las
+   vistas a menos de 30° de ese eje. Si el ajuste es débil (amplitud < 20 % del aspecto medio o R² < 0,5), el auto no
+   aporta pares de patente.
+2. **Patente.** De esas vistas, las que el detector v2 ve con una patente (confianza >= 0,30) dentro de la caja del vehículo
+   y con un ancho de 10 a 30 % del ancho del vehículo; hasta 2 por auto (las de mayor confianza, separadas al menos 30°).
+   Se recorta la ventana 16:9 de `capture_sets.plate_window` (la misma de los conjuntos de R1): patente al 8-15 % del
+   ancho, vehículo entero a lo ancho, corte a la altura del capot.
+3. El recorte se lleva a 1600 px y JPEG de <= 900 KB (lo que envía la app) y pasa por el mismo camino que una foto real:
+   se reduce a 1024 px, el detector busca el vehículo dominante y se recorta su caja, **sin máscaras**. Si no encuentra un
+   vehículo, el servicio no tendría embedding (duda, GREEN): se cuenta como "sin vehículo" y no entra a los pares.
+
+Pares: **general contra patente** del mismo auto con una separación mínima de 30° entre la vista entera y la vista de la que
+salió el recorte de patente, y de autos distintos (todos y difíciles: misma marca y color). Los pares de auto entero se
+arman como siempre y quedan solo como referencia.
+
+**Umbral.** Un **único umbral** calibrado en validación con los pares general-patente: el menor con el que **S4 >= 70 %** (S4 y U1
+suben juntos con el umbral, así que es el de menor U1; criterio del 15/11/2026), siempre que la cota del 95 % de U1 de validación sea
+<= 2 %. El umbral de U1 del proyecto (1 %) no cambia. Como hay una sola comparación por alerta, el U1 por par es también el U1 por alerta.
+Si el U1 de prueba supera esa cota, el modelo no se activa. R2 solo rechaza con certeza; ante la duda, GREEN.
 
 ## Pérdida: CosFace
 
@@ -160,6 +205,8 @@ y espejo. Parada temprana sobre validación (S4 con U1 acotado a 1 %, paciencia 
   la misma luz): se parecen más entre sí que dos fotos tomadas en momentos distintos.
 - **Puede haber diferencias con el parque automotor argentino.** Las marcas y modelos son los de las calles donde se
   capturó 3DRealCar (anotados en chino, p. ej. BYD o Changan).
-- **No hay primeros planos de partes del auto.** Todas las vistas muestran el auto entero, caminando alrededor.
+- **Los pares parciales son simulados.** Salen de recortes de vistas del auto entero, no de fotos tomadas con el encuadre
+  de la app: la resolución, el desenfoque y la iluminación de una foto de patente real son otros.
+- **No hay primeros planos reales de partes del auto.** Todas las vistas muestran el auto entero, caminando alrededor.
 - Hay una foto de cada vista, no un par de fotos de personas distintas con celulares distintos: el cambio de
   cámara entre GENERAL y PLATE en una alerta real no está representado.

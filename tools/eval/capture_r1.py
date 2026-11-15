@@ -54,6 +54,7 @@ LOWER = {"car": 0.35, "seg": 0.50}  # DETECTOR_MIN_CONF y SEGMENTER_MIN_CONF del
 S1_BOUND = 0.01  # cota máxima de S1 al elegir los umbrales
 COUNTED = ("car", "truck", "van")  # clases del detector que cuentan como vehículo (`ROLES` del adaptador)
 VALID = ("general", "plate", "detail")
+ALERT_2 = ("general", "plate")  # una alerta de 2 fotos (sin la de detalle, que probablemente se elimine)
 HEAVY = ("heavy_Truck", "heavy_Van")  # camiones y vans válidos
 PICKUP = "pickup"
 NOT_VEHICLES = ("colectivo", "ambulancia")  # negativas: se mide cuántas se rechazan
@@ -217,9 +218,12 @@ def rate(failures: int, trials: int) -> dict[str, Any]:
     }
 
 
-def u3(rates: Mapping[str, Mapping[str, Any]], key: str) -> float | None:
-    """Rechazo de una alerta de 3 fotos con rechazos independientes (`key`: `tasa` o `cota_95`)."""
-    values = [rates[name][key] for name in VALID]
+def u3(rates: Mapping[str, Mapping[str, Any]], key: str, names: Sequence[str] = VALID) -> float | None:
+    """Rechazo de una alerta con rechazos independientes entre sus fotos (`key`: `tasa` o `cota_95`).
+
+    Con las fotos de `VALID` (general, patente y detalle) es U3; con `ALERT_2` (general y patente), U2.
+    """
+    values = [rates[name][key] for name in names]
     if any(v is None for v in values):
         return None
     ok = 1.0
@@ -263,6 +267,13 @@ def evaluate(
         ]
         result["negativas"][key] = rate(sum(accepted(r, t_car, t_seg) for r in kept), len(kept))
     result["validas"] = {name: by_half(name, rejected) for name in VALID}
+    result["u2"] = {
+        half: {
+            "estimada": u3({n: result["validas"][n][half] for n in ALERT_2}, "tasa", ALERT_2),
+            "cota_95": u3({n: result["validas"][n][half] for n in ALERT_2}, "cota_95", ALERT_2),
+        }
+        for half in ("A", "B", "todas")
+    }
     result["u3"] = {
         half: {
             "estimada": u3({n: result["validas"][n][half] for n in VALID}, "tasa"),
@@ -460,7 +471,12 @@ def report(args: argparse.Namespace) -> int:
         for kind in VALID:
             b = val[kind]["B"]
             print(f"  {kind:<8} rechazo B {b['fallas']}/{b['n']} (cota {b['cota_95']})")
+        two = config["u2"]
         print(f"  U3 B {u['B']['estimada']} (cota {u['B']['cota_95']})")
+        print(
+            f"  U2 (general + patente) B {two['B']['estimada']} (cota {two['B']['cota_95']})"
+            f" · todas {two['todas']['estimada']} (cota {two['todas']['cota_95']})"
+        )
         for kind in ("camion_van", PICKUP, "heavy_Truck", "heavy_Van"):
             b = heavy[kind]["B"]
             print(f"  {kind:<12} rechazo B {b['fallas']}/{b['n']} (cota {b['cota_95']})")

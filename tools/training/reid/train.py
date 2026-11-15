@@ -116,9 +116,14 @@ class CropSet(Dataset[tuple[torch.Tensor, int]]):
     """Recortes de auto en PNG. `train` aplica aumentos; si no, el preproceso exacto del servicio."""
 
     def __init__(
-        self, root: Path, items: Sequence[Mapping[str, Any]], labels: Mapping[str, int], train: bool
+        self,
+        root: Path,
+        items: Sequence[Mapping[str, Any]],
+        labels: Mapping[str, int],
+        train: bool,
+        crops_dir: str = "crops",
     ):
-        self.root = root / "crops"
+        self.root = root / crops_dir
         self.items = list(items)
         self.labels = labels
         self.train = train
@@ -162,8 +167,8 @@ class CosFace(nn.Module):
         return F.cross_entropy(logits, labels)
 
 
-def load_items(root: Path) -> dict[str, list[dict[str, Any]]]:
-    items = json.loads((root / "crops.json").read_text(encoding="utf-8"))
+def load_items(root: Path, index: str = "crops.json") -> dict[str, list[dict[str, Any]]]:
+    items = json.loads((root / index).read_text(encoding="utf-8"))
     out: dict[str, list[dict[str, Any]]] = {"train": [], "val": [], "test": []}
     for item in items:
         out[item["particion"]].append(item)
@@ -210,6 +215,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=os.environ.get("REID_DATA_DIR"), help="REID_DATA_DIR")
     parser.add_argument("--out-dir", type=Path, default=os.environ.get("EVAL_OUT"), help="salida (EVAL_OUT)")
+    parser.add_argument("--index", default="crops_v2.json", help="índice de recortes dentro de --root")
+    parser.add_argument("--crops-dir", default="crops-v2", help="carpeta de recortes dentro de --root")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--epochs", type=int, default=12, help="máximo de épocas")
     parser.add_argument("--batch-size", type=int, default=16)
@@ -221,6 +228,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int, help="recortes de entrenamiento (para probar)")
+    parser.add_argument(
+        "--resume", action="store_true", help="seguir desde `last.pt` (el de la última época)"
+    )
     args = parser.parse_args(argv)
     for flag, value in (("--root", args.root), ("--out-dir", args.out_dir)):
         if value is None:
@@ -247,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     seed_everything(args.seed)
     device = args.device
-    parts = load_items(root)
+    parts = load_items(root, args.index)
     train_items = parts["train"][: args.limit] if args.limit else parts["train"]
     cars = sorted({item["auto"] for item in train_items})
     labels = {car: index for index, car in enumerate(cars)}
@@ -258,10 +268,14 @@ def main(argv: list[str] | None = None) -> int:
 
     model = Embedder(Dinov2Model.from_pretrained(HF_REPO, revision=HF_REVISION)).to(device)
     plain = DataLoader(
-        CropSet(root, train_items, labels, train=False), batch_size=EVAL_BATCH, num_workers=args.workers
+        CropSet(root, train_items, labels, train=False, crops_dir=args.crops_dir),
+        batch_size=EVAL_BATCH,
+        num_workers=args.workers,
     )
     val_loader = DataLoader(
-        CropSet(root, parts["val"], labels, train=False), batch_size=EVAL_BATCH, num_workers=args.workers
+        CropSet(root, parts["val"], labels, train=False, crops_dir=args.crops_dir),
+        batch_size=EVAL_BATCH,
+        num_workers=args.workers,
     )
     val_pairs = build_pairs(parts["val"], seed=args.seed)
     print(f"pares de validación: {len(val_pairs.same)} del mismo auto, {len(val_pairs.different)} distintos")
@@ -276,12 +290,15 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     history: list[dict[str, Any]] = []
-    baseline = validation_metrics(embed(model, val_loader, device), val_pairs)
-    history.append({"epoca": 0, "perdida": None, **baseline})
-    print(f"época 0 (sin ajustar): {baseline}")
+    last = out_dir / "last.pt"
+    resumed = args.resume and last.is_file()
+    if not resumed:
+        baseline = validation_metrics(embed(model, val_loader, device), val_pairs)
+        history.append({"epoca": 0, "perdida": None, **baseline})
+        print(f"época 0 (sin ajustar): {baseline}")
 
     loader = DataLoader(
-        CropSet(root, train_items, labels, train=True),
+        CropSet(root, train_items, labels, train=True, crops_dir=args.crops_dir),
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,
@@ -305,8 +322,21 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)
     out_dir.mkdir(parents=True, exist_ok=True)
-    best, stale = float("-inf"), 0
-    for epoch in range(1, args.epochs + 1):
+    best, stale, first_epoch = float("-inf"), 0, 1
+    if resumed:  # una corrida cortada (p. ej. por falta de memoria de la máquina) sigue donde quedó
+        state = torch.load(last, map_location="cpu", weights_only=False)
+        model.backbone.load_state_dict(state["backbone"])
+        head.load_state_dict(state["head"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        history, best, stale, first_epoch = (
+            state["historial"],
+            state["mejor"],
+            state["sin_mejora"],
+            state["epoca"] + 1,
+        )
+        print(f"se retoma desde la época {state['epoca']}", flush=True)
+    for epoch in range(first_epoch, args.epochs + 1):
         model.train()
         started, running, steps = time.perf_counter(), 0.0, 0
         optimizer.zero_grad(set_to_none=True)
@@ -342,9 +372,22 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             stale += 1
-            if stale >= args.patience:
-                print(f"parada temprana en la época {epoch} (sin mejora en {args.patience})")
-                break
+        torch.save(
+            {
+                "backbone": model.backbone.state_dict(),
+                "head": head.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "historial": history,
+                "mejor": best,
+                "sin_mejora": stale,
+                "epoca": epoch,
+            },
+            last,
+        )
+        if stale >= args.patience:
+            print(f"parada temprana en la época {epoch} (sin mejora en {args.patience})")
+            break
     summary = {
         "perdida": f"CosFace (s={SCALE}, m={MARGIN}) con un prototipo por auto",
         "autos_entrenamiento": len(cars),

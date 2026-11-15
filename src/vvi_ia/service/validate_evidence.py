@@ -46,7 +46,7 @@ from vvi_ia.domain.ports import (
     VehicleDetector,
 )
 from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
-from vvi_ia.domain.reid import ReidOutcome, best_match, same_vehicle
+from vvi_ia.domain.reid import ReidOutcome, same_vehicle
 from vvi_ia.domain.verdict import aggregate
 from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import (
@@ -135,9 +135,7 @@ class _Run:
     plate_detections: dict[tuple[EvidenceRole, int], list[Box] | None] = field(default_factory=dict)
     cars: dict[tuple[EvidenceRole, int], list[CarInstance] | None] = field(default_factory=dict)
     reads: dict[tuple[EvidenceRole, int, Box], PlateRead | None] = field(default_factory=dict)
-    reference_embeddings: list[Vector] = field(default_factory=list)
-    embeddings: dict[tuple[EvidenceRole, int, int], Vector | None] = field(default_factory=dict)
-    general_embedding: Vector | None = None
+    embeddings: dict[tuple[EvidenceRole, int], Vector | None] = field(default_factory=dict)
 
     def detect(self, image: EvidenceImage) -> list[Box] | None:
         """El único pase del detector sobre la foto reducida (sin mosaico), con las cajas en la original."""
@@ -187,9 +185,19 @@ class _Run:
             cars.append(CarInstance(mask=mask, conf=box.conf))
         return cars
 
-    def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
-        """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
-        key = (image.role, image.index, car_index)
+    def dominant_vehicle(self, image: EvidenceImage) -> CarInstance | None:
+        """El vehículo dominante de la foto según el detector: su caja `car` más grande, como máscara.
+
+        Es el recorte con el que se calibró la re-ID (`tools/training/reid`,
+        `tools/eval/reid_parciales.py`): la caja del detector, **sin la máscara del segmentador** (que
+        sí decide la presencia, R1). `None` si el detector no ve un vehículo o no respondió.
+        """
+        cars = self._boxed_cars(image)
+        return largest_car(cars) if cars else None
+
+    def embed_dominant(self, image: EvidenceImage, car: CarInstance) -> Vector | None:
+        """Embedding del vehículo dominante de una foto (con caché)."""
+        key = (image.role, image.index)
         if key not in self.embeddings:
             self.embeddings[key] = self.models.embedder.embed(image.model_pixels, car.mask)
         return self.embeddings[key]
@@ -311,9 +319,6 @@ class ValidateEvidence:
                 return self._finish(payload, codes, Scores(), durations)
         with _timed(durations, "burst"):
             similarity = self._burst(run, general, plate_img, codes)
-            self._reid_others(
-                run, general, by_role[EvidenceRole.DETAIL] + by_role[EvidenceRole.CONTEXT], codes
-            )
         with _timed(durations, "plate"):
             ocr_conf = self._plate(run, plate_img, reported, codes)
 
@@ -398,48 +403,24 @@ class ValidateEvidence:
     ) -> float | None:
         """R2: ¿GENERAL y PLATE muestran el mismo auto? Devuelve la similitud si se calculó.
 
-        Solo hay BURST_MISMATCH si la re-ID confirma que es otro auto; si no se puede comparar (falta el auto
-        segmentado o el embedding), no hay código.
+        Es la **única** comparación de re-ID (la de la foto general contra la de patente: la trompa o la
+        cola, cortada entre el capot y el parabrisas); DETAIL y CONTEXT no se comparan. Se compara el
+        recorte de la caja del vehículo dominante del detector, sin máscaras. Solo hay BURST_MISMATCH si
+        la re-ID confirma que es otro auto (coseno menor que `REID_T`); si no se puede comparar (el
+        detector no ve un vehículo o no hay embedding), no hay código.
         """
-        general_cars = run.car_instances(general)
-        plate_cars = run.car_instances(plate_img)
-        if not general_cars or not plate_cars:
+        general_car = run.dominant_vehicle(general)
+        plate_car = run.dominant_vehicle(plate_img)
+        if general_car is None or plate_car is None:
             return None
-        emb_general = run.embed(general, 0, largest_car(general_cars))
-        emb_plate = run.embed(plate_img, 0, largest_car(plate_cars))
-        run.general_embedding = emb_general
+        emb_general = run.embed_dominant(general, general_car)
+        emb_plate = run.embed_dominant(plate_img, plate_car)
         if emb_general is None or emb_plate is None:
             return None
-        run.reference_embeddings.extend((emb_general, emb_plate))
         result = same_vehicle(emb_general, emb_plate, self._t.reid_t, self._t.reid_t)
         if result.outcome == ReidOutcome.DIFFERENT:
             _add(codes, ReasonCode.BURST_MISMATCH)
         return result.similarity
-
-    def _reid_others(
-        self, run: _Run, general: EvidenceImage, others: Sequence[EvidenceImage], codes: Codes
-    ) -> None:
-        """R2: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
-
-        De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
-        encuentra ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
-        """
-        if run.general_embedding is None:
-            return
-        for image in others:
-            candidates = [
-                embedding
-                for index, car in enumerate(run.car_instances(image) or ())
-                if (embedding := run.embed(image, index, car)) is not None
-            ]
-            match = best_match(candidates, [run.general_embedding])
-            if match is None:
-                continue
-            outcome = same_vehicle(
-                run.general_embedding, candidates[match[0]], self._t.reid_t, self._t.reid_t
-            ).outcome
-            if outcome == ReidOutcome.DIFFERENT:
-                _add(codes, ReasonCode.BURST_MISMATCH)
 
     def _plate(self, run: _Run, plate_img: EvidenceImage, reported: str, codes: Codes) -> float | None:
         """R3: OCR de la patente de PLATE contra la reportada.
