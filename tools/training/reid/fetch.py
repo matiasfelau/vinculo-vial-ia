@@ -404,11 +404,19 @@ def check_zip(
     except (zipfile.BadZipFile, FetchError, OSError, ValueError, KeyError) as exc:
         return [f"no se puede abrir {label}.zip ({type(exc).__name__}): ¿terminó de copiarse?"]
     expected = {car: meta for car, meta in index.items() if meta["zip"] == label}
+    # 3DRealCar repite algunos autos en dos zips (17 de 200-400 están también en 1200-1400) y el índice
+    # los asigna a uno solo. Un auto de más no es un problema si el índice lo tiene en otro zip con las
+    # mismas vistas.
+    repeated = {
+        car
+        for car in set(cars) - set(expected)
+        if car in index and {int(number) for number in index[car]["fotos"]} == set(cars[car]["fotos"])
+    }
     problems: list[str] = []
-    if len(cars) != len(expected):
+    if len(cars) != len(expected) + len(repeated):
         problems.append(f"{len(cars)} autos en la copia y {len(expected)} en el índice")
     problems += [f"falta el auto {car}" for car in sorted(set(expected) - set(cars))]
-    problems += [f"sobra el auto {car}" for car in sorted(set(cars) - set(expected))]
+    problems += [f"sobra el auto {car}" for car in sorted(set(cars) - set(expected) - repeated)]
     for car, meta in expected.items():
         mine = cars.get(car)
         if mine is None:
