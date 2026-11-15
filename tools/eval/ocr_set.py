@@ -8,7 +8,9 @@ Parte del export COCO (cajas de patente) y deja, fuera del repo, 300 recortes pa
 3. Saca los duplicados y casi duplicados: la misma patente en otra foto, a otra escala o con otra compresión
    (se conserva el de mayor resolución).
 4. Clasifica cada foto en día o noche por el brillo medio de la escena sin la patente.
-5. Elige `--n` con semilla fija, al menos `--night-min` de noche, y los numera en orden aleatorio.
+5. Saca las probables motos (relación ancho/alto de la caja menor que 1,8) y las cajas inválidas (con varias
+   patentes adentro): el servicio lee una sola línea y esas cajas no son una patente.
+6. Elige `--n` con semilla fija, al menos `--night-min` de noche, y los numera en orden aleatorio.
 
 Escribe en `--out`: `recortes/NNN.png` (caja con 15 % de margen), `etiquetas.csv` (texto, formato y estado
 vacíos), `hojas/hoja-NN.jpg` (hojas de contacto para etiquetar mirando), `informe.json` (solo cifras) y
@@ -21,6 +23,7 @@ import csv
 import json
 import os
 import random
+import shutil
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -67,9 +70,20 @@ PHOTO_SIZE = (32, 32)
 
 LABEL_COLUMNS = ("id", "archivo", "recorte", "texto", "formato", "luz", "estado")
 DISCARD_COLUMNS = ("archivo", "caja", "motivo", "detalle")
+BOX_COLUMNS = ("id", "archivo", "caja", "relacion_aspecto")
+REPLACEMENT_COLUMNS = ("id", "archivo", "caja", "motivo", "reemplazada_por")
 LIGHT_DAY = "dia"
 LIGHT_NIGHT = "noche"
-TWO_LINE_ASPECT = 1.4  # ancho/alto de la caja: por debajo suele ser una patente de moto de dos líneas
+MOTORCYCLE_ASPECT = 1.8  # ancho/alto de la caja: por debajo, probable moto (patente de dos líneas)
+REASON_MOTORCYCLE = "probable_moto"
+REASON_INVALID = "caja_invalida"
+# Una caja contiene a otra de la misma foto si tiene adentro al menos esto de su área y la otra es bastante
+# más chica: es una hoja de patentes, un auto entero o una caja doble, no una patente.
+NESTED_INSIDE = 0.8
+NESTED_SIZE = 0.6
+# Cajas con varias patentes sin otra adentro, vistas a ojo: (split/foto sin el hash de Roboflow, ancho, alto).
+KNOWN_INVALID = (("train/17397969544621434_jpg", 142, 212),)  # pila de cinco patentes
+BACKUP_SUFFIX = "-v1"
 
 TILE_W, TILE_H = 480, 200
 CROP_AREA = (340, 172)
@@ -339,23 +353,29 @@ def write_csv(path: Path, columns: Sequence[str], rows: Sequence[dict[str, str]]
         writer.writerows(rows)
 
 
-def build_outputs(root: Path, chosen: Sequence[Described], out: Path) -> None:
-    """Recortes, etiquetas.csv (campos a completar vacíos) y hojas de contacto, numerados por id."""
+def build_outputs(
+    root: Path,
+    chosen: Sequence[tuple[str, Described]],
+    out: Path,
+    previous: dict[str, dict[str, str]] | None = None,
+) -> None:
+    """Recortes, etiquetas.csv, cajas.csv y hojas de contacto por id; `previous` conserva filas existentes."""
     (out / "recortes").mkdir(parents=True, exist_ok=True)
     (out / "hojas").mkdir(parents=True, exist_ok=True)
-    rows: list[dict[str, str]] = []
+    labels: list[dict[str, str]] = []
+    boxes: list[dict[str, str]] = []
     tiles: list[np.ndarray] = []
     per_sheet = SHEET_COLUMNS * SHEET_ROWS
-    for number, item in enumerate(chosen, start=1):
+    for position, (ident, item) in enumerate(chosen, start=1):
         annotation = item.annotation
         color = read_color(root / annotation.split / annotation.file)
         if color is None:
             raise OSError(f"no se pudo leer {annotation.name}")
-        ident = f"{number:03d}"
         crop = crop_with_margin(color, annotation)
         write_png(out / "recortes" / f"{ident}.png", crop)
-        rows.append(
-            {
+        labels.append(
+            (previous or {}).get(ident)
+            or {
                 "id": ident,
                 "archivo": annotation.name,
                 "recorte": f"recortes/{ident}.png",
@@ -365,39 +385,95 @@ def build_outputs(root: Path, chosen: Sequence[Described], out: Path) -> None:
                 "estado": "",
             }
         )
+        boxes.append(
+            {
+                "id": ident,
+                "archivo": annotation.name,
+                "caja": box_text(annotation.box),
+                "relacion_aspecto": f"{aspect(annotation):.2f}",
+            }
+        )
         mark = "N" if item.light == LIGHT_NIGHT else "D"
         mark += "" if item.light_is_certain else "?"
         height, width = color.shape[:2]
-        tiles.append(
-            contact_tile(
-                f"{ident}  {mark}",
-                crop,
-                color,
-                pixel_box(annotation.box, width, height),
-            )
-        )
-        if len(tiles) == per_sheet or number == len(chosen):
+        tiles.append(contact_tile(f"{ident}  {mark}", crop, color, pixel_box(annotation.box, width, height)))
+        if len(tiles) == per_sheet or position == len(chosen):
             write_jpeg(
-                out / "hojas" / f"hoja-{(number - 1) // per_sheet + 1:02d}.jpg", sheet_from_tiles(tiles)
+                out / "hojas" / f"hoja-{(position - 1) // per_sheet + 1:02d}.jpg", sheet_from_tiles(tiles)
             )
             tiles = []
-    write_csv(out / "etiquetas.csv", LABEL_COLUMNS, rows)
+    write_csv(out / "etiquetas.csv", LABEL_COLUMNS, labels)
+    write_csv(out / "cajas.csv", BOX_COLUMNS, boxes)
 
 
 def box_text(box: tuple[float, float, float, float]) -> str:
     return " ".join(f"{v:.0f}" for v in box)
 
 
-def run(
-    source: Path,
-    reference: Path,
-    out: Path,
-    count: int = DEFAULT_COUNT,
-    night_min: int = DEFAULT_NIGHT_MIN,
-    seed: int = DEFAULT_SEED,
-    night_brightness: float = NIGHT_BRIGHTNESS,
-) -> dict[str, Any]:
-    """Todo el armado; devuelve el informe (solo cifras)."""
+def aspect(annotation: Annotation) -> float:
+    """Ancho sobre alto de la caja anotada (sin margen)."""
+    _, _, w, h = annotation.box
+    return w / h if h > 0 else 0.0
+
+
+def nested_boxes(annotations: Sequence[Annotation]) -> set[Annotation]:
+    """Cajas que tienen adentro otra caja de patente de la misma foto (no son una sola patente)."""
+    by_photo: dict[tuple[str, str], list[Annotation]] = {}
+    for annotation in annotations:
+        by_photo.setdefault((annotation.split, annotation.file), []).append(annotation)
+
+    def inside(inner: Annotation, outer: Annotation) -> float:
+        ix, iy, iw, ih = inner.box
+        ox, oy, ow, oh = outer.box
+        width = max(0.0, min(ix + iw, ox + ow) - max(ix, ox))
+        height = max(0.0, min(iy + ih, oy + oh) - max(iy, oy))
+        return width * height / (iw * ih) if iw * ih > 0 else 0.0
+
+    found: set[Annotation] = set()
+    for group in by_photo.values():
+        for outer in group:
+            area = outer.box[2] * outer.box[3]
+            if any(
+                other is not outer
+                and other.box[2] * other.box[3] < NESTED_SIZE * area
+                and inside(other, outer) >= NESTED_INSIDE
+                for other in group
+            ):
+                found.add(outer)
+    return found
+
+
+def invalid_boxes(annotations: Sequence[Annotation]) -> set[Annotation]:
+    """Cajas que no son una sola patente: las que contienen otras y las vistas a ojo."""
+    known = {
+        annotation
+        for annotation in annotations
+        for prefix, width, height in KNOWN_INVALID
+        if annotation.name.split(".rf.")[0] == prefix
+        and round(annotation.box[2]) == width
+        and round(annotation.box[3]) == height
+    }
+    return nested_boxes(annotations) | known
+
+
+def classify(annotation: Annotation, invalid: set[Annotation]) -> str | None:
+    """Por qué la caja no sirve para el set (inválida o probable moto), o `None` si es de auto."""
+    if annotation in invalid:
+        return REASON_INVALID
+    return REASON_MOTORCYCLE if aspect(annotation) < MOTORCYCLE_ASPECT else None
+
+
+@dataclass
+class Pool:
+    """Las cajas candidatas tras los descartes de tamaño, referencia y duplicados."""
+
+    annotations: list[Annotation]
+    items: list[Described]
+    discards: list[dict[str, str]]
+    dropped: int
+
+
+def build_pool(source: Path, reference: Path, night_brightness: float = NIGHT_BRIGHTNESS) -> Pool:
     annotations = load_annotations(source)
     discards: list[dict[str, str]] = []
 
@@ -438,48 +514,203 @@ def run(
         )
     for item in pool:
         item.light = estimate_light(item.surround, night_brightness)
+    return Pool(annotations, pool, discards, len(dropped))
 
-    chosen = select(pool, count, night_min, seed)
-    build_outputs(source, chosen, out)
-    write_csv(out / "descartes.csv", DISCARD_COLUMNS, discards)
 
-    def two_lines(item: Described) -> bool:
-        _, _, w, h = item.annotation.box
-        return w / h < TWO_LINE_ASPECT
-
-    report = {
-        "fotos": len({(a.split, a.file) for a in annotations}),
-        "cajas": len(annotations),
-        "caja_chica": sum(d["motivo"] == "caja_chica" for d in discards),
-        "foto_en_dataset_de_calibracion": sum(
-            d["motivo"] == "foto_en_dataset_de_calibracion" for d in discards
-        ),
-        "patente_en_dataset_de_calibracion": sum(
-            d["motivo"] == "patente_en_dataset_de_calibracion" for d in discards
-        ),
-        "duplicados": len(dropped),
-        "candidatas": len(pool),
-        "candidatas_de_noche": sum(item.light == LIGHT_NIGHT for item in pool),
+def chosen_stats(chosen: Sequence[Described]) -> dict[str, Any]:
+    return {
         "elegidas": len(chosen),
         "elegidas_de_noche": sum(item.light == LIGHT_NIGHT for item in chosen),
         "elegidas_sin_escena_para_juzgar_la_luz": sum(not item.light_is_certain for item in chosen),
-        "elegidas_probable_dos_lineas": sum(two_lines(item) for item in chosen),
+        "elegidas_probable_moto": sum(aspect(item.annotation) < MOTORCYCLE_ASPECT for item in chosen),
         "elegidas_por_split": {
             split: sum(item.annotation.split == split for item in chosen) for split in SPLITS
         },
-        "parametros": {
-            "n": count,
-            "noche_minima": night_min,
-            "semilla": seed,
-            "umbral_noche": night_brightness,
-            "margen_recorte": CROP_MARGIN,
-            "caja_minima": f"{MIN_BOX_WIDTH}x{MIN_BOX_HEIGHT}",
-            "ncc_crudo_minimo": MIN_RAW_NCC,
-            "ncc_trazos_minimo": MIN_STROKE_NCC,
-        },
+    }
+
+
+def parameters(count: int, night_min: int, seed: int, night_brightness: float) -> dict[str, Any]:
+    return {
+        "n": count,
+        "noche_minima": night_min,
+        "semilla": seed,
+        "umbral_noche": night_brightness,
+        "margen_recorte": CROP_MARGIN,
+        "caja_minima": f"{MIN_BOX_WIDTH}x{MIN_BOX_HEIGHT}",
+        "ncc_crudo_minimo": MIN_RAW_NCC,
+        "ncc_trazos_minimo": MIN_STROKE_NCC,
+        "relacion_aspecto_minima": MOTORCYCLE_ASPECT,
+    }
+
+
+def run(
+    source: Path,
+    reference: Path,
+    out: Path,
+    count: int = DEFAULT_COUNT,
+    night_min: int = DEFAULT_NIGHT_MIN,
+    seed: int = DEFAULT_SEED,
+    night_brightness: float = NIGHT_BRIGHTNESS,
+) -> dict[str, Any]:
+    """Todo el armado, ya sin motos ni cajas inválidas; devuelve el informe (solo cifras)."""
+    built = build_pool(source, reference, night_brightness)
+    invalid = invalid_boxes(built.annotations)
+    pool = []
+    for item in built.items:
+        reason = classify(item.annotation, invalid)
+        if reason is None:
+            pool.append(item)
+        else:
+            built.discards.append(
+                {
+                    "archivo": item.annotation.name,
+                    "caja": box_text(item.annotation.box),
+                    "motivo": reason,
+                    "detalle": f"relacion {aspect(item.annotation):.2f}",
+                }
+            )
+    chosen = select(pool, count, night_min, seed)
+    build_outputs(source, [(f"{n:03d}", item) for n, item in enumerate(chosen, start=1)], out)
+    write_csv(out / "descartes.csv", DISCARD_COLUMNS, built.discards)
+
+    def count_reason(reason: str) -> int:
+        return sum(d["motivo"] == reason for d in built.discards)
+
+    report = {
+        "fotos": len({(a.split, a.file) for a in built.annotations}),
+        "cajas": len(built.annotations),
+        "caja_chica": count_reason("caja_chica"),
+        "foto_en_dataset_de_calibracion": count_reason("foto_en_dataset_de_calibracion"),
+        "patente_en_dataset_de_calibracion": count_reason("patente_en_dataset_de_calibracion"),
+        "duplicados": built.dropped,
+        "probable_moto": count_reason(REASON_MOTORCYCLE),
+        "caja_invalida": count_reason(REASON_INVALID),
+        "candidatas": len(pool),
+        "candidatas_de_noche": sum(item.light == LIGHT_NIGHT for item in pool),
+        **chosen_stats(chosen),
+        "parametros": parameters(count, night_min, seed, night_brightness),
     }
     (out / "informe.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     return report
+
+
+def read_labels(path: Path) -> list[dict[str, str]]:
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+@dataclass(frozen=True)
+class Swap:
+    """Una caja del set anterior que sale y la candidata que ocupa su id."""
+
+    ident: str
+    removed: Described
+    reason: str
+    replacement: Described
+
+
+def plan_swaps(
+    first: Sequence[Described], pool: Sequence[Described], invalid: set[Annotation], seed: int
+) -> list[Swap]:
+    """Reemplazos de las cajas que no son de auto por candidatas de auto que no estaban elegidas.
+
+    Con la misma semilla; primero las estimadas de noche. Cada reemplazo toma el id de la caja que sale.
+    """
+    removed = [
+        (position, item, reason)
+        for position, item in enumerate(first)
+        if (reason := classify(item.annotation, invalid)) is not None
+    ]
+    taken = {id(item) for item in first}
+    eligible = [item for item in pool if id(item) not in taken and classify(item.annotation, invalid) is None]
+    nights = [item for item in eligible if item.light == LIGHT_NIGHT]
+    days = [item for item in eligible if item.light != LIGHT_NIGHT]
+    rng = random.Random(seed)  # noqa: S311 - muestreo de fotos, no criptografía
+    rng.shuffle(nights)
+    rng.shuffle(days)
+    picks = nights + days
+    if len(picks) < len(removed):
+        raise ValueError(f"hay {len(picks)} candidatas de auto y se necesitan {len(removed)}")
+    return [
+        Swap(f"{position + 1:03d}", item, reason, pick)
+        for (position, item, reason), pick in zip(removed, picks, strict=False)
+    ]
+
+
+def refresh(
+    source: Path,
+    reference: Path,
+    out: Path,
+    count: int = DEFAULT_COUNT,
+    night_min: int = DEFAULT_NIGHT_MIN,
+    seed: int = DEFAULT_SEED,
+    night_brightness: float = NIGHT_BRIGHTNESS,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Limpia un set ya armado: reemplaza motos y cajas inválidas y conserva los ids de las demás.
+
+    Reconstruye la selección original (mismos filtros y semilla), la compara con `etiquetas.csv` y, antes de
+    escribir, copia la carpeta a `<out>-v1`. Si `etiquetas.csv` ya tiene texto, formato o estado, no lo pisa.
+    """
+    rows = read_labels(out / "etiquetas.csv")
+    if any(row["texto"] or row["formato"] or row["estado"] for row in rows):
+        raise ValueError("etiquetas.csv ya tiene etiquetas cargadas: no se pisa")
+    built = build_pool(source, reference, night_brightness)
+    first = select(built.items, count, night_min, seed)
+    if [row["archivo"] for row in rows] != [item.annotation.name for item in first]:
+        raise ValueError("el set de la carpeta no es el que arman estos filtros y esta semilla")
+    invalid = invalid_boxes(built.annotations)
+    swaps = plan_swaps(first, built.items, invalid, seed)
+    final = list(first)
+    by_ident = {f"{n:03d}": n - 1 for n in range(1, len(first) + 1)}
+    for swap in swaps:
+        final[by_ident[swap.ident]] = swap.replacement
+    nights = sum(item.light == LIGHT_NIGHT for item in final)
+    if nights < night_min:
+        raise ValueError(f"quedarían {nights} de noche y se piden al menos {night_min}")
+    swapped = {swap.ident for swap in swaps}
+    summary: dict[str, Any] = {
+        "reemplazadas": len(swaps),
+        "reemplazadas_probable_moto": sum(s.reason == REASON_MOTORCYCLE for s in swaps),
+        "reemplazadas_caja_invalida": sum(s.reason == REASON_INVALID for s in swaps),
+        "reemplazadas_estimadas_de_noche": sum(s.removed.light == LIGHT_NIGHT for s in swaps),
+        "reemplazos_estimados_de_noche": sum(s.replacement.light == LIGHT_NIGHT for s in swaps),
+        "conservadas": len(first) - len(swaps),
+        **chosen_stats(final),
+    }
+    if dry_run:
+        summary["swaps"] = swaps
+        return summary
+    backup = out.with_name(out.name + BACKUP_SUFFIX)
+    if backup.exists():
+        raise ValueError(f"{backup} ya existe: no se pisa")
+    shutil.copytree(out, backup)
+    previous = {row["id"]: row for row in rows if row["id"] not in swapped}
+    build_outputs(
+        source, [(f"{n:03d}", item) for n, item in enumerate(final, start=1)], out, previous=previous
+    )
+    write_csv(
+        out / "reemplazos.csv",
+        REPLACEMENT_COLUMNS,
+        [
+            {
+                "id": swap.ident,
+                "archivo": swap.removed.annotation.name,
+                "caja": box_text(swap.removed.annotation.box),
+                "motivo": swap.reason,
+                "reemplazada_por": f"{swap.replacement.annotation.name} "
+                f"{box_text(swap.replacement.annotation.box)}",
+            }
+            for swap in swaps
+        ],
+    )
+    report_path = out / "informe.json"
+    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
+    report.update(chosen_stats(final))
+    report["limpieza"] = {k: v for k, v in summary.items() if k.startswith(("reemplaz", "conserv"))}
+    report["parametros"] = parameters(count, night_min, seed, night_brightness)
+    (out / "informe.json").write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return summary
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -502,6 +733,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--night-min", type=int, default=DEFAULT_NIGHT_MIN)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument("--night-brightness", type=float, default=NIGHT_BRIGHTNESS)
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="limpia el set ya armado en --out (reemplaza motos y cajas inválidas, conserva los demás ids)",
+    )
     args = parser.parse_args(argv)
     for name in ("src", "reference", "out"):
         if getattr(args, name) is None:
@@ -514,13 +750,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(path.resolve().is_relative_to(REPO_ROOT) for path in (args.src, args.reference, args.out)):
         print("Las fotos y la salida no pueden estar dentro del repositorio: tienen patentes de terceros.")
         return 1
-    if (args.out / "etiquetas.csv").exists():
+    if not args.refresh and (args.out / "etiquetas.csv").exists():
         print(f"{args.out / 'etiquetas.csv'} ya existe: no se pisa (puede tener etiquetas). Usá otra --out.")
         return 1
     try:
-        report = run(
-            args.src, args.reference, args.out, args.n, args.night_min, args.seed, args.night_brightness
-        )
+        if args.refresh:
+            report = refresh(
+                args.src, args.reference, args.out, args.n, args.night_min, args.seed, args.night_brightness
+            )
+        else:
+            report = run(
+                args.src, args.reference, args.out, args.n, args.night_min, args.seed, args.night_brightness
+            )
     except ValueError as error:
         print(error)
         return 1
