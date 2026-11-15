@@ -2006,7 +2006,8 @@ groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto 
 
 > **Medición vigente de re-ID (15/11/2026).** La sección siguiente ("Re-ID con 3DRealCar") es la de la primera versión (411 autos,
 > detector v1, pares de auto entero) y queda como historia. **`dinov2_vits14_reid_v2` está activado** (`MODEL_EMBEDDER` en `.env.example`) con
-> `REID_T` = 0,0638.
+> `REID_T` = **0,2565** (el mayor umbral con la cota de U1 <= 1 % en validación). La opción conservadora, **0,0638**
+> (el menor con S4 >= 70 %), queda documentada abajo.
 
 **Alcance de R2 (decisión del 15/11/2026): R2 compara solo la foto GENERAL contra la de PLATE.** La foto de detalle probablemente se elimine
 del contrato, así que no se calibra, no se mide y no se simula (se descartó su simulación, que ya se había ajustado). En el servicio, DETAIL y
@@ -2059,44 +2060,49 @@ falta de memoria de la máquina; `train.py` ahora guarda `last.pt` por época y 
 
 ### Umbral
 
-**Un único umbral, calibrado en validación con los 871 pares general-patente del mismo auto y 100 000 de autos distintos:** el **menor** con el que al
-menos el **70 %** de los pares de autos distintos queda como "otro auto" (S4 >= 70 %), que es el de menor U1 (S4 y U1 suben juntos con el umbral), y
-con la cota del 95 % de U1 de validación en **2 % o menos**. **R2 solo rechaza con certeza; ante la duda, GREEN.** El umbral de U1 del proyecto (**1 %**)
-**no cambia**; el 2 % es la cota que se aceptó para activar el modelo. Resultado: **0,0638** (validación: U1 0 de 871, cota 0,34 %; S4 70,0 %; S4 en
-difíciles 38,4 %). Como hay una sola comparación por alerta (GENERAL contra PLATE), **U1 por par es también U1 por alerta**.
+**Un único umbral, calibrado en validación con los 871 pares general-patente del mismo auto y 100 000 de autos distintos.** Hay dos candidatos, y los
+dos están en `.env.example`:
 
-### Resultados en prueba (umbral 0,0638 elegido en validación; cotas del 95 % de una cola)
+- **0,2565, el activo (decisión del 15/11/2026): el mayor umbral con la cota del 95 % de U1 de validación en 1 % o menos** (el umbral de U1 del proyecto). En
+  validación: U1 3 de 871 (0,34 %, cota 0,89 %), S4 98,1 % y 88,8 % en difíciles.
+- **0,0638, la opción conservadora: el menor umbral con S4 >= 70 %** en validación (S4 y U1 suben juntos con el umbral, así que es el de menor U1), con la cota
+  de U1 de validación en 2 % o menos. En validación: U1 0 de 871 (cota 0,34 %), S4 70,0 % y 38,4 % en difíciles.
 
-Prueba: 778 pares del mismo auto general-patente, 100 000 de autos distintos y 3 736 difíciles (misma marca y color).
+Los pares general-patente se separan tanto (AUC 0,999) que el menor umbral con S4 >= 70 % deja mucho S4 sin usar. **R2 solo rechaza con certeza; ante la
+duda, GREEN.** Como hay una sola comparación por alerta (GENERAL contra PLATE), **U1 por par es también U1 por alerta**.
+
+### Resultados en prueba (cotas del 95 % de una cola)
+
+Prueba: 778 pares del mismo auto general-patente, 100 000 de autos distintos y 3 736 difíciles (misma marca y color). Los dos umbrales salen de validación.
 
 | | AUC | **U1** (cota) | **S4** | S4 en difíciles |
 |---|---|---|---|---|
-| **DINOv2 ajustado (`dinov2_vits14_reid_v2`)** | **0,9991** | **0,00 %** (0 de 778; cota ≤ **0,39 %**) | **69,6 %** | **46,2 %** |
-| DINOv2 sin ajustar (su umbral para S4 >= 70 %: 0,393) | 0,646 | 54,8 % (cota 57,7 %) | 67,2 % | 58,5 % |
-| Referencia: pares de auto entero (ajustado, mismo umbral) | 0,996 | 0,27 % (cota 0,34 %) | 69,7 % | 42,1 % |
+| **Ajustado con `REID_T` = 0,2565 (el activo)** | **0,9991** | **0,39 %** (3 de 778; cota **≤ 0,99 %**) | **98,0 %** | **90,5 %** |
+| Ajustado con 0,0638 (la opción conservadora) | 0,9991 | 0,00 % (0 de 778; cota ≤ 0,39 %) | 69,6 % | 46,2 % |
+| DINOv2 sin ajustar (umbral para S4 >= 70 %: 0,393) | 0,646 | 54,8 % (cota 57,7 %) | 67,2 % | 58,5 % |
 
-- **U1 cumple con holgura la cota pedida** (≤ 2 %) y también el 1 % del proyecto: **0 de 778, cota 0,39 %**; por alerta es lo mismo. **No hace falta
-  tolerancia en U1**; **S4 queda "válido con tolerancia"**: 69,6 % en prueba contra el 70 % pedido (70,0 % en validación), y 46,2 % en los pares difíciles. El
-  dueño siempre revisa las fotos.
+- **Con 0,2565, U1 cumple el 1 % del proyecto** (3 de 778, cota 0,99 %; por alerta es lo mismo), **y S4 cumple el 70 %** (98,0 %, y 90,5 % en los
+  pares difíciles). La cota de U1 queda a 0,01 puntos del 1 %: con tan pocos pares (778) no hay margen.
+- **Con 0,0638**, U1 es 0 de 778 (cota 0,39 %) y S4 queda "válido con tolerancia": 69,6 % en prueba contra el 70 % (70,0 % en validación) y 46,2 % en difíciles.
 - **Por qué el DINOv2 sin ajustar no sirve:** con el mismo criterio (S4 >= 70 %) marca como distinto al 55 % de los pares del mismo auto; con el umbral que
   deja U1 en 1 % (0,064), su S4 es de 12,8 % en validación.
+- Referencia, no es una comparación de R2: con 0,2565 los pares de auto entero (dos vistas del auto entero) darían U1 3,05 % (cota 3,28 %) y S4 98,0 %.
 
-**Por condición de luz** (ajustado, 0,0638):
+**Por condición de luz** (ajustado, prueba):
 
-| Luz | Pares del mismo auto | U1 (cota) | S4 | S4 en difíciles |
-|---|---|---|---|---|
-| Estándar | 601 | 0,00 % (≤ 0,50 %) | 68,5 % | 48,6 % (n = 2 285) |
-| Reflectiva | 140 | 0,00 % (≤ 2,14 %) | 64,6 % | 44,6 % (n = 168) |
-| Oscura | 37 | 0,00 % (≤ 8,11 %) | 54,6 % | 0,0 % (n = 12) |
+| Luz | Pares del mismo auto | U1 con 0,2565 (cota) | S4 con 0,2565 | S4 en difíciles con 0,2565 | S4 con 0,0638 |
+|---|---|---|---|---|---|
+| Estándar | 601 | 0,33 % (2 de 601; ≤ 1,04 %) | 97,7 % | 91,6 % (n = 2 285) | 68,5 % |
+| Reflectiva | 140 | 0,71 % (1 de 140; ≤ 3,34 %) | 97,1 % | 78,6 % (n = 168) | 64,6 % |
+| Oscura | 37 | 0,00 % (≤ 8,11 %) | 95,7 % | 33,3 % (n = 12) | 54,6 % |
 
-Las cifras de luz oscura salen de muy pocos pares (37 del mismo auto, 604 de distintos y 12 difíciles): las cotas son anchas y el S4 en difíciles no
-dice nada. Por rango de ángulo entre la vista entera y la de patente (30-60°, 60-90°, 90-135°, 135-180°) U1 es 0 en los cuatro (132, 158, 217 y 271 pares).
-Con el `REID_T` anterior del servicio (0,075) el modelo ajustado da U1 0 de 778 y S4 73,1 % (46,2 % → 49,5 % en difíciles).
+Con 0,0638, U1 es 0 en las tres luces (cotas de 0,50 %, 2,14 % y 8,11 %). Las cifras de luz oscura salen de muy pocos pares (37 del mismo auto, 604 de
+distintos y 12 difíciles): las cotas son anchas y el S4 en difíciles no dice nada. Por rango de ángulo entre la vista entera y la de patente (30-60°,
+60-90°, 90-135° y 135-180°), con 0,2565 U1 es 0 %, 0 %, 0,46 % y 0,74 % (132, 158, 217 y 271 pares). Con el `REID_T` anterior del servicio (0,075) el modelo
+ajustado daba U1 0 de 778 y S4 73,1 % (49,5 % en difíciles).
 
-**Qué pasaría con un umbral más alto (información; no se aplicó).** Los pares general-patente se separan tanto (AUC 0,999) que "el menor umbral con S4 >= 70 %"
-deja mucho S4 sin usar con el mismo U1. En validación, el mayor umbral con la cota de U1 en 1 % o menos es **0,2565** (S4 98,1 %); en prueba ese umbral da
-U1 0,39 % (3 de 778, cota 0,99 %), S4 98,0 % y 90,5 % en difíciles. Con 0,15, U1 0,26 % (cota 0,81 %) y S4 89,7 %. Se eligió 0,0638 por el criterio pedido y
-porque los pares de patente son simulados y de una misma sesión (U1 optimista): subir el umbral se decide con fotos propias.
+**El umbral se decide con fotos propias.** Los pares de patente son simulados y de una misma sesión de captura (U1 optimista): si en producción U1 resultara mayor al esperado,
+bajar `REID_T` hacia 0,0638 es un cambio de un número (con 0,15, en prueba: U1 0,26 %, cota 0,81 %, S4 89,7 %).
 
 ### U por alerta de R1 con 2 fotos (general + patente), con `car` 0,35 y segmentador 0,50
 
@@ -2114,11 +2120,11 @@ Con los umbrales anteriores (`car` 0,40) eran 1,17 % (cota 5,4 %) en B y 0,92 % 
 ### VeRi-776 como referencia
 
 4 490 recortes de cámaras de vigilancia (521 descartados por no tener auto detectado), con el mismo recorte del detector. **AUC 0,777 con el modelo
-ajustado contra 0,667 sin ajustar** (difíciles: 0,621 contra 0,536). **El umbral calibrado en 3DRealCar no se traslada a VeRi-776**: con el 0,0638 el modelo
-ajustado marca como distinto solo el 0,40 % de los pares de autos distintos (S4 de 70 % en 3DRealCar) y deja U1 en 0,07 % (cota 0,10 %); en los difíciles,
-S4 de 0,08 %. Calibrado en VeRi con la misma regla de U1 <= 1 % (cota 1,00 %): S4 de 3,1 % el ajustado y 3,6 % el no ajustado. Mejora el ordenamiento, no el
-umbral: VeRi (cámaras de vigilancia de baja resolución, de otro dominio) es solo una referencia, y el umbral del servicio vale para fotos de celular como las
-de 3DRealCar hasta validarlo con fotos propias.
+ajustado contra 0,667 sin ajustar** (difíciles: 0,621 contra 0,536). **El umbral calibrado en 3DRealCar no se traslada a VeRi-776**: con el `REID_T` activo
+(0,2565) el modelo ajustado marca como distinto solo el 9,1 % de los pares de autos distintos (S4 de 98 % en 3DRealCar; 3,0 % en los difíciles) y deja U1 en
+2,53 % (cota 2,65 %); con 0,0638, S4 de 0,40 % y U1 de 0,07 %. Calibrado en VeRi con la regla de U1 <= 1 % (cota 1,00 %): S4 de 3,1 % el ajustado y 3,6 % el no
+ajustado. Mejora el ordenamiento, no el umbral: VeRi (cámaras de vigilancia de baja resolución, de otro dominio) es solo una referencia, y el umbral del servicio
+vale para fotos de celular como las de 3DRealCar hasta validarlo con fotos propias.
 
 ### Limitaciones
 

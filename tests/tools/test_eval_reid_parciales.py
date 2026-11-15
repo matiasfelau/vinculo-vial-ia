@@ -174,3 +174,14 @@ def test_evaluate_model_con_todo_en_cache_no_carga_los_modelos(tmp_path: Path) -
     second = run(tmp_path, whole, plate, cache, models=rp.LazyModels(boom))
 
     assert first["eleccion_en_validacion"]["umbral"] == second["eleccion_en_validacion"]["umbral"]
+
+
+def test_reporta_tambien_el_umbral_de_cota_de_u1_1pct(tmp_path: Path) -> None:
+    whole, plate = make_world(tmp_path)
+
+    report = run(tmp_path, whole, plate)
+
+    alt = report["al_umbral_de_cota_u1_1pct"]
+    assert alt["umbral"] == report["eleccion_en_validacion"]["referencia_cota_de_u1_1pct"]["umbral"]
+    assert set(alt["test"]) == {"entero", "general_patente"}
+    assert alt["test"]["general_patente"]["total"]["U1_cota_95"] <= 0.01

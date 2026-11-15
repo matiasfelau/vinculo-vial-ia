@@ -286,6 +286,15 @@ def evaluate_model(
         report[split] = {name: report_at(pair, t) for name, pair in sets[split].items()}
     test = report["test"]["general_patente"]["total"]
     report["cumple_la_cota_de_u1_en_prueba"] = test["U1_cota_95"] is not None and test["U1_cota_95"] <= MAX_U1
+    ref = choice["referencia_cota_de_u1_1pct"].get("umbral")
+    if (
+        ref is not None
+    ):  # el mayor umbral con la cota de U1 <= 1 % en validación (el del servicio desde el 15/11/2026)
+        report["al_umbral_de_cota_u1_1pct"] = {
+            "umbral": float(ref),
+            "test": {name: report_at(pair, float(ref)) for name, pair in sets["test"].items()},
+            "val": {name: report_at(pair, float(ref)) for name, pair in sets["val"].items()},
+        }
     report["a_los_umbrales_de_referencia"] = {
         "REID_T_del_servicio": {
             name: cell(p.same, p.different, p.hard, float(SERVICE_REID_T)) for name, p in sets["test"].items()
