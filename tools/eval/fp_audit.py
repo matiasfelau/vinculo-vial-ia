@@ -91,7 +91,7 @@ def summarize(
         "precision_corregida_con_dudosos": round(
             (tp + counts[REAL] + counts[DOUBT]) / (tp + false_positives), 4
         ),
-        # Para v2, camión, van y colectivo son clases de presencia (cuentan como auto): son aciertos.
+        # Para v2, camión y van son clases de presencia (cuentan como auto): son aciertos.
         "precision_corregida_otros_vehiculos_son_aciertos": round(
             (tp + counts[REAL] + counts[OTHER]) / (tp + false_positives), 4
         ),

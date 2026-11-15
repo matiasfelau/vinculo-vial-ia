@@ -873,23 +873,33 @@ detector; en GENERAL y CONTEXT hace falta una caja `car`. Por eso el recall de l
 
 ## R1 con el encuadre de 1-2 m (`capture_sets.py` y `capture_r1.py`): la medición vigente
 
-> **Esta es la medición de R1 que vale** (decisión del 12/11/2026). Las secciones siguientes ("Presencia de auto en todas
+> **Esta es la medición de R1 que vale** (decisiones del 12/11 y del 14/11/2026). Las secciones siguientes ("Presencia de auto en todas
 > las fotos" y todo lo que sigue hasta "Precisión corregida") son **históricas**: se hicieron con otras reglas de presencia
 > (la patente o la rueda contaban, DETAIL tenía una regla propia con el daño), con una foto de detalle de CarDD (que ya no se
 > usa para evaluar la cascada) y con **dos criterios de exclusión manual de negativas distintos**: "sin las 3" (v1: las 3 con un
 > auto real al fondo) y "sin las excluidas" (v2: 11 fotos con un vehículo real). **Se unifican en uno solo: no hay exclusiones
-> manuales.** Toda negativa cuenta; la única definición de "sin vehículo" es la anotación de Open Images (abajo). Los números
-> viejos no se comparan con los de esta sección.
+> manuales.** Los números viejos no se comparan con los de esta sección. La medición del 12/11 de esta misma sección (con otra
+> definición de negativa y con el colectivo como vehículo) fue **reemplazada** por la del 14/11; queda en el historial de git.
 
 ### La regla
 
 R1 es **la misma para todas las fotos** (GENERAL, PLATE, DETAIL y CONTEXT): tiene que haber un vehículo, que es una caja
-`car` del detector (con v2, cualquier clase de presencia: auto, camión, van o colectivo) con confianza `DETECTOR_MIN_CONF` o
-una instancia del segmentador con confianza `SEGMENTER_MIN_CONF` (**det ∨ seg**), y ocupa al menos `PRESENCE_MIN_AREA` (5 %) de
-la foto. **La patente no cuenta como presencia en ninguna foto** (alcanza una patente arrancada o impresa para hacer pasar
-cualquier imagen), tampoco la rueda ni el daño. DETAIL no tiene ninguna regla propia: no hay un área mínima ni una confianza
-distintas, y verificar el daño o la rampa es trabajo futuro. El segmentador (`rfdetr_seg_coco`) está en la cascada y
-`.env.example` lo deja activo (`MODEL_SEGMENTER=rfdetr_seg_coco`).
+`car` del detector con confianza `DETECTOR_MIN_CONF` o una instancia del segmentador con confianza `SEGMENTER_MIN_CONF`
+(**det ∨ seg**), y ocupa al menos `PRESENCE_MIN_AREA` (5 %) de la foto. **La patente no cuenta como presencia en ninguna foto**
+(alcanza una patente arrancada o impresa para hacer pasar cualquier imagen), tampoco la rueda ni el daño. DETAIL no tiene
+ninguna regla propia: no hay un área mínima ni una confianza distintas, y verificar el daño o la rampa es trabajo futuro. El
+segmentador (`rfdetr_seg_coco`) está en la cascada y `.env.example` lo deja activo (`MODEL_SEGMENTER=rfdetr_seg_coco`).
+
+**Qué clases cuentan como vehículo (decisión del 14/11/2026): auto (incluido el taxi), van y camión.** Es el mapeo del adaptador de
+v2 (`ROLES`): `car`, `truck` y `van` se devuelven como una caja `car`; **`bus` (colectivo) es una salida del modelo que el adaptador
+ya no devuelve**, así que un colectivo no cuenta (cambió solo el mapeo, no hubo reentrenamiento). El segmentador es COCO sin
+entrenar y solo devuelve la clase `car` de COCO (no camión ni colectivo). **v2 es el detector por defecto** (`.env.example`);
+v1 queda en el manifest como respaldo y ya no se mide. **Limitaciones:**
+
+- **La ambulancia se entrenó como `van`** (`Ambulance` → `van` en `v2_classes.py`), no es una salida propia: sigue contando como
+  vehículo. Que no cuente exige reentrenar (por ejemplo, mandarla a las fotos de fondo o a una confusora); no se hizo.
+- **Open Images no distingue un flete de un camión pesado y anota muchas pickups como `Truck`**, así que `truck` se mantiene
+  completo: cuenta una pickup válida y también un camión pesado que nadie fotografiaría como un auto.
 
 ### Supuesto de captura
 
@@ -912,8 +922,7 @@ patente y el ancho y el área de la caja del vehículo sobre la foto de 1280 × 
 | `8.jpg` | general | 0,914 | 0,747 | — |
 | `2.jpg` | detalle (esquina trasera con rueda) | 0,892 | 0,889 | — |
 
-De ahí salen
-las proporciones de los conjuntos: vehículo de 0,82 a 0,98 del ancho en general; patente de 0,08 a 0,15 del ancho (lo
+De ahí salen las proporciones de los conjuntos: vehículo de 0,82 a 0,98 del ancho en general; patente de 0,08 a 0,15 del ancho (lo
 pedido; las de referencia dan 0,115 y 0,132) y vehículo de ~0,62 a 0,66 en patente; en detalle el vehículo cubre ~0,89 de la foto.
 
 ### Resolución
@@ -927,162 +936,248 @@ pero es un límite (abajo).
 
 ### Cómo se armaron los conjuntos
 
-Fotos de la **partición de prueba de Open Images V7** (anotaciones de `test/labels/detections.csv`), nunca usadas para entrenar v1 ni v2, bajadas del bucket público. Una foto no entra a más de un
-conjunto. Semilla 0.
+Fotos de la **partición de prueba de Open Images V7** (anotaciones de `test/labels/detections.csv`), nunca usadas para entrenar
+v1 ni v2, bajadas del bucket público. Una foto no entra a más de un conjunto. Semilla 0. `capture_sets.py build` arma los
+válidos y `capture_sets.py extras` las negativas por principio, los colectivos, las ambulancias y las pickups.
 
 | Conjunto | Cantidad | Cómo se recorta (ventana 16:9 sobre la foto de origen) |
 |---|---|---|
 | **general** | 400 | Foto con una caja `Car` (o `Limousine`, `Taxi`; sin cajas de grupo, de dibujo ni tomadas desde adentro). Ventana centrada en el vehículo, con su ancho al 0,80-0,98 de la foto, de al menos 480 px. |
 | **plate** | 300 | Foto con una caja de `Vehicle registration plate` dentro de un vehículo, con la patente al 10-30 % del ancho del vehículo (referencias: 0,18 y 0,20). Ventana con la **patente al 8-15 % del ancho**, el centro de la patente al 0,40-0,70 del ancho y 0,50-0,70 del alto, el vehículo entero a lo ancho y la base del vehículo dentro de la foto (se corta entre el capot y el parabrisas). |
 | **detail** | 400 | Foto con una caja `Car`. Ventana de ancho 0,30-0,55 del vehículo, de al menos 320 px, con **al menos el 85 % de la foto dentro de la caja del vehículo** (referencia: 0,89). |
-| **heavy** (camiones, vans, colectivos) | 150 + 85 + 51 = 286 | Fotos con `Truck`, `Van` o `Bus` anotado y **sin `Car` ni subclases** anotado (cualquier caja). Misma ventana que general sobre el vehículo pesado más grande. Además, la **foto entera** (`heavy_*_whole`). Salieron menos de 150 vans (85) y colectivos (51): son todas las de la partición que cumplen esas condiciones y admiten una ventana. |
-| **neg** (sin vehículo) | 2 000 | Fotos con alguna caja anotada y **sin ninguna clase de presencia anotada** (`Car`, `Limousine`, `Van`, `Truck`, `Bus`, `Taxi`, `Ambulance`, en cualquier caja). **Sin exclusiones manuales.** Se usan como están (sin recortar; a lo sumo 1024 px). |
+| **heavy** (camiones y vans) | 150 + 85 | Fotos con `Truck` o `Van` anotado y **sin `Car` ni subclases** anotado (cualquier caja). Misma ventana que general sobre el vehículo pesado más grande. Además, la **foto entera** (`heavy_*_whole`). Salieron menos de 150 vans (85): son todas las de la partición que cumplen esas condiciones y admiten una ventana. |
+| **pickup** | 126 | Ver abajo. |
+| **colectivo** y **ambulancia** | 65 y 1 | Fotos con `Bus` o `Ambulance` anotado (caja que no sea de grupo, de dibujo ni desde adentro) y **sin ningún vehículo excluido** (abajo). Misma ventana que general sobre el vehículo, y la foto entera. Son **negativas**: se mide cuántas se rechazan. |
+| **sinvehiculo** | 2 000 | Fotos al azar (semilla) de la partición de prueba con alguna caja anotada y **sin ningún vehículo válido** (abajo). Se usan como están (sin recortar; a lo sumo 1 024 px). **Sin exclusiones manuales.** |
 
-Open Images no anota todo lo que se ve: una "negativa" puede tener un auto sin anotar, y cuenta como una aceptada (S1
-pesimista). 98 de las 2 000 negativas tienen anotada alguna parte del vehículo (rueda, neumático, patente, motocicleta o bicicleta,
-`Vehicle`, `Land vehicle`); se reportan aparte ("sin familia") pero no se excluyen.
+**Una foto sin auto es una foto sin ningún vehículo válido (decisión del 14/11/2026).** Son vehículos válidos `Car` (y su subclase
+`Limousine`), `Taxi`, `Van` y `Truck`: una foto con alguno de ellos anotado (cualquier caja, también de grupo o de dibujo) **no es
+una negativa**. **Siguen siendo negativas** las fotos con colectivo, ambulancia, moto, bicicleta, tren, barco, avión o silla de
+ruedas (y sus parientes: aeronave, helicóptero, tanque, moto de nieve, etc.; la lista completa está en `OTHER_VEHICLES`). Las que
+tienen como **única** señal de vehículo una rueda, un neumático, una patente o un `Vehicle` / `Land vehicle` genérico son
+**ambiguas**: están dentro de las negativas y se reportan aparte (S1 con ellas dentro y sin ellas).
 
-**Verificación de que ninguna foto se usó para entrenar** (`exclusion_check.json`): las 3 386 fotos elegidas contra las
-**3 689 fotos de entrenamiento y validación de v1 y v2** (v1: 1 057 + 201; v2: 2 139 + 435), por **identificador** (nombre de archivo),
-por **SHA-256 del contenido** (los 3 689 archivos comparados) y por **`OriginalMD5`** de Open Images (conocido para las 3 386 y las
-3 689): **0 coincidencias** en las tres. (La partición de prueba es disjunta de las de entrenamiento y validación de Open Images
-por construcción; esto lo verifica sobre los archivos.)
+Cuántas fotos se excluyen por etiqueta (partición de prueba: 112 194 fotos con alguna caja y no usadas en ningún entrenamiento;
+`negativas_conteos` en `specs.json`; se imprimen antes de medir):
+
+| Etiqueta | Fotos que la tienen | Excluidas atribuidas a su primera etiqueta |
+|---|---|---|
+| `Car` | 15 288 | 15 288 |
+| `Limousine` | 68 | 38 |
+| `Taxi` | 85 | 1 |
+| `Van` | 526 | 297 |
+| `Truck` | 909 | 465 |
+| **Total excluidas** | | **16 089** |
+
+Quedan **96 105 fotos**: 86 664 sin ningún vehículo anotado, 6 987 con otro vehículo (aviones 2 407, barcos 1 710, bicicletas 648,
+motos 351, trenes 266, colectivos 173, ambulancias 5, sillas de ruedas 107, y otros) y **2 454 ambiguas** (rueda 1 004, neumático 647,
+`Vehicle` 1 045, `Land vehicle` 1 258, patente 30; una foto puede tener más de una). Hay muy pocas ambulancias: **solo 5 fotos de
+la partición de prueba** tienen una ambulancia anotada, y 1 entró al conjunto (las otras estaban en el entrenamiento o no admiten
+una ventana): su cifra es una anécdota, no una medición.
+
+**Pickups.** Open Images V7 **tiene** la etiqueta de imagen "Pickup truck" (`/m/0cvq3`, de las 20 931 clases del archivo de descripciones
+verificada por personas; **no es una clase con cajas**, no está entre las 600 de detección). La partición de prueba tiene **532
+fotos** con la etiqueta confirmada. Como no hay cajas de pickup, se toma la caja de vehículo de la foto (`Truck`, `Car`, `Van`)
+solo si **domina**: la mayor tiene al menos 2 veces el área de la segunda (si no, no se sabe cuál es la pickup y no se elige a
+mano). Candidatas no usadas en ningún entrenamiento ni en otro conjunto: 400; con una caja dominante y una ventana válida: 126.
+Cómo las anota Open Images: `Truck` 107, `Car` 17 y `Van` 2: **la mayoría como `Truck`**, que es justo lo que decide la limitación de arriba.
+Misma ventana que general sobre esa caja, y la foto entera.
+
+**Verificación de que ninguna foto se usó para entrenar** (`exclusion_check.json`): las 5 498 fotos elegidas (todos los conjuntos,
+incluidos los de la medición anterior) contra las **3 689 fotos de entrenamiento y validación de v1 y v2** (v1: 1 057 + 201; v2:
+2 139 + 435), por **identificador** (nombre de archivo), por **SHA-256 del contenido** (los 3 689 archivos comparados) y por
+**`OriginalMD5`** de Open Images: **0 coincidencias** en las tres. (La partición de prueba es disjunta de las de entrenamiento y
+validación de Open Images por construcción; esto lo verifica sobre los archivos.)
 
 ### Protocolo
 
-- **Mitades con semilla fija.** Cada conjunto (negativas, general, plate, detail) se parte en A y B con la misma semilla. Los
-  umbrales se **eligen en A** y los números se **reportan en B**.
+- **Mitades con semilla fija.** Cada conjunto se parte en A y B con la misma semilla (`halves`, semilla 0). Los umbrales se
+  **eligen en A** y los números se **reportan en B**.
 - **Barrido:** `t_car` y `t_seg` de 0,30 a 0,95 de a 0,05 (14 valores cada uno), con `PRESENCE_MIN_AREA` = 5 % fijo.
 - **"La mejor combinación"**: det ∨ seg con la **menor U3 en las mitades A de las válidas** entre las que dejan la **cota
-  del 95 % de S1 en la mitad A de las negativas en <= 1 %** (con 1 000 negativas, a lo sumo 4 aceptadas). Se reporta también con
-  el **segmentador fijo en 0,50** (el del servicio), barriendo solo el detector.
-- **S1**: negativas aceptadas (cota de una cola al 95 %: 3/N sin fallas, Clopper-Pearson si hay).
+  del 95 % de S1 en la mitad A de las negativas en <= 1 %** (con 1 000 negativas, a lo sumo 4 aceptadas). Se elige con las
+  ambiguas dentro de las negativas; aparte, la que se elegiría exigiendo ese S1 solo sobre las negativas sin las ambiguas. Se
+  reporta también con el **segmentador fijo en 0,50** (el del servicio), barriendo solo el detector.
+- **Configuraciones que se reportan:** `car` 0,35 y 0,40 (la actual), ambas con el segmentador en 0,50, y la mejor.
+- **S1**: negativas aceptadas (cota de una cola al 95 %: 3/N sin fallas, Clopper-Pearson si hay), con las ambiguas dentro y sin ellas.
 - **U3 por alerta de 3 fotos** (general + patente + un detalle) = 1 − (1 − pG)(1 − pP)(1 − pD), **suponiendo que los rechazos de
   las tres fotos son independientes**. Es una estimación: no hay alertas reales, y el mismo auto o la misma luz correlacionan los
   rechazos, lo que haría la unión real más chica; la cota que se reporta usa las cotas de cada tipo y es conservadora. Las
   alertas de `PARKED_ON_GARAGE` llevan una foto de contexto (de la vereda) que este conjunto no tiene.
+- **Quién la dejó pasar**: de cada negativa aceptada en B se guarda qué señal alcanzó (detector o segmentador), con qué
+  clase del detector, confianza y área.
 
 ```powershell
 $env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:MODELS_DIR = "models\weights"
 $env:EVAL_OUT = "D:\vv-eval\capture-12m"
-uv run --frozen --extra dev --extra tools python tools/eval/capture_sets.py build     # baja ~6 900 fotos y arma los conjuntos
-uv run --frozen --extra dev --extra tools python tools/eval/capture_sets.py verify    # exclusion_check.json
-$env:EVAL_OUT = "D:\vv-eval\out\capture-v2"
-uv run --frozen --extra dev --extra tools python tools/eval/capture_r1.py measure --sets-dir D:\vv-eval\capture-12m --detector rfdetr_openimages_v2   # ~1 h
-uv run --frozen --extra dev --extra tools python tools/eval/capture_r1.py report --sets-dir D:\vv-eval\capture-12m
+python tools/eval/capture_sets.py build      # válidos y heavy (baja ~6 900 fotos)
+python tools/eval/capture_sets.py extras     # negativas por principio, colectivos, ambulancias y pickups (~3 000 fotos)
+python tools/eval/capture_sets.py verify     # exclusion_check.json
+$env:EVAL_OUT = "D:\vv-eval\out\capture-v3"
+python tools/eval/capture_r1.py measure --sets-dir D:\vv-eval\capture-12m --detector rfdetr_openimages_v2   # ~1 h; --resume sigue
+python tools/eval/capture_r1.py report --sets-dir D:\vv-eval\capture-12m
 ```
+
+(`build` también genera `neg` y `heavy_Bus`, de la medición del 12/11: ya no se miden; quedan para que la semilla reproduzca
+los conjuntos válidos.)
 
 ### Resultados con v2 y el segmentador (det ∨ seg)
 
-Detector `rfdetr_openimages_v2@6bcad50b33c5` y `rfdetr_seg_coco`, con el área mínima del servicio (5 %). Cifras: fallas sobre
-el tamaño de la mitad y, entre paréntesis, la tasa y la cota superior del 95 % (una cola). **Lo que se reporta es la mitad B**:
-los umbrales de las filas "mejor" se eligieron en la mitad A. Señales y análisis en `D:\vv-eval\out\capture-v2`.
+Detector `rfdetr_openimages_v2@6bcad50b33c5` y `rfdetr_seg_coco`, con el área mínima del servicio (5 %), con las clases que
+cuentan (auto, van y camión). Cifras: fallas sobre el tamaño de la mitad y, entre paréntesis, la tasa y la cota superior del 95 % (una
+cola). **Todo es la mitad B**: los umbrales de las filas "mejor" se eligieron en la mitad A. Señales y análisis en
+`D:\vv-eval\out\capture-v3` (se midieron las 3 954 fotos sin una sola señal faltante). `car` / `seg` son las confianzas mínimas del
+detector y del segmentador.
 
-| Configuración | `car` / `seg` | S1 en B (de 1 000) | GENERAL rechazadas en B (de 200) | PLATE en B (de 150) | DETAIL en B (de 200) | U3 por alerta en B | Pesados rechazados (de 286) |
-|---|---|---|---|---|---|---|---|
-| **Umbrales actuales** | 0,40 / 0,50 | 15/1000 (1,5 %; ≤ 2,3 %) | 1/200 (0,5 %; ≤ 2,4 %) | 1/150 (0,7 %; ≤ 3,1 %) | 8/200 (4,0 %; ≤ 7,1 %) | 5,1 % (≤ 12,1 %) | 5/286 (1,8 %; ≤ 3,6 %) |
-| Umbrales actuales sin segmentador | 0,40 / apagado | 14/1000 (1,4 %; ≤ 2,2 %) | 1/200 (0,5 %; ≤ 2,4 %) | 1/150 (0,7 %; ≤ 3,1 %) | 8/200 (4,0 %; ≤ 7,1 %) | 5,1 % (≤ 12,1 %) | 5/286 (1,8 %; ≤ 3,6 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador barrido | 0,75 / 0,30 | 10/1000 (1,0 %; ≤ 1,7 %) | 6/200 (3,0 %; ≤ 5,8 %) | 1/150 (0,7 %; ≤ 3,1 %) | 23/200 (11,5 %; ≤ 15,9 %) | 14,7 % (≤ 23,3 %) | 70/286 (24,5 %; ≤ 29,0 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador fijo en 0,50 | 0,75 / 0,50 | 9/1000 (0,9 %; ≤ 1,6 %) | 11/200 (5,5 %; ≤ 8,9 %) | 1/150 (0,7 %; ≤ 3,1 %) | 33/200 (16,5 %; ≤ 21,4 %) | 21,6 % (≤ 30,7 %) | 73/286 (25,5 %; ≤ 30,1 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador barrido | 0,35 / 0,35 | 15/1000 (1,5 %; ≤ 2,3 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 7/200 (3,5 %; ≤ 6,5 %) | 3,5 % (≤ 9,7 %) | 3/286 (1,1 %; ≤ 2,7 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador en 0,50 | 0,35 / 0,50 | 15/1000 (1,5 %; ≤ 2,3 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 8/200 (4,0 %; ≤ 7,1 %) | 4,0 % (≤ 10,3 %) | 3/286 (1,1 %; ≤ 2,7 %) |
+| Configuración | `car` / `seg` | S1 en B, con las ambiguas | S1 en B, sin las ambiguas | GENERAL rechazadas | PLATE rechazadas | DETAIL rechazadas | U3 por alerta | Camión y van rechazados | Pickups rechazadas | Colectivos rechazados | Ambulancias rechazadas |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la actual)** | 0,40 / 0,50 | 12/1000 (1,2 %; ≤ 1,9 %) | 5/975 (0,5 %; ≤ 1,1 %) | 1/200 (0,5 %; ≤ 2,4 %) | 1/150 (0,7 %; ≤ 3,1 %) | 9/200 (4,5 %; ≤ 7,7 %) | 5,6 % (≤ 12,7 %) | 4/118 (3,4 %; ≤ 7,6 %) | 2/63 (3,2 %; ≤ 9,7 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| **`car` 0,35** | 0,35 / 0,50 | 13/1000 (1,3 %; ≤ 2,1 %) | 6/975 (0,6 %; ≤ 1,2 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 9/200 (4,5 %; ≤ 7,7 %) | 4,5 % (≤ 10,9 %) | 3/118 (2,5 %; ≤ 6,4 %) | 0/63 (0,0 %; ≤ 4,8 %) | 31/33 (93,9 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 8/1000 (0,8 %; ≤ 1,4 %) | 3/975 (0,3 %; ≤ 0,8 %) | 9/200 (4,5 %; ≤ 7,7 %) | 1/150 (0,7 %; ≤ 3,1 %) | 23/200 (11,5 %; ≤ 15,9 %) | 16,1 % (≤ 24,8 %) | 23/118 (19,5 %; ≤ 26,5 %) | 32/63 (50,8 %; ≤ 61,7 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 7/1000 (0,7 %; ≤ 1,3 %) | 3/975 (0,3 %; ≤ 0,8 %) | 11/200 (5,5 %; ≤ 8,9 %) | 1/150 (0,7 %; ≤ 3,1 %) | 34/200 (17,0 %; ≤ 22,0 %) | 22,1 % (≤ 31,2 %) | 32/118 (27,1 %; ≤ 34,7 %) | 46/63 (73,0 %; ≤ 82,0 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 13/1000 (1,3 %; ≤ 2,1 %) | 6/975 (0,6 %; ≤ 1,2 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 9/200 (4,5 %; ≤ 7,7 %) | 4,5 % (≤ 10,9 %) | 3/118 (2,5 %; ≤ 6,4 %) | 0/63 (0,0 %; ≤ 4,8 %) | 31/33 (93,9 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 10/1000 (1,0 %; ≤ 1,7 %) | 4/975 (0,4 %; ≤ 0,9 %) | 3/200 (1,5 %; ≤ 3,8 %) | 1/150 (0,7 %; ≤ 3,1 %) | 16/200 (8,0 %; ≤ 11,9 %) | 10,0 % (≤ 17,9 %) | 7/118 (5,9 %; ≤ 10,8 %) | 12/63 (19,1 %; ≤ 29,0 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
 
-(`car` / `seg` son las confianzas mínimas del detector y del segmentador. "S1 en B" son las negativas aceptadas; "pesados" son los
-camiones, vans y colectivos válidos rechazados.)
+(S1 son las negativas aceptadas, de 1 000 en B o 975 sin las ambiguas. "Camión y van" son los 118 válidos pesados de B; las
+pickups son 63; los colectivos 33 y la ambulancia 1: para ellos la tabla cuenta las **rechazadas**, que es lo que se espera, y entre
+paréntesis va solo la tasa.)
 
-**S1 con más detalle** (negativas de A, de B, de las 2 000, y de B sin las que tienen alguna parte de vehículo anotada):
+**S1 con más detalle** (negativas de A, de B, de las 2 000, y sin las ambiguas):
 
-| Configuración | `car` / `seg` | S1 en A | S1 en B | S1 en las 2 000 | sin parte de vehículo anotada, en B |
-|---|---|---|---|---|---|
-| **Umbrales actuales** | 0,40 / 0,50 | 14/1000 (1,4 %; ≤ 2,2 %) | 15/1000 (1,5 %; ≤ 2,3 %) | 29/2000 (1,5 %; ≤ 2,0 %) | 4/958 (0,4 %; ≤ 0,9 %) |
-| Umbrales actuales sin segmentador | 0,40 / apagado | 14/1000 (1,4 %; ≤ 2,2 %) | 14/1000 (1,4 %; ≤ 2,2 %) | 28/2000 (1,4 %; ≤ 1,9 %) | 4/958 (0,4 %; ≤ 0,9 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador barrido | 0,75 / 0,30 | 4/1000 (0,4 %; ≤ 0,9 %) | 10/1000 (1,0 %; ≤ 1,7 %) | 14/2000 (0,7 %; ≤ 1,1 %) | 2/958 (0,2 %; ≤ 0,7 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador fijo en 0,50 | 0,75 / 0,50 | 4/1000 (0,4 %; ≤ 0,9 %) | 9/1000 (0,9 %; ≤ 1,6 %) | 13/2000 (0,7 %; ≤ 1,0 %) | 1/958 (0,1 %; ≤ 0,5 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador barrido | 0,35 / 0,35 | 14/1000 (1,4 %; ≤ 2,2 %) | 15/1000 (1,5 %; ≤ 2,3 %) | 29/2000 (1,5 %; ≤ 2,0 %) | 4/958 (0,4 %; ≤ 0,9 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador en 0,50 | 0,35 / 0,50 | 14/1000 (1,4 %; ≤ 2,2 %) | 15/1000 (1,5 %; ≤ 2,3 %) | 29/2000 (1,5 %; ≤ 2,0 %) | 4/958 (0,4 %; ≤ 0,9 %) |
-
-**Con las mitades completas** (las válidas de A y B juntas; para los umbrales actuales no hay selección, así que es lo mismo
-con más muestra):
-
-| Configuración | `car` / `seg` | GENERAL (de 400) | PLATE (de 300) | DETAIL (de 400) | U3 con las 3 mitades completas |
-|---|---|---|---|---|---|
-| **Umbrales actuales** | 0,40 / 0,50 | 1/400 (0,2 %; ≤ 1,2 %) | 2/300 (0,7 %; ≤ 2,1 %) | 17/400 (4,2 %; ≤ 6,3 %) | 5,1 % |
-| Umbrales actuales sin segmentador | 0,40 / apagado | 1/400 (0,2 %; ≤ 1,2 %) | 3/300 (1,0 %; ≤ 2,6 %) | 17/400 (4,2 %; ≤ 6,3 %) | 5,4 % |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador barrido | 0,75 / 0,30 | 10/400 (2,5 %; ≤ 4,2 %) | 4/300 (1,3 %; ≤ 3,0 %) | 40/400 (10,0 %; ≤ 12,8 %) | 13,4 % |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador fijo en 0,50 | 0,75 / 0,50 | 20/400 (5,0 %; ≤ 7,2 %) | 4/300 (1,3 %; ≤ 3,0 %) | 56/400 (14,0 %; ≤ 17,2 %) | 19,4 % |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador barrido | 0,35 / 0,35 | 0/400 (0,0 %; ≤ 0,8 %) | 0/300 (0,0 %; ≤ 1,0 %) | 14/400 (3,5 %; ≤ 5,4 %) | 3,5 % |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador en 0,50 | 0,35 / 0,50 | 0/400 (0,0 %; ≤ 0,8 %) | 0/300 (0,0 %; ≤ 1,0 %) | 17/400 (4,2 %; ≤ 6,3 %) | 4,2 % |
-
-**Vehículos pesados** (`Truck`, `Van` o `Bus` anotado y sin `Car`), recortados con el encuadre de general y la foto entera:
-
-| Configuración | `car` / `seg` | camiones (de 150) | vans (de 85) | colectivos (de 51) | total recortado (de 286) | foto entera (de 286) |
+| Configuración | `car` / `seg` | S1 en A | S1 en B | S1 en todas | A sin las ambiguas | B sin las ambiguas |
 |---|---|---|---|---|---|---|
-| **Umbrales actuales** | 0,40 / 0,50 | 4/150 (2,7 %; ≤ 6,0 %) | 0/85 (0,0 %; ≤ 3,5 %) | 1/51 (2,0 %; ≤ 9,0 %) | 5/286 (1,8 %; ≤ 3,6 %) | 4/286 (1,4 %; ≤ 3,2 %) |
-| Umbrales actuales sin segmentador | 0,40 / apagado | 4/150 (2,7 %; ≤ 6,0 %) | 0/85 (0,0 %; ≤ 3,5 %) | 1/51 (2,0 %; ≤ 9,0 %) | 5/286 (1,8 %; ≤ 3,6 %) | 4/286 (1,4 %; ≤ 3,2 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador barrido | 0,75 / 0,30 | 60/150 (40,0 %; ≤ 47,0 %) | 7/85 (8,2 %; ≤ 14,9 %) | 3/51 (5,9 %; ≤ 14,5 %) | 70/286 (24,5 %; ≤ 29,0 %) | 60/286 (21,0 %; ≤ 25,3 %) |
-| **Mejor combinación** (S1 ≤ 1 % en A), segmentador fijo en 0,50 | 0,75 / 0,50 | 61/150 (40,7 %; ≤ 47,7 %) | 8/85 (9,4 %; ≤ 16,3 %) | 4/51 (7,8 %; ≤ 17,1 %) | 73/286 (25,5 %; ≤ 30,1 %) | 60/286 (21,0 %; ≤ 25,3 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador barrido | 0,35 / 0,35 | 3/150 (2,0 %; ≤ 5,1 %) | 0/85 (0,0 %; ≤ 3,5 %) | 0/51 (0,0 %; ≤ 5,9 %) | 3/286 (1,1 %; ≤ 2,7 %) | 3/286 (1,1 %; ≤ 2,7 %) |
-| Mejor, S1 medido sin las negativas con parte de vehículo anotada, segmentador en 0,50 | 0,35 / 0,50 | 3/150 (2,0 %; ≤ 5,1 %) | 0/85 (0,0 %; ≤ 3,5 %) | 0/51 (0,0 %; ≤ 5,9 %) | 3/286 (1,1 %; ≤ 2,7 %) | 3/286 (1,1 %; ≤ 2,7 %) |
+| **`car` 0,40 (la actual)** | 0,40 / 0,50 | 8/1000 (0,8 %; ≤ 1,4 %) | 12/1000 (1,2 %; ≤ 1,9 %) | 20/2000 (1,0 %; ≤ 1,5 %) | 5/983 (0,5 %; ≤ 1,1 %) | 5/975 (0,5 %; ≤ 1,1 %) |
+| **`car` 0,35** | 0,35 / 0,50 | 8/1000 (0,8 %; ≤ 1,4 %) | 13/1000 (1,3 %; ≤ 2,1 %) | 21/2000 (1,1 %; ≤ 1,5 %) | 5/983 (0,5 %; ≤ 1,1 %) | 6/975 (0,6 %; ≤ 1,2 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 4/1000 (0,4 %; ≤ 0,9 %) | 8/1000 (0,8 %; ≤ 1,4 %) | 12/2000 (0,6 %; ≤ 1,0 %) | 1/983 (0,1 %; ≤ 0,5 %) | 3/975 (0,3 %; ≤ 0,8 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 3/1000 (0,3 %; ≤ 0,8 %) | 7/1000 (0,7 %; ≤ 1,3 %) | 10/2000 (0,5 %; ≤ 0,9 %) | 2/983 (0,2 %; ≤ 0,6 %) | 3/975 (0,3 %; ≤ 0,8 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 7/1000 (0,7 %; ≤ 1,3 %) | 13/1000 (1,3 %; ≤ 2,1 %) | 20/2000 (1,0 %; ≤ 1,5 %) | 4/983 (0,4 %; ≤ 0,9 %) | 6/975 (0,6 %; ≤ 1,2 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 7/1000 (0,7 %; ≤ 1,3 %) | 10/1000 (1,0 %; ≤ 1,7 %) | 17/2000 (0,9 %; ≤ 1,3 %) | 4/983 (0,4 %; ≤ 0,9 %) | 4/975 (0,4 %; ≤ 0,9 %) |
 
-**Latencia por alerta** (`cascade.py`, CPU Ryzen 5 3600, v2 + segmentador + re-ID + OCR + rostros, redacción con los dos mosaicos y
-`REDACT_WORKERS` = 3, 40 alertas por escenario; GENERAL y PLATE son la misma foto de la serie `plate`, y `REID_T` se afloja para que
-la cascada recorra todas las etapas, como en el resto de las mediciones de latencia):
+**Vehículos pesados válidos y pickups** (rechazados; `Truck` o `Van` anotado y sin `Car`, recortados con el encuadre de general; las
+pickups son las fotos con la etiqueta de imagen "Pickup truck", ver arriba):
 
-| Escenario | Mediana | **p95** | Máximo | Etapas medianas (ms): vehicle / burst / plate / redaction |
-|---|---|---|---|---|
-| **CRASHED de 3 fotos (general, patente, 1 detalle)** | 4 710 ms | **4 943 ms** | 5 102 ms | 1 016 / 1 508 / 65 / 2 071 |
-| CRASHED de 5 fotos (general, patente, 3 detalles) | 8 081 ms | 8 423 ms | 8 602 ms | 1 707 / 2 609 / 66 / 3 613 |
-| PARKED_ON_GARAGE de 3 fotos (general, patente, contexto) | 5 041 ms | 5 506 ms | 5 684 ms | 1 100 / 1 644 / 71 / 2 159 |
+| Configuración | `car` / `seg` | camiones en B | vans en B | camión y van en B | camión y van, todos | pickups en B | pickups, todas | pickups, foto entera, en B |
+|---|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la actual)** | 0,40 / 0,50 | 4/75 (5,3 %; ≤ 11,8 %) | 0/43 (0,0 %; ≤ 7,0 %) | 4/118 (3,4 %; ≤ 7,6 %) | 5/235 (2,1 %; ≤ 4,4 %) | 2/63 (3,2 %; ≤ 9,7 %) | 3/126 (2,4 %; ≤ 6,0 %) | 2/63 (3,2 %; ≤ 9,7 %) |
+| **`car` 0,35** | 0,35 / 0,50 | 3/75 (4,0 %; ≤ 10,0 %) | 0/43 (0,0 %; ≤ 7,0 %) | 3/118 (2,5 %; ≤ 6,4 %) | 3/235 (1,3 %; ≤ 3,3 %) | 0/63 (0,0 %; ≤ 4,8 %) | 1/126 (0,8 %; ≤ 3,7 %) | 0/63 (0,0 %; ≤ 4,8 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 21/75 (28,0 %; ≤ 37,8 %) | 2/43 (4,7 %; ≤ 13,9 %) | 23/118 (19,5 %; ≤ 26,5 %) | 49/235 (20,8 %; ≤ 25,7 %) | 32/63 (50,8 %; ≤ 61,7 %) | 54/126 (42,9 %; ≤ 50,6 %) | 29/63 (46,0 %; ≤ 57,1 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 29/75 (38,7 %; ≤ 48,8 %) | 3/43 (7,0 %; ≤ 17,1 %) | 32/118 (27,1 %; ≤ 34,7 %) | 69/235 (29,4 %; ≤ 34,6 %) | 46/63 (73,0 %; ≤ 82,0 %) | 79/126 (62,7 %; ≤ 69,9 %) | 34/63 (54,0 %; ≤ 64,8 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 3/75 (4,0 %; ≤ 10,0 %) | 0/43 (0,0 %; ≤ 7,0 %) | 3/118 (2,5 %; ≤ 6,4 %) | 3/235 (1,3 %; ≤ 3,3 %) | 0/63 (0,0 %; ≤ 4,8 %) | 1/126 (0,8 %; ≤ 3,7 %) | 0/63 (0,0 %; ≤ 4,8 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 7/75 (9,3 %; ≤ 16,8 %) | 0/43 (0,0 %; ≤ 7,0 %) | 7/118 (5,9 %; ≤ 10,8 %) | 14/235 (6,0 %; ≤ 9,2 %) | 12/63 (19,1 %; ≤ 29,0 %) | 19/126 (15,1 %; ≤ 21,3 %) | 9/63 (14,3 %; ≤ 23,6 %) |
 
-Fotos de 1600 × 900 (reducidas a 1024 para los modelos). No es comparable con las latencias de arriba: otro detector, otro set
-de fotos y otra resolución de entrada.
+**Colectivos y ambulancias** (negativas: se espera que se rechacen; la tabla cuenta las **rechazadas**):
+
+| Configuración | `car` / `seg` | colectivos rechazados en B | todos | foto entera | ambulancias rechazadas en B | todas | foto entera |
+|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la actual)** | 0,40 / 0,50 | 33/33 (100,0 %) | 64/65 (98,5 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **`car` 0,35** | 0,35 / 0,50 | 31/33 (93,9 %) | 61/65 (93,8 %) | 64/65 (98,5 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 31/33 (93,9 %) | 61/65 (93,8 %) | 64/65 (98,5 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+
+**Quién dejó pasar a las negativas aceptadas en B** (`negativas_aceptadas_en_B` en `r1_capture.json`; "clases del detector" cuenta
+detecciones que pasan, no fotos):
+
+| Configuración | aceptadas en B | solo detector | solo segmentador | ambos | clases del detector | ambiguas |
+|---|---|---|---|---|---|---|
+| **`car` 0,40 (la actual)** | 12 | 10 | 0 | 2 | car 8, truck 5 | 7 |
+| **`car` 0,35** | 13 | 11 | 0 | 2 | car 9, truck 5 | 7 |
+| **Mejor en A**, segmentador barrido | 8 | 6 | 2 | 0 | car 3, truck 3 | 5 |
+| **Mejor en A**, segmentador fijo en 0,50 | 7 | 5 | 2 | 0 | car 2, truck 3 | 4 |
+| Mejor en A sin las ambiguas, segmentador barrido | 13 | 13 | 0 | 0 | car 9, truck 5 | 7 |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 10 | 8 | 0 | 2 | car 7, truck 4 | 6 |
+
+Las negativas aceptadas en B con los umbrales actuales (0,40 / 0,50), una por fila. El número es la posición en el conjunto
+`sinvehiculo`; área = fracción de la foto. Las etiquetas son las de Open Images, no una descripción mía:
+
+| # | Tipo | Etiquetas de Open Images | Lo dejó pasar | Detector (clase, confianza, área) | Segmentador (confianza, área) |
+|---|---|---|---|---|---|
+| 207 | otro_vehiculo | Airplane | detector | truck 0,76 / 0,13 | — |
+| 292 | otro_vehiculo | Airplane | detector | car 0,62 / 0,98 | — |
+| 421 | ambigua | Tire, Vehicle, Wheel | detector | car 0,75 / 0,99 | — |
+| 659 | ambigua | Tire, Vehicle, Wheel | detector | truck 0,77 / 0,05; truck 0,64 / 0,43 | — |
+| 883 | sin vehículo | — | ambos | car 0,53 / 0,33 | 0,85 / 0,11 |
+| 946 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,85 / 0,42 | — |
+| 1116 | ambigua | Land vehicle | detector | car 0,66 / 0,99 | — |
+| 1300 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,54 / 0,44 | — |
+| 1600 | ambigua | Land vehicle, Tire, Vehicle, Wheel | detector | truck 0,41 / 0,51 | — |
+| 1705 | sin vehículo | — | ambos | car 0,56 / 0,52 | 0,73 / 0,17 |
+| 1878 | ambigua | Vehicle, Wheel | detector | truck 0,90 / 0,35 | — |
+| 1969 | sin vehículo | — | detector | car 0,42 / 0,85 | — |
+
+Con `car` 0,35 se suma una más (la 594: `car` 0,36 con un 6 % de la foto, sin etiquetas de vehículo) y las demás son las mismas. Con
+la mejor combinación en A (0,65 / 0,55):
+
+| # | Tipo | Etiquetas de Open Images | Lo dejó pasar | Detector (clase, confianza, área) | Segmentador (confianza, área) |
+|---|---|---|---|---|---|
+| 207 | otro_vehiculo | Airplane | detector | truck 0,76 / 0,13 | — |
+| 421 | ambigua | Tire, Vehicle, Wheel | detector | car 0,75 / 0,99 | — |
+| 659 | ambigua | Tire, Vehicle, Wheel | detector | truck 0,77 / 0,05 | — |
+| 883 | sin vehículo | — | segmentador | — | 0,85 / 0,11 |
+| 946 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,85 / 0,42 | — |
+| 1116 | ambigua | Land vehicle | detector | car 0,66 / 0,99 | — |
+| 1705 | sin vehículo | — | segmentador | — | 0,73 / 0,17 |
+| 1878 | ambigua | Vehicle, Wheel | detector | truck 0,90 / 0,35 | — |
 
 #### Lectura
 
-- **Con los umbrales actuales (0,40 / 0,50) S1 no cumple el 1 %**: 15 de 1 000 negativas en B (1,5 %; cota 2,3 %) y 29 de las
-  2 000 (cota 2,0 %). El rechazo de válidas es chico: GENERAL 1/200, PLATE 1/150 y DETAIL 8/200 (4 %), **U3 por alerta de 5,1 % en B**
-  (cota conservadora 12,1 %). Los pesados rechazados son 5 de 286 (1,8 %; cota 3,6 %): 4 de 150 camiones, 1 de 51 colectivos y 0 de
-  85 vans. El segmentador casi no cambia nada: sin él, S1 es 14 y PLATE rechaza 3 de 300 en vez de 2.
-- **Qué son las 29 aceptadas** (descripción mía, de un solo revisor; **no se excluyó ninguna**): 6 autos, pickups o SUV reales
-  sin anotar, 4 camiones o vehículos militares (uno es un camión de bomberos detrás de una persona con perros), 10 máquinas o
-  trenes (tractores, topadora, motoniveladora, tanque, vagones, un buggy), 2 motos (una con sidecar y una moto de nieve) y 7 sin
-  ningún vehículo (un jinete, una multitud, un avión, un emú, un balde, una pieza oxidada y arte de un videojuego). **23 de las 29
-  están entre las 98 negativas con alguna parte de vehículo anotada** (rueda, neumático, patente, moto, bicicleta, `Vehicle`,
-  `Land vehicle`): en las otras 1 902 solo hay 6 (0,3 %; en B, 4 de 958, cota 0,9 %). O sea, el S1 de las negativas de Open Images está dominado por vehículos que la anotación no marcó como
-  `Car`. Esa lectura **no reemplaza** la definición pedida (ninguna clase de presencia anotada), que sigue siendo la principal.
-- **La mejor combinación que deja S1 ≤ 1 % de cota en A** es `car` ≥ 0,75 con el segmentador barrido (0,30) o fijo en 0,50. **No sostiene
-  el 1 % en B**: en A son 4 de 1 000 (cota 0,9 %) pero en B son 10 de 1 000 (1,0 %; cota 1,7 %) y 9 de 1 000 (0,9 %; cota 1,6 %): la
-  elección sobre A es optimista y la mitad B tiene más aceptadas de las que tenía A. **El costo es alto**: U3 de **14,7 %** (cota 23,3 %) con
-  el segmentador barrido y de **21,6 %** (cota 30,7 %) con el segmentador en 0,50, contra 5,1 % con los umbrales actuales; DETAIL
-  rechaza 23 y 33 de 200, GENERAL 6 y 11 de 200, y **los camiones pesados se rechazan en un 40 %** (60 de 150) porque v2 les da menos confianza
-  (la mediana de la mejor caja es 0,81 en camiones contra 0,85 en general, y el percentil 10, 0,52 contra 0,69). Bajar el segmentador a 0,30 recupera unos 7 puntos de U3 frente a dejarlo en 0,50.
-- **Si S1 se mide sin las negativas con parte de vehículo anotada** (lectura aparte), la mejor es `car` ≥ 0,35 con el segmentador
-  en 0,35: S1 en B 4 de 958 (cota 0,95 %), **U3 de 3,5 %** (cota 9,7 %), GENERAL y PLATE sin rechazos, DETAIL 7/200 y pesados 3/286;
-  con el segmentador en 0,50 (el del servicio), U3 de 4,0 %. Bajar `car` de 0,40 a 0,35 es lo único que cambia respecto de hoy.
-- **DETAIL es lo que más se rechaza** con cualquier umbral: 4 % con los actuales (17 de 400) y 10 a 14 % con los altos. Son zonas
-  del vehículo sin una parte reconocible (un capó, un faro) y, con la regla de que DETAIL sigue a GENERAL, se rechazan como
-  `NO_VEHICLE`.
-- **El 40 % de camiones rechazados con `car` ≥ 0,75 es la señal más clara de que subir el umbral para limpiar S1 no es gratis**: lo
-  que se aceptaba de más eran vehículos reales que la anotación no marcó, y los vehículos pesados válidos quedan abajo.
+- **Con los umbrales actuales (0,40 / 0,50) S1 en B es 12 de 1 000 (1,2 %; cota 1,9 %) y no cumple el 1 %.** Sin las ambiguas es
+  5 de 975 (0,5 %; cota 1,1 %), apenas por encima del 1 %. Con 0,35 son 13 (cota 2,1 %) y 6 de 975 (cota 1,2 %): bajar `car` de 0,40 a
+  0,35 suma una negativa aceptada y baja el rechazo de válidas (GENERAL 1 → 0 de 200, PLATE 1 → 0 de 150, pickups 2 → 0 de 63, camión
+  y van 4 → 3 de 118), pero **U3 por alerta pasa de 5,6 % a 4,5 %** (cota 12,7 % → 10,9 %). DETAIL no cambia (9 de 200, 4,5 %).
+- **De las 12 aceptadas en B (0,40 / 0,50), 7 son ambiguas**: fotos con rueda, neumático, `Vehicle` o `Land vehicle` anotados, que
+  son casi seguro vehículos que Open Images no marcó como auto (la lista está arriba; no excluí ninguna). Otras 2 tienen un avión
+  anotado (el detector ve un `car` o un `truck` en el avión) y 3 no tienen ninguna etiqueta. **La dejó pasar el detector en las 12**
+  (en 2, también el segmentador); **el segmentador solo no dejó pasar ninguna** con 0,50. Las clases son `car` (8 detecciones) y
+  `truck` (5): **4 de las 12 fotos entran por `truck`**, incluidas 3 ambiguas y el avión. Es el costo de mantener `truck` completo.
+- **La mejor combinación en A deja S1 ≤ 1 % de cota en A, pero no en B con las ambiguas dentro**: con el segmentador barrido es
+  `car` 0,65 / `seg` 0,55 (S1 en B 8 de 1 000, cota 1,4 %; sin ambiguas 3 de 975, cota 0,8 %) y con el segmentador fijo en 0,50 es
+  `car` 0,75 (7 de 1 000, cota 1,3 %; sin ambiguas 3 de 975, cota 0,8 %). **Sin las ambiguas sí queda bajo el 1 %.** El costo es alto:
+  **U3 por alerta de 16,1 % (cota 24,8 %) con el segmentador barrido y de 22,1 % (cota 31,2 %) con el segmentador en 0,50**, contra
+  5,6 % hoy; DETAIL rechaza 23 y 34 de 200 y GENERAL 9 y 11 de 200.
+- **Lo que paga ese S1 son los camiones y las pickups**: con 0,65 / 0,55 se rechazan 21 de 75 camiones válidos (28 %), 32 de 63
+  pickups (51 %) y 54 de 126 pickups en total (43 %); con 0,75, **46 de 63 pickups (73 %)** y 29 de 75 camiones (39 %). v2 detecta
+  las pickups y los camiones con menos confianza que a un auto, y como Open Images anota la mayoría de las pickups como `Truck`
+  (107 de 126), un umbral alto para limpiar S1 deja afuera justo las camionetas que la gente fotografía. Con los umbrales actuales
+  las pickups se rechazan poco: 2 de 63 en B (3,2 %; cota 9,7 %) y 3 de 126 en total; con 0,35, 0 de 63 y 1 de 126. Las vans no
+  son el problema (0 de 43 con 0,40; 3 de 43 con 0,75).
+- **Si el S1 ≤ 1 % se exige solo sobre las negativas sin las ambiguas** (lectura aparte), la mejor en A con el segmentador
+  barrido es `car` 0,35 (con el segmentador casi apagado, 0,95: da lo mismo que 0,35 / 0,50, lo da todo el detector; U3 4,5 %) y con
+  el segmentador fijo en 0,50 es `car` 0,50 (U3 10,0 %; rechaza 12 de 63 pickups). Bajar `car` de 0,40 a 0,35 es lo único que
+  cambia respecto de hoy en la primera.
+- **Colectivos: ya no cuentan.** Con 0,40, **64 de 65 se rechazan (98,5 %)**, 33 de 33 en B; con 0,35, 61 de 65 (93,8 %; 31 de 33 en
+  B); con la foto entera, 65 de 65 (0,40) y 64 de 65 (0,35). Los que se escapan los deja pasar el detector con otra clase: con 0,40
+  es 1 foto (`van` 0,47 sobre el 62 % de la foto); con 0,35 son 4 (`van` 2, `truck` y `car`). Es el efecto de sacar `bus` del mapeo.
+- **Ambulancias: sin conclusión, y no se rechaza.** Solo hay 5 fotos con una ambulancia anotada en toda la partición de prueba
+  y 1 admitió una ventana y no estaba en el entrenamiento: **0 de 1 rechazada**. Coincide con lo esperado (la ambulancia se
+  entrenó como `van`: el detector la ve como `van` con 0,92), pero con n = 1 no se mide nada. Que dejen de contar exige reentrenar: **no lo hice**.
+- **DETAIL es lo que más se rechaza** con cualquier umbral: 4,5 % con los actuales (9 de 200 en B) y 11 a 17 % con los altos. Son
+  zonas del vehículo sin una parte reconocible y, con la regla de que DETAIL sigue a GENERAL, se rechazan como `NO_VEHICLE`.
 
 #### Límites
 
-- **Las "negativas" de Open Images** no son exhaustivas: son fotos sin una clase anotada, y varias muestran un vehículo. Es la definición
-  pedida (sin exclusiones manuales) y vuelve a S1 pesimista. En el otro sentido son fotos al azar (animales, gente, comida), no las
-  escenas difíciles que alguien sacaría para engañar al sistema (una calle sin autos, un estacionamiento vacío): S1 podría ser
-  optimista para esas.
-- **Las fotos de referencia son de noche y con poca luz**; las fotos de Open Images son sobre todo de día. El rechazo de válidas de
-  esta sección probablemente es **optimista para fotos nocturnas**. No se calibró nada con las de referencia.
+- **Las negativas de Open Images no son exhaustivas**: son fotos sin una clase anotada y varias muestran un vehículo (7 de las 12
+  aceptadas en B tienen una rueda, un neumático o un `Vehicle` anotados). La definición del 14/11/2026 las deja dentro, y es la
+  pedida (sin exclusiones manuales), así que S1 es pesimista. En el otro sentido son fotos al azar (aviones, barcos, gente,
+  comida), no las escenas difíciles que alguien sacaría para engañar al sistema (una calle sin autos, un estacionamiento vacío): S1
+  podría ser optimista para esas.
+- **Las pickups se identifican por una etiqueta de imagen, no por una caja**: la caja de vehículo que se recorta es la dominante de
+  la foto y casi siempre `Truck` (107 de 126). Solo 126 de las 532 fotos con la etiqueta quedaron (las otras estaban en el
+  entrenamiento, ya en otro conjunto, o sin una caja dominante que se pueda recortar). Son pocas y las cotas son anchas (63 en B).
+- **Las fotos de referencia son de noche y con poca luz**; las de Open Images son sobre todo de día. El rechazo de válidas
+  probablemente es **optimista para fotos nocturnas**. No se calibró nada con las de referencia.
 - **Los recortes se agrandan** de ≤ 1024 px a 1600 px, así que tienen menos detalle real que una foto de celular; los modelos las ven a
   512 px (detector), pero es un límite.
 - **U3 supone independencia** entre las tres fotos y su cota usa las cotas de cada tipo (es conservadora). La alerta de
   `PARKED_ON_GARAGE` tiene una foto de contexto que no está en estos conjuntos.
-- **Los umbrales "mejor" se eligen sobre la mitad A y B los evalúa**, pero son una sola partición: otra semilla movería los
-  números (la diferencia entre A y B ya es de 4 a 10 aceptadas con la misma configuración).
-- **Un solo revisor** para describir las 29 aceptadas; no hay exclusiones.
-- Vans (85) y colectivos (51) son pocos: las cotas por clase son anchas.
-- v1 no se midió con este protocolo (decisión del 12/11/2026: v2 es el candidato y v1 queda como respaldo).
-
+- **Una sola partición A/B**: otra semilla movería los números (con la misma configuración, A y B ya difieren en 4 a 5
+  aceptadas), y la elección en A es optimista.
+- **Vans (43 en B), colectivos (33), ambulancias (1) y pickups (63) son pocos**: las cotas son anchas.
+- La **ambulancia se entrenó como `van`** y el **camión se mantiene completo** (Open Images anota pickups como `Truck`): son
+  limitaciones del mapeo, no medibles con estos conjuntos más allá de lo de arriba.
+- No se repitió la latencia: el modelo y el mapeo son los mismos que en la medición del 12/11/2026 (p95 de 4 943 ms por alerta de
+  3 fotos), y quitar `bus` no cambia el costo.
 
 ## Presencia de auto en todas las fotos (`presence.py`)
 

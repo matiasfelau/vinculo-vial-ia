@@ -6,11 +6,26 @@ Arma, con fotos de la **partición de prueba de Open Images V7** que no se usaro
 - **general**: el vehículo casi entero. **plate**: la trompa o la cola completa, con la patente al 8-15 % del
   ancho. **detail**: una zona del vehículo que ocupa buena parte de la foto. Se recortan de fotos de autos
   anotados con una ventana 16:9 cuyas proporciones salen de las fotos de referencia (`ref`, abajo).
-- **heavy**: camiones, vans y colectivos válidos (`Truck`, `Van` o `Bus` anotado y sin `Car`), con el encuadre
-  de general (y la foto entera aparte).
-- **neg**: fotos sin ninguna clase de presencia anotada (`Car` y sus subclases, `Truck`, `Van`, `Bus`, `Taxi`,
-  `Ambulance`), **sin exclusiones manuales**. Se parten en dos mitades con semilla fija (A: se eligen los
-  umbrales; B: se reporta S1).
+- **heavy**: camiones y vans válidos (`Truck` o `Van` anotado y sin `Car`), con el encuadre de general (y la
+  foto entera aparte). (`build` también arma `heavy_Bus` y `neg`, las de la medición del 12/11/2026: ya no
+  se miden, y se conservan para que la semilla reproduzca los conjuntos válidos.)
+
+`extras` (decisión del 14/11/2026) agrega los conjuntos de la medición vigente, sin tocar los anteriores:
+
+- **sinvehiculo**: una foto sin auto es una foto **sin ningún vehículo válido**. Se excluyen las fotos con
+  `Car` (y subclases, `Limousine`), `Taxi`, `Van` o `Truck` anotado (cualquier caja). Siguen siendo
+  negativas las de colectivo, ambulancia, moto, bicicleta, tren, barco, avión o silla de ruedas. Las fotos
+  cuya única señal de vehículo es una rueda, una patente o un `Vehicle` / `Land vehicle` genérico son
+  **ambiguas**: se marcan y se reportan aparte. Sin exclusiones manuales. Antes de medir imprime cuántas
+  fotos se excluyen por cada etiqueta.
+- **colectivo** y **ambulancia**: fotos con `Bus` o `Ambulance` anotado y sin ningún vehículo excluido, con
+  el encuadre de general (y la foto entera). Son negativas: se mide cuántas se rechazan.
+- **pickup**: pickups válidas. Open Images V7 tiene "Pickup truck" solo como etiqueta de imagen (no tiene
+  cajas); se toman las fotos de prueba con esa etiqueta confirmada y una caja de vehículo dominante (la
+  mayor, al menos `PICKUP_DOMINANCE` veces la segunda), y se recortan con el encuadre de general. Si la
+  etiqueta no existe, no se arma el set.
+
+Se parten en dos mitades con semilla fija (A: se eligen los umbrales; B: se reporta).
 
 Cada recorte se lleva a 1600 px de lado mayor y a JPEG (lo que envía la app: lado mayor <= 1600 px y
 <= 900 KB). `ref` mide el encuadre de las fotos de referencia (ancho de la patente y área del vehículo) y solo
@@ -26,8 +41,8 @@ import json
 import os
 import random
 import sys
-from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections import Counter, defaultdict
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,6 +64,54 @@ PRESENCE_CLASSES = ("Car", "Limousine", "Taxi", "Truck", "Van", "Bus", "Ambulanc
 PLATE_CLASS = "Vehicle registration plate"
 # No son parte de la definición de "sin presencia", pero delatan un vehículo: se marcan para otra lectura
 FAMILY_CLASSES = ("Vehicle", "Land vehicle", "Wheel", "Tire", PLATE_CLASS, "Motorcycle", "Bicycle")
+
+# Negativas por principio (14/11/2026): una foto sin auto es una foto sin ningún vehículo válido
+INVALID_CLASSES = ("Car", "Limousine", "Taxi", "Van", "Truck")  # un vehículo válido: la foto no es negativa
+OTHER_VEHICLES = (  # vehículos que no cuentan: la foto sigue siendo negativa
+    "Bus",
+    "Ambulance",
+    "Motorcycle",
+    "Bicycle",
+    "Train",
+    "Boat",
+    "Barge",
+    "Gondola",
+    "Canoe",
+    "Watercraft",
+    "Jet ski",
+    "Submarine",
+    "Airplane",
+    "Aircraft",
+    "Helicopter",
+    "Rocket",
+    "Wheelchair",
+    "Tank",
+    "Snowmobile",
+    "Golf cart",
+    "Cart",
+    "Segway",
+    "Unicycle",
+)
+AMBIGUOUS_CLASSES = (
+    "Wheel",
+    "Tire",
+    PLATE_CLASS,
+    "Vehicle",
+    "Land vehicle",
+)  # solas, no dicen qué vehículo es
+TRACKED = (*INVALID_CLASSES, *OTHER_VEHICLES, *AMBIGUOUS_CLASSES)
+EXCLUDED_KIND, OTHER_KIND, AMBIGUOUS_KIND, CLEAN_KIND = "excluida", "otro_vehiculo", "ambigua", "sin_vehiculo"
+PICKUP_CLASS = "Pickup truck"  # etiqueta de imagen de Open Images V7 (no tiene cajas)
+PICKUP_DOMINANCE = 2.0  # la caja de vehículo mayor debe ser al menos tantas veces la segunda
+NEG_SEED_OFFSET = 101
+NEG_MARGIN = 400  # fotos de más que se bajan por si alguna no se puede decodificar
+EXTRA_QUOTAS = {"sinvehiculo": 2000, "colectivo": 400, "ambulancia": 400, "pickup": 400}
+META_URLS = {
+    "oidv7-class-descriptions.csv": "https://storage.googleapis.com/openimages/v7/oidv7-class-descriptions.csv",
+    "test-human-imagelabels.csv": (
+        "https://storage.googleapis.com/openimages/v7/oidv7-test-annotations-human-imagelabels.csv"
+    ),
+}
 
 # Encuadre (fracciones de la foto de salida), medido en las fotos de referencia con `ref`
 ASPECT = 16 / 9
@@ -184,6 +247,9 @@ class Pool:
     cars: set[str]  # fotos con `Car` o una subclase anotada (cualquier caja)
     family: set[str]  # fotos con algo de la familia vehículo
     annotated: set[str]  # fotos con alguna caja
+    tags: dict[str, set[str]] = field(
+        default_factory=dict
+    )  # por foto, las clases de `TRACKED` anotadas (cualquier caja)
 
 
 def read_pool(detections_csv: Path, class_ids: Mapping[str, str]) -> Pool:
@@ -195,6 +261,8 @@ def read_pool(detections_csv: Path, class_ids: Mapping[str, str]) -> Pool:
     presence_ids = {class_ids[n] for n in PRESENCE_CLASSES}
     car_ids = {class_ids[n] for n in CAR_CLASSES}
     family_ids = {class_ids[n] for n in FAMILY_CLASSES if n in class_ids}
+    tracked = {class_ids[n]: n for n in TRACKED if n in class_ids}
+    tags: dict[str, set[str]] = defaultdict(set)
     boxes: dict[str, list[Box]] = defaultdict(list)
     presence: set[str] = set()
     cars: set[str] = set()
@@ -206,6 +274,9 @@ def read_pool(detections_csv: Path, class_ids: Mapping[str, str]) -> Pool:
         presence.update(chunk.loc[chunk["LabelName"].isin(presence_ids), "ImageID"].unique())
         cars.update(chunk.loc[chunk["LabelName"].isin(car_ids), "ImageID"].unique())
         family.update(chunk.loc[chunk["LabelName"].isin(family_ids), "ImageID"].unique())
+        tagged = chunk.loc[chunk["LabelName"].isin(tracked), ["ImageID", "LabelName"]].drop_duplicates()
+        for image_id, label in zip(tagged["ImageID"], tagged["LabelName"], strict=True):
+            tags[image_id].add(tracked[label])
         usable = chunk[
             chunk["LabelName"].isin(names)
             & (chunk["IsGroupOf"] == 0)
@@ -214,7 +285,7 @@ def read_pool(detections_csv: Path, class_ids: Mapping[str, str]) -> Pool:
         ]
         for row in usable.itertuples(index=False):
             boxes[row.ImageID].append(Box(names[row.LabelName], row.XMin, row.YMin, row.XMax, row.YMax))
-    return Pool(dict(boxes), presence, cars, family, annotated)
+    return Pool(dict(boxes), presence, cars, family, annotated, dict(tags))
 
 
 def load_class_ids(classes_csv: Path) -> dict[str, str]:
@@ -423,6 +494,261 @@ def build(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- conjuntos de la medición vigente (extras) --------------------------------------------------------
+
+
+def classify(tags: Collection[str]) -> str:
+    """Qué es una foto según sus etiquetas de vehículo: excluida, de otro vehículo, ambigua o sin vehículo.
+
+    Es la definición de "foto sin auto": ningún vehículo válido (`INVALID_CLASSES`). Un colectivo, una
+    ambulancia, una moto, una bicicleta, un tren, un barco, un avión o una silla de ruedas no lo son: la foto
+    sigue siendo negativa. Una rueda, una patente o un `Vehicle` genérico, sin ningún vehículo concreto, es
+    ambigua.
+    """
+    present = set(tags)
+    if present & set(INVALID_CLASSES):
+        return EXCLUDED_KIND
+    if present & set(OTHER_VEHICLES):
+        return OTHER_KIND
+    if present & set(AMBIGUOUS_CLASSES):
+        return AMBIGUOUS_KIND
+    return CLEAN_KIND
+
+
+def negative_counts(pool: Pool, excluded: set[str]) -> dict[str, Any]:
+    """Cuántas fotos de la partición de prueba se excluyen por cada etiqueta, y cómo queda el resto.
+
+    `por_etiqueta_excluida` cuenta las fotos que tienen esa etiqueta (una foto puede tener varias);
+    `excluidas_por_la_primera` asigna cada foto excluida a una sola etiqueta (la primera de
+    `INVALID_CLASSES`).
+    """
+    base = [i for i in sorted(pool.annotated) if i not in excluded]
+    kinds: Counter[str] = Counter()
+    per_label: Counter[str] = Counter()
+    first: Counter[str] = Counter()
+    others: Counter[str] = Counter()
+    ambiguous: Counter[str] = Counter()
+    for image_id in base:
+        tags = pool.tags.get(image_id, set())
+        kind = classify(tags)
+        kinds[kind] += 1
+        if kind == EXCLUDED_KIND:
+            per_label.update(t for t in INVALID_CLASSES if t in tags)
+            first[next(t for t in INVALID_CLASSES if t in tags)] += 1
+        elif kind == OTHER_KIND:
+            others.update(t for t in OTHER_VEHICLES if t in tags)
+        elif kind == AMBIGUOUS_KIND:
+            ambiguous.update(t for t in AMBIGUOUS_CLASSES if t in tags)
+    return {
+        "fotos_anotadas_no_usadas_en_entrenamiento": len(base),
+        "por_tipo": dict(kinds),
+        "por_etiqueta_excluida": {t: per_label[t] for t in INVALID_CLASSES},
+        "excluidas_por_la_primera": {t: first[t] for t in INVALID_CLASSES},
+        "excluidas_total": kinds[EXCLUDED_KIND],
+        "negativas_con_otro_vehiculo_por_etiqueta": {t: others[t] for t in OTHER_VEHICLES if others[t]},
+        "ambiguas_por_etiqueta": {t: ambiguous[t] for t in AMBIGUOUS_CLASSES},
+    }
+
+
+def pickup_box(
+    boxes: Iterable[Box], size: tuple[int, int]
+) -> tuple[Box, tuple[float, float, float, float]] | None:
+    """La caja de vehículo de una foto de pickup: la mayor, si supera `PICKUP_DOMINANCE` veces a la segunda.
+
+    Open Images no tiene cajas de pickup: anota la camioneta como `Truck` o como `Car`. Con un solo vehículo
+    grande no hay duda de cuál es; con varios parecidos no se elige a mano, se descarta la foto.
+    """
+    kinds = (*CAR_CLASSES, "Truck", "Van")
+    vehicles = sorted(
+        ((b, pixel_box(b, size)) for b in boxes if b.label in kinds),
+        key=lambda item: -(item[1][2] - item[1][0]) * (item[1][3] - item[1][1]),
+    )
+    if not vehicles:
+        return None
+    if len(vehicles) > 1:
+        first, second = (((p[2] - p[0]) * (p[3] - p[1])) for _, p in vehicles[:2])
+        if first < PICKUP_DOMINANCE * second:
+            return None
+    return vehicles[0]
+
+
+def plan_extras(
+    pool: Pool, excluded: set[str], used: set[str], pickup_images: set[str], rng: random.Random
+) -> dict[str, list[str]]:
+    """Qué fotos bajar para cada conjunto extra. Una foto no entra a más de un conjunto."""
+    free = [i for i in sorted(pool.boxes) if i not in excluded and i not in used]
+    taken: set[str] = set()
+
+    def take(ids: Sequence[str], n: int) -> list[str]:
+        chosen = [i for i in ids if i not in taken][:n]
+        taken.update(chosen)
+        return chosen
+
+    def not_excluded(image_id: str) -> bool:
+        return classify(pool.tags.get(image_id, set())) != EXCLUDED_KIND
+
+    planned: dict[str, list[str]] = {}
+    for kind, label in (("colectivo", "Bus"), ("ambulancia", "Ambulance")):
+        ids = [i for i in free if not_excluded(i) and any(b.label == label for b in pool.boxes[i])]
+        planned[kind] = take(ids, len(ids))
+    # pickups: las que tienen la etiqueta de imagen (el criterio es la etiqueta, no la caja)
+    pickups = [i for i in free if i in pickup_images]
+    rng.shuffle(pickups)
+    planned["pickup"] = take(pickups, len(pickups))
+    negatives = [i for i in sorted(pool.annotated) if i not in excluded and i not in used and not_excluded(i)]
+    rng.shuffle(negatives)
+    planned["sinvehiculo"] = take(negatives, EXTRA_QUOTAS["sinvehiculo"] + NEG_MARGIN)
+    return planned
+
+
+def make_extra_specs(
+    pool: Pool, ids: Mapping[str, Sequence[str]], sizes: Mapping[str, tuple[int, int]], rng: random.Random
+) -> dict[str, list[Spec]]:
+    """Las ventanas de cada foto candidata de los conjuntos extra, hasta completar cada cupo."""
+    out: dict[str, list[Spec]] = {name: [] for name in ids}
+    for kind, candidates in ids.items():
+        for image_id in candidates:
+            if image_id not in sizes:
+                continue
+            size, boxes = sizes[image_id], pool.boxes.get(image_id, [])
+            tags = sorted(pool.tags.get(image_id, set()))
+            spec = None
+            if kind == "sinvehiculo":
+                spec = Spec(kind, image_id, None, {"tipo": classify(tags), "etiquetas": tags})
+            elif kind in ("colectivo", "ambulancia"):
+                label = "Bus" if kind == "colectivo" else "Ambulance"
+                found = None
+                vehicles = [pixel_box(b, size) for b in boxes if b.label == label]
+                biggest = max(vehicles, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]), default=None)
+                if biggest is not None:
+                    found = general_window(biggest, size, rng)
+                if found:
+                    spec = Spec(kind, image_id, found[0], {"fraction": round(found[1], 3), "etiquetas": tags})
+            else:  # pickup
+                chosen = pickup_box(boxes, size)
+                found = None if chosen is None else general_window(chosen[1], size, rng)
+                if chosen is not None and found:
+                    spec = Spec(
+                        kind,
+                        image_id,
+                        found[0],
+                        {"fraction": round(found[1], 3), "caja": chosen[0].label, "etiquetas": tags},
+                    )
+            if spec is not None:
+                out[kind].append(spec)
+    return {name: items[: EXTRA_QUOTAS[name]] for name, items in out.items()}
+
+
+def ensure_meta(meta_dir: Path) -> Path:
+    """Baja (si faltan) la lista de clases y las etiquetas de imagen de la partición de prueba."""
+    import urllib.request
+
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    for name, url in META_URLS.items():
+        target = meta_dir / name
+        if not target.is_file():
+            print(f"Bajando {name} ...", flush=True)
+            urllib.request.urlretrieve(url, target)  # noqa: S310 - URL https fija del bucket público
+    return meta_dir
+
+
+def class_id(descriptions_csv: Path, name: str) -> str | None:
+    """El identificador de una clase de Open Images por su nombre (sirve para las etiquetas de imagen)."""
+    import csv
+
+    with descriptions_csv.open(encoding="utf-8", newline="") as handle:
+        for row in csv.reader(handle):
+            if len(row) >= 2 and row[1] == name:
+                return row[0]
+    return None
+
+
+def images_with_label(image_labels_csv: Path, label_id: str) -> set[str]:
+    """Fotos con esa etiqueta de imagen confirmada (`Confidence` 1)."""
+    import pandas as pd
+
+    found: set[str] = set()
+    columns = ["ImageID", "LabelName", "Confidence"]
+    for chunk in pd.read_csv(image_labels_csv, usecols=columns, chunksize=1_000_000):
+        found.update(chunk.loc[(chunk["LabelName"] == label_id) & (chunk["Confidence"] == 1), "ImageID"])
+    return found
+
+
+def build_extras(args: argparse.Namespace) -> int:
+    import v2_download
+
+    out = Path(args.out_dir)
+    report = json.loads((out / "specs.json").read_text(encoding="utf-8"))
+    cache = Path(args.data_dir) / CACHE / SOURCE_SPLIT
+    pool = read_pool(cache / "labels" / "detections.csv", load_class_ids(cache / "metadata" / "classes.csv"))
+    excluded = set().union(*training_ids(Path(args.data_dir)).values())
+    counts = negative_counts(pool, excluded)
+    print("Antes de medir: fotos excluidas de las negativas por etiqueta")
+    print(json.dumps(counts, indent=1, ensure_ascii=False), flush=True)
+    meta = ensure_meta(Path(args.meta_dir))
+    pickup_id = class_id(meta / "oidv7-class-descriptions.csv", PICKUP_CLASS)
+    pickup_images: set[str] = set()
+    if pickup_id is not None:
+        pickup_images = images_with_label(meta / "test-human-imagelabels.csv", pickup_id)
+    print(
+        f"Etiqueta de imagen {PICKUP_CLASS!r}: {pickup_id or 'NO EXISTE'}; "
+        f"fotos de prueba: {len(pickup_images)}"
+    )
+    if pickup_id is None:
+        print("No existe: no se arma el set de pickups.")
+    used = {
+        s["image_id"]
+        for name in ("plate", "general", "detail", "heavy_Truck", "heavy_Van")
+        for s in report["specs"].get(name, [])
+    }
+    rng = random.Random(SEED + NEG_SEED_OFFSET)  # noqa: S311 - muestreo de fotos, no criptografía
+    planned = plan_extras(pool, excluded, used, pickup_images, rng)
+    source = out / "source"
+    wanted = sorted({i for ids in planned.values() for i in ids})
+    print(f"Fotos a bajar: {len(wanted)}", flush=True)
+    ok = v2_download.download_all(wanted, SOURCE_SPLIT, source)
+    sizes = {i: s for i in ok if (s := image_size(source / f"{i}.jpg")) is not None}
+    specs = make_extra_specs(pool, {k: [i for i in v if i in sizes] for k, v in planned.items()}, sizes, rng)
+    for name, items in specs.items():
+        folder = out / name
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob("*.jpg"):
+            old.unlink()
+        for index, spec in enumerate(items):
+            image = cv2.imdecode(
+                np.fromfile(str(source / f"{spec.image_id}.jpg"), np.uint8), cv2.IMREAD_COLOR
+            )
+            (folder / f"{index:04d}.jpg").write_bytes(crop_to_jpeg(image, spec.window))
+            if name != "sinvehiculo":  # además, la foto entera
+                whole = out / f"{name}_whole"
+                whole.mkdir(exist_ok=True)
+                (whole / f"{index:04d}.jpg").write_bytes(crop_to_jpeg(image, None))
+    pickup_boxes = Counter(s.detail["caja"] for s in specs.get("pickup", []))
+    report["specs"].update({name: [asdict(s) for s in items] for name, items in specs.items()})
+    report["fotos"].update({name: len(items) for name, items in specs.items()})
+    report["mitades"].update(
+        {
+            name: {
+                "A": halves(len(items), SEED).count("A"),
+                "B": len(items) - halves(len(items), SEED).count("A"),
+            }
+            for name, items in specs.items()
+        }
+    )
+    report["conteos_negativas"] = counts
+    report["pickups"] = {
+        "etiqueta_de_imagen": PICKUP_CLASS,
+        "id": pickup_id,
+        "fotos_de_prueba_con_la_etiqueta": len(pickup_images),
+        "candidatas_no_usadas_en_entrenamiento_ni_en_otros_conjuntos": len(planned.get("pickup", [])),
+        "con_ventana_y_caja_dominante": len(specs.get("pickup", [])),
+        "etiqueta_de_la_caja": dict(pickup_boxes),
+    }
+    (out / "specs.json").write_text(json.dumps(report, indent=1), encoding="utf-8")
+    print({k: v for k, v in report.items() if k not in ("specs", "conteos_negativas")}, flush=True)
+    return 0
+
+
 # --- verificación de la exclusión --------------------------------------------------------------------
 
 
@@ -497,7 +823,7 @@ def ref(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=("ref", "build", "verify"))
+    parser.add_argument("command", choices=("ref", "build", "extras", "verify"))
     parser.add_argument(
         "--data-dir", type=Path, default=os.environ.get("TRAIN_DATA_DIR"), help="TRAIN_DATA_DIR"
     )
@@ -505,12 +831,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--models-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="MODELS_DIR")
     parser.add_argument("--manifest", type=Path, default=REPO_ROOT / "models" / "manifest.json")
     parser.add_argument("--ref-dir", type=Path, help="fotos de referencia (solo para `ref`)")
+    parser.add_argument("--meta-dir", type=Path, help="lista de clases y etiquetas de imagen (`extras`)")
     parser.add_argument("--detector", default="rfdetr_openimages_v2")
     args = parser.parse_args(argv)
     if args.out_dir is None:
         parser.error("indicá --out-dir o definí EVAL_OUT")
     if args.command != "ref" and args.data_dir is None:
         parser.error("indicá --data-dir o definí TRAIN_DATA_DIR")
+    if args.command == "extras" and args.meta_dir is None:
+        args.meta_dir = Path(args.data_dir).parent / "oi-meta"
     if args.command == "ref" and (args.ref_dir is None or args.models_dir is None):
         parser.error("`ref` pide --ref-dir y --models-dir")
     return args
@@ -522,7 +851,7 @@ def main(argv: list[str] | None = None) -> int:
         if path is not None and Path(path).resolve().is_relative_to(REPO_ROOT):
             print("Las fotos y la salida no pueden estar dentro del repositorio.", file=sys.stderr)
             return 1
-    return {"ref": ref, "build": build, "verify": verify}[args.command](args)
+    return {"ref": ref, "build": build, "extras": build_extras, "verify": verify}[args.command](args)
 
 
 if __name__ == "__main__":
