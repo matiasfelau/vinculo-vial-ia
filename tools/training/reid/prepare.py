@@ -43,7 +43,7 @@ _worker: dict[str, Any] = {}
 
 
 def init_worker(manifest: str, models_dir: str, threads: int, detector: str) -> None:
-    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+    settings = Settings.model_construct(plate_tiling=False)
     _worker["models"] = build_models(
         {"detector": detector}, Path(manifest), Path(models_dir), threads, adapter_params(settings)
     )

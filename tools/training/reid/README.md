@@ -137,7 +137,7 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
    Imprime el `sha256` para `models/manifest.json` y falla (borrando el archivo) si la diferencia máxima por
    componente del embedding pasa de 1e-3 o el coseno mínimo entre ONNX y PyTorch baja de 0,9999.
 
-6. **Medir** contra el modelo sin ajustar, con los pares general-patente y en VeRi-776: ver
+6. **Medir** contra el modelo sin ajustar, con los pares general-patente: ver
    [tools/eval/README.md](../../eval/README.md#re-id-con-3drealcar-general-contra-patente-reid_parcialespy).
 
 ## Pares, ángulos y métricas

@@ -434,7 +434,7 @@ Por cada clase muestra:
 | Columna | Qué significa |
 |---|---|
 | `reales` | Cajas anotadas en las fotos. |
-| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros: eran los de `PLATE_REDACT_MIN_CONF` y `FACE_MIN_CONF`; hoy son 0,10 y 0,25). |
+| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros; el servicio usa hoy 0,10 para patentes en `PLATE_REDACT_MIN_CONF` y ya no tiene umbral de rostros, porque no los redacta). |
 | `recall` | De las cajas reales, qué fracción encontró (IoU 0,5 o más) con ese umbral. |
 | `prec.` | De las cajas que dibujó, qué fracción acertó. |
 | `FP` | Falsos positivos: cajas que no corresponden a nada. |
@@ -445,9 +445,9 @@ Para tapar rostros y patentes manda el **recall**: una caja de más tapa de más
 rostro a la vista. La precisión importa menos. La salida completa queda en `detector_report.json`, solo
 con cifras. `--detector-min-conf`, `--plate-min-conf` y `--face-min-conf` cambian los umbrales.
 
-### Mosaico para patentes y rostros chicos
+### Mosaico para patentes y rostros chicos (el de rostros, solo experimental)
 
-`--plate-tiling` y `--face-tiling` (los mismos `PLATE_TILING` y `FACE_TILING` del servicio) recorren la foto
+`--plate-tiling` (el mismo `PLATE_TILING` del servicio) y `--face-tiling` (solo para el módulo experimental de rostros) recorren la foto
 también en tiles de `--tile-px` (640 por defecto) con solape `--overlap` (0,25), y fusionan las cajas con NMS.
 Las fotos de más de 1600 px se achican a ese lado antes de cortar los tiles, para acotar el costo. Solo mejora
 los objetos chicos y cuesta **una inferencia más por tile**. Con el split de prueba de Open Images (204 fotos de
@@ -463,43 +463,44 @@ Con tiles de 640 px el recall de patentes sube 7 puntos y el de las chicas 15, a
 foto y más cajas de más (que, al tapar, cuestan poco). Los tiles de 480 px no mejoran y son más lentos. Autos,
 ruedas y rostros no cambian: el mosaico solo toca las clases pedidas.
 
-## Detectores de rostros (`face.py`)
+## Rostros: módulo experimental fuera del producto (`face.py`)
 
-El servicio tapa los rostros de las fotos con un relleno opaco antes de guardarlas. Si un rostro no se
-detecta, **queda a la vista**: por eso lo que importa es el **recall** (qué fracción de las caras se encuentra),
-más que la precisión. Este script compara detectores sobre fotos con las caras anotadas.
+**S2, riesgo aceptado (16/11/2026).** El producto **no redacta rostros**: solo tapa patentes de terceros. El criterio del
+proyecto es que el producto final use solo componentes y datos con camino comercial, y el mejor detector de rostros
+medido (SCRFD, InsightFace) tiene pesos para investigación: usarlo en el producto exige pagar su licencia. Se acepta el
+riesgo porque las fotos se toman **a 1-2 m, centradas en el vehículo**, así que un rostro en la foto es raro. Los casos
+residuales son **los ocupantes visibles por las ventanillas y los peatones en el fondo**: esos rostros quedan a la vista
+en la evidencia redactada que ve el dueño.
 
-| Detector | Licencia de los pesos (`commercial`) | ¿Puede entrar al servicio? |
+Como el detector de rostros, el de daños y el chequeo de rebajes, queda como **módulo experimental**: el código está
+en el repo (`scrfd_face.py`, el puerto `face`, esta herramienta), el adaptador es el **nulo por defecto** (`MODEL_FACE=null`)
+y **nadie lo llama** en la cascada. La redacción solo depende del detector de patentes: sin él no hay versión redactada
+(fail-closed), pero un modelo de rostros ausente o que no responde no la afecta. Esta herramienta compara detectores de
+rostros sobre fotos con las caras anotadas, para retomarlo el día que haya licencia.
+
+| Detector | Licencia de los pesos (`commercial`) | Estado |
 |---|---|---|
-| RF-DETR (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | Sí. |
-| SCRFD-10G (InsightFace) | `escalable` (InsightFace vende licencias comerciales) | Sí, `scrfd_10g`. |
-| RetinaFace-R50 (biubug6) | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
-| YuNet | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
+| RF-DETR v1 (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | Experimental. |
+| SCRFD-10G (InsightFace) | `escalable` (pesos para investigación; InsightFace vende licencias comerciales) | Experimental (`scrfd_10g`). |
+| RetinaFace-R50 (biubug6) | `no` | Solo referencia en `tools/`. |
+| YuNet | `no` | Solo referencia en `tools/`. |
 
-El puerto `face` es el único que puede seleccionar un modelo `commercial = no`, si es el que mejor protege la
-privacidad (el registro lo deja pasar y avisa en el log). Los que no son RF-DETR ni SCRFD **no se incluyen en
-el repo**: los cargás vos desde un ONNX tuyo.
+El puerto `face` es el único que puede seleccionar un modelo `commercial = no` (el registro lo deja pasar y avisa en el
+log). Los que no son RF-DETR ni SCRFD **no se incluyen en el repo**: los cargás vos desde un ONNX tuyo.
 
 ### 1. Armar las fotos
 
-Hay dos conjuntos de referencia, fuera del repo (tienen rostros de terceros):
+El conjunto de referencia sale del split de prueba de Open Images y queda fuera del repo (tiene rostros de terceros):
 
 ```powershell
 $env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"      # ahí está el subset de Open Images del detector
 $env:EVAL_DATA_DIR = "D:\vv-eval"
-uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py wider        # 1000 fotos al azar de WIDER FACE (validación)
 uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py openimages   # el split de prueba de Open Images, solo rostros
 ```
 
-- **WIDER FACE (validación)**: referencia académica. Se baja de Hugging Face y se usa una muestra al azar
-  (semilla 0). Se descartan las caras que WIDER marca como inválidas y las de menos de 8 px. **Nunca para
-  entrenar.** Es un benchmark muy duro (de las 11 896 caras, 8 611 miden menos de 32 px) y muchas caras chicas
-  no están anotadas, así que sus falsos positivos por foto están inflados.
-- **Open Images (prueba)**: fotos que RF-DETR nunca vio. Se parece más a las fotos del servicio, pero tiene
-  solo 135 caras (13 chicas), así que sus recalls por tamaño son ruidosos.
-
-También sirven fotos propias con las caras anotadas en CVAT (una sola etiqueta de tipo *Rectangle*, exportada en
-formato "COCO 1.0") en `EVAL_DATA_DIR\face\`: es lo que mejor predice cómo va a andar el servicio.
+**Open Images (prueba)**: fotos que RF-DETR nunca vio, con 204 fotos y 135 caras (13 chicas), así que sus recalls por
+tamaño son ruidosos. También sirven fotos propias con las caras anotadas en CVAT (una sola etiqueta de tipo *Rectangle*,
+exportada en formato "COCO 1.0") en `EVAL_DATA_DIR\face\`.
 
 ### 2. Conseguir los modelos
 
@@ -516,16 +517,16 @@ formato "COCO 1.0") en `EVAL_DATA_DIR\face\`: es lo que mejor predice cómo va a
 ```powershell
 $env:EVAL_OUT = "D:\vv-eval\out\face"
 $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/face.py --dataset-dir D:\vv-eval\face-wider --rfdetr-model rfdetr_openimages --scrfd-model D:\modelos\det_10g.onnx --retinaface-model D:\modelos\retinaface_r50.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx --tiling rfdetr scrfd retinaface_r50
+uv run --frozen --extra dev --extra tools python tools/eval/face.py --dataset-dir D:\vv-eval\face-oi-test --rfdetr-model rfdetr_openimages --scrfd-model D:\modelos\det_10g.onnx --retinaface-model D:\modelos\retinaface_r50.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx --tiling rfdetr scrfd retinaface_r50
 ```
 
 Pasá solo los que tengas. `--size` es el lado de la entrada de SCRFD y RetinaFace (640 por defecto).
 `--tiling NOMBRE...` suma una versión `NOMBRE+mosaico` de esos detectores (`--tile-px`, `--overlap`).
 Esa versión no aplica el tope de 1600 px del servicio (corta la foto tal cual está), así que es el peor caso de
 latencia.
-`--service-model scrfd_10g` corre un modelo del manifest a través del **adaptador del servicio** (y
-`--service-tiling` suma el adaptador con `FACE_TILING=true`): da lo mismo que `--scrfd-model` y sirve para
-comprobar el adaptador con los pesos reales.
+`--service-model scrfd_10g` corre un modelo del manifest a través del **adaptador** (y `--service-tiling` suma el
+adaptador con el mosaico de rostros activo): da lo mismo que `--scrfd-model` y sirve para comprobar el adaptador con
+los pesos reales.
 
 ### 4. Cómo leer el resultado
 
@@ -536,24 +537,11 @@ porque cada uno tiene su propia escala de confianza. Después, por cada tope, el
 (lado menor: chicas < 32 px, medianas de 32 a 96 px, grandes > 96 px), los falsos positivos reales y la latencia
 (mediana y p95). `face_report.json` tiene además la curva completa y el umbral de cada punto.
 
-### 5. Resultados de referencia
+### 5. Resultados de referencia (Open Images, prueba)
 
-Recall con a lo sumo **0,5 falsos positivos por foto**; latencia por foto en una CPU de 6 núcleos
-(AMD Ryzen 5 3600; la máquina no estaba del todo libre, tomalas como orden de magnitud).
-
-**WIDER FACE, 998 fotos de validación y 11 896 caras** (8 611 chicas, 2 701 medianas, 584 grandes):
-
-| Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana / p95) |
-|---|---|---|---|---|---|---|
-| RF-DETR | 0,47 | 0,33 | 0,14 | 0,77 | 0,96 | 304 / 410 |
-| **SCRFD-10G** | **0,80** | **0,66** | **0,55** | **0,92** | **0,97** | **118 / 200** |
-| RetinaFace-R50 | 0,63 | 0,51 | 0,35 | 0,90 | 0,97 | 317 / 410 |
-| YuNet | 0,75 | 0,57 | 0,46 | 0,83 | 0,90 | 64 / 127 |
-| RF-DETR + mosaico | 0,58 | 0,39 | 0,21 | 0,83 | 0,96 | 1239 / 2266 |
-| SCRFD-10G + mosaico | 0,87 | 0,69 | 0,61 | 0,91 | 0,96 | 762 / 7421 |
-| RetinaFace-R50 + mosaico | 0,82 | 0,65 | 0,54 | 0,92 | 0,98 | 1561 / 2471 |
-
-**Open Images (prueba), 204 fotos y 135 caras** (13 chicas, 57 medianas, 65 grandes):
+Recall con a lo sumo **0,5 falsos positivos por foto**; **204 fotos y 135 caras** (13 chicas, 57 medianas, 65 grandes).
+Latencia por foto en una CPU de 6 núcleos (AMD Ryzen 5 3600; la máquina no estaba del todo libre, tomalas como orden
+de magnitud).
 
 | Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana) |
 |---|---|---|---|---|---|---|
@@ -564,71 +552,23 @@ Recall con a lo sumo **0,5 falsos positivos por foto**; latencia por foto en una
 | RF-DETR + mosaico | 0,85 | 0,90 | 0,38 | 0,95 | 0,95 | 1589 |
 | SCRFD-10G + mosaico | 0,68 | 0,86 | 0,62 | 0,89 | 0,88 | 563 |
 
+Con el adaptador de `scrfd_10g` y el barrido de su confianza mínima (recall con IoU 0,5 o más):
+
+| Confianza mínima | Recall | Falsos positivos por foto | Con mosaico: recall | chicas (13) |
+|---|---|---|---|---|
+| 0,20 | 0,867 | 1,18 | 0,882 | 0,769 |
+| 0,25 | 0,867 | 0,81 | 0,882 | 0,769 |
+| 0,30 | 0,859 | 0,61 | 0,874 | 0,769 |
+| 0,40 | 0,859 | 0,37 | 0,859 | 0,615 |
+
 Cómo leerlo:
 
-- **Las caras chicas son el punto débil de RF-DETR**: en WIDER encuentra 14 de cada 100 (SCRFD, 55). Se entrenó
-  con Open Images, que anota poco las caras chicas, y achica la foto a 512 px.
-- **SCRFD-10G** gana en WIDER por mucho y en Open Images queda empatado con RF-DETR a 0,5 falsos positivos por
-  foto, siendo **unas tres veces más rápido** (105 contra 294 ms). Ojo: SCRFD y RetinaFace se entrenaron con WIDER
-  FACE, así que ahí juegan de local; Open Images es el árbitro más neutral y no los contradice.
-- Con el tope de **0,1** falsos positivos por foto SCRFD parece peor en Open Images (0,50 contra 0,79 de recall):
-  es la forma de su confianza (pone alta confianza a caras que Open Images no anotó). En un servicio que tapa de
-  más antes que de menos, importa más el punto de 0,5 a 1,0.
-- **El mosaico ayuda a las caras chicas con SCRFD en WIDER** (de 0,55 a 0,61 con 0,5 falsos positivos y de 0,34 a
-  0,45 con 0,1) pero **no en Open Images**, donde las caras no son tan chicas, y cuesta 5 a 6 veces la latencia
-  (con picos de varios segundos en fotos grandes). Con RF-DETR ayuda poco: en WIDER las chicas pasan de 0,14 a 0,21.
-- Las cifras de Open Images se apoyan en pocas caras chicas: confirmalas con fotos propias antes de decidir.
-
-El criterio de [docs/modelos.md](../../docs/modelos.md) (que RF-DETR quede cerca de RetinaFace-R50) dio
-`rfdetr_queda: false` en WIDER (RF-DETR pierde 14 puntos a 0,1 falsos positivos) y `true` en Open Images.
-
-### 5b. Validación de `scrfd_10g` con el adaptador del servicio
-
-WIDER FACE val **completo** (`face_sets.py wider --sample 4000`: 3220 fotos con caras válidas y 32 596 caras de al
-menos 8 px; 23 000 chicas, 7 753 medianas y 1 843 grandes) y Open Images (prueba), con `--service-model scrfd_10g
---service-tiling` y el barrido de `FACE_MIN_CONF` (`--sweep-from 0.20 --sweep-to 0.50`). Recall con IoU 0,5 o más:
-
-| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | falsos positivos por foto |
-|---|---|---|---|---|---|---|---|
-| 0,20 | 0,809 | 0,746 | 0,956 | 0,983 | 4,48 | 0,867 | 1,18 |
-| 0,25 | 0,787 | 0,716 | 0,951 | 0,983 | 2,67 | 0,867 | 0,81 |
-| **0,30** | 0,760 | 0,680 | 0,947 | 0,981 | 1,66 | 0,859 | 0,61 |
-| 0,35 | 0,728 | 0,637 | 0,941 | 0,978 | 1,03 | 0,859 | 0,49 |
-| 0,40 | 0,693 | 0,590 | 0,930 | 0,974 | 0,64 | 0,859 | 0,37 |
-| 0,50 | 0,615 | 0,486 | 0,914 | 0,967 | 0,25 | 0,852 | 0,29 |
-
-Con `FACE_TILING=true` (tiles de 640 px):
-
-| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | chicas (13) |
-|---|---|---|---|---|---|---|---|
-| 0,25 | 0,885 | 0,849 | 0,966 | 0,986 | 5,93 | 0,882 | 0,769 |
-| **0,30** | 0,869 | 0,829 | 0,961 | 0,984 | 3,88 | 0,874 | 0,769 |
-| 0,40 | 0,830 | 0,777 | 0,949 | 0,979 | 1,78 | 0,859 | 0,615 |
-
-Latencia por foto en CPU (Ryzen 5 3600): 105 ms en Open Images y 164 ms (p95 262) en WIDER sin mosaico;
-575 ms (p95 1,2 s) y 1 084 ms (p95 7,0 s) con mosaico. Las caras chicas son el punto débil (0,68 en WIDER y 0,62 en
-Open Images con 0,30), y el mosaico las sube unos 15 puntos a cambio de 5 a 6 veces la latencia y del doble de
-falsos positivos (que al tapar cuestan poco). Los falsos positivos de WIDER están inflados por caras sin anotar.
-
-### 6. Configuración de redacción (provisoria)
-
-> **Actualización del 16/11/2026:** `PLATE_REDACT_MIN_CONF` es hoy **0,10** y `MODEL_OCR` es `parseq` (ver "S3: umbral de redacción de patentes en 0,10"). El bloque de abajo es el de la primera configuración.
-
-Con estos datos quedó como configuración de `.env.example` (y `PLATE_TILING=true` como default del código),
-**provisoria hasta validar con fotos propias**. `REDACTION_REQUIRED` no se tocó (sigue en `false` solo en local):
-
-```dotenv
-MODEL_DETECTOR=rfdetr_openimages   # autos, ruedas y patentes
-MODEL_FACE=scrfd_10g               # rostros: mejor recall, sobre todo en caras chicas, y 3 veces más rápido
-FACE_MIN_CONF=0.30                 # con SCRFD son unos 0,8 falsos positivos por foto en Open Images
-PLATE_REDACT_MIN_CONF=0.20
-FACE_TILING=true                   # +15 puntos de recall en caras chicas; entra en los 12 s solo porque la redacción va en paralelo (ver la cascada)
-PLATE_TILING=true                  # +7 puntos de recall de patentes; cuesta ~3,5 s más por alerta de 3 fotos (ver la tabla de la cascada)
-```
-
-Con `MODEL_FACE=scrfd_10g` el detector de rostros ya no comparte la inferencia con el de patentes (RF-DETR
-resuelve los dos con una sola pasada): son unos 105 ms más por foto. La confianza de SCRFD no es la de
-RF-DETR: `FACE_MIN_CONF` se eligió mirando la curva de SCRFD, no copiando el valor viejo.
+- **Las caras chicas son el punto débil de RF-DETR** (se entrenó con Open Images, que anota poco las caras chicas, y
+  achica la foto a 512 px). SCRFD-10G queda empatado con RF-DETR a 0,5 falsos positivos por foto y es **unas tres veces
+  más rápido** (105 contra 294 ms).
+- Con el tope de **0,1** falsos positivos por foto SCRFD parece peor (0,50 contra 0,79 de recall): es la forma de su
+  confianza (pone alta confianza a caras que Open Images no anotó).
+- Las cifras se apoyan en pocas caras chicas: confirmalas con fotos propias antes de retomar el módulo.
 
 ## Daños de la carrocería (`damage.py`)
 
@@ -693,6 +633,11 @@ detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 
 ## Latencia de la cascada completa (`cascade.py`)
 
+> **Nota del 16/11/2026: las latencias de esta sección incluyen la detección de rostros.** Hasta esa fecha la redacción
+> corría SCRFD (con mosaico) sobre cada foto, que era la parte más cara de la etapa `redaction`. El producto ya no redacta
+> rostros (ver "Rostros: módulo experimental fuera del producto"), así que esa parte no corre y **estas cifras son una cota
+> superior** de la latencia actual. No se volvieron a medir. En `cascade.py` el puerto de rostros queda en `null`.
+
 Mide cuánto tarda **una alerta entera** en CPU con los modelos reales: el mismo caso de uso, los mismos
 adaptadores y el mismo ONNX que el servicio, de a una alerta por vez. Se arma con autos de Open Images (la
 foto GENERAL y la PLATE son la misma, con la patente que lee el OCR como patente reportada, para que la
@@ -714,7 +659,6 @@ uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --general
 | `--detector NOMBRE` | `MODEL_DETECTOR` (por defecto `rfdetr_openimages_v2`). |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
 | `--plate-tiling on\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
-| `--face-tiling on\|off` | `FACE_TILING` (por defecto `on`, como el servicio). |
 | `--redact-workers N` | `REDACT_WORKERS`: fotos que se planifican a la vez al redactar (por defecto el del servicio, 3). |
 | `--model-max-side N` | `MODEL_MAX_SIDE_PX`: lado mayor al que se reduce la foto antes de los modelos (1024). |
 | `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
@@ -767,7 +711,7 @@ esa etapa baja a unos 0,3 s por foto. La re-ID suma una segmentación y un embed
 
 Cambios que bajan la latencia sin tocar el veredicto: el detector corre **un pase por foto** (sobre la foto
 reducida a `MODEL_MAX_SIDE_PX`=1024) y lo reutiliza la presencia, la lectura de la patente y la redacción; el
-mosaico (`FACE_TILING`, `PLATE_TILING`) solo corre al redactar, es decir, nunca si el veredicto ya es RED; y la
+mosaico de patentes (`PLATE_TILING`) solo corre al redactar, es decir, nunca si el veredicto ya es RED; y la
 redacción planifica hasta `REDACT_WORKERS`=3 fotos a la vez (con la memoria del detector compartida entre hilos).
 Las cajas vuelven a las coordenadas de la foto original antes de tapar.
 
@@ -1775,9 +1719,9 @@ denunciada, habría que exceptuar las cajas contenidas en una exceptuada; no se 
 
 **OCR por defecto.** `MODEL_OCR=parseq` también es ahora el default de `config.py` y `.env.example` (antes `null`, que no era
 una decisión sino el valor inicial del registro de modelos: no hay nada en el historial que lo justifique por licencia). Sin OCR,
-R3 no compara y la patente reportada no se exceptúa. Los pesos de PARSeq no declaran licencia (`models/manifest.json`):
-confirmarla con los autores antes de un uso comercial, igual que con SCRFD. Con el OCR por defecto, `MODELS_DIR` es obligatorio
-para arrancar sin definir `MODEL_OCR=null`.
+R3 no compara y la patente reportada no se exceptúa. Los pesos de PARSeq son Apache-2.0 según el autor (ficha
+`baudm/parseq-small` en Hugging Face; verificados por SHA-256, ver [THIRD_PARTY.md](../../THIRD_PARTY.md)). Con el OCR por
+defecto, `MODELS_DIR` es obligatorio para arrancar sin definir `MODEL_OCR=null`.
 
 ### R1 con el detector v2: la regla de patente, v1 y v2 lado a lado
 
@@ -1986,72 +1930,6 @@ positivos de patente son sobre todo textos o piezas con forma de patente (marcas
 sin mosaico y 27 de 71 con mosaico, así que el mosaico agrega ruido real, no solo patentes sin anotar. Los falsos
 positivos de auto que no lo son casi no existen (2 de 74: un scooter y un cartel con la foto de un auto).
 
-## Calibración de `REID_T` con VeRi-776 (`reid_veri.py`)
-
-R2 (`BURST_MISMATCH`) pide **0 pares del mismo auto por debajo de `REID_T`** (cota del 95 % = 3/N). Se calibra con
-VeRi-776, solo para **validar**: no se entrena nada y no se copia nada al repo (su licencia es solo de investigación,
-sin uso comercial). Para cada recorte de `image_test` (los 1 678 de `image_query` están dentro) corre lo mismo que la
-cascada: segmenta los autos, toma el más grande y embebe su máscara (`rfdetr_seg_coco` + `dinov2_vits14`).
-
-```powershell
-$env:VERI_DIR = "D:\vv-eval\veri\VeRi"; $env:EVAL_OUT = "D:\vv-eval\out\reid-veri"; $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/reid_veri.py
-```
-
-Opciones: `--per-track N` (recortes por auto y cámara, 3), `--workers N` (recortes embebidos a la vez, 4), `--limit N`
-(para probar) y `--max-false-red` (tasa de pares del mismo auto debajo del umbral propuesto, 0,1 %).
-
-- **Mismo auto**: mismo ID y cámaras distintas. **Autos distintos**: IDs distintos; aparte los **difíciles**, con el
-  mismo color y el mismo tipo según `test_label.xml`.
-- Un recorte donde el segmentador no encuentra ningún auto **no es comparable** (en la cascada R2 no decide: GREEN).
-
-Resultado (5 011 recortes elegidos, 198 autos y 19 cámaras):
-
-| Dato | Valor |
-|---|---|
-| Recortes comparables | 4 010 de 5 011; 1 001 (20 %) sin auto segmentado |
-| Pares del mismo auto (N) | 48 437 |
-| Pares de autos distintos / difíciles | 7 985 843 / 902 906 |
-| Coseno medio: mismo auto / distintos / difíciles | 0,654 / 0,557 / 0,632 |
-| AUC (1,0 = se separan del todo): todos / difíciles | 0,664 / 0,548 |
-| **Umbral exacto** (0 pares del mismo auto debajo) | **−0,037**, cota del 95 % = 3/48 437 = 0,006 % |
-| Autos distintos que detecta con el exacto (todos / difíciles) | 0,004 % / 0 % (**inútil**) |
-| **`REID_T` propuesto** | **0,075**: 48 pares del mismo auto debajo (0,10 %), repartidos en 12 de 198 autos |
-| Autos distintos que salen `BURST_MISMATCH` con 0,075 (todos / difíciles) | 0,55 % / 0,03 % |
-
-Curva (falso rojo = par del mismo auto por debajo del umbral; detectados = autos distintos que salen `BURST_MISMATCH`):
-
-| `REID_T` | Pares del mismo auto debajo (falsos rojos) | Autos distintos detectados | Difíciles detectados |
-|---|---|---|---|
-| 0,05 | 22 (0,05 %) | 0,26 % | 0,01 % |
-| **0,075** | **48 (0,10 %)** | **0,55 %** | **0,03 %** |
-| 0,10 | 86 (0,18 %) | 1,01 % | 0,05 % |
-| 0,20 | 303 (0,63 %) | 4,21 % | 0,35 % |
-| 0,30 | 902 (1,86 %) | 8,33 % | 1,51 % |
-| 0,40 | 2 413 (4,98 %) | 15,8 % | 5,02 % |
-| 0,50 (valor anterior) | 6 770 (13,98 %) | 31,3 % | 15,6 % |
-
-Los histogramas de similitud se solapan casi por completo: los pares del mismo auto se concentran entre 0,50 y 0,80
-y los de autos distintos entre 0,45 y 0,75. **En VeRi la re-ID no separa lo suficiente** para acusar fraude sin falsos
-rojos: con 0,50 (el valor anterior) el 14 % de los pares del mismo auto se marcaría como otro auto. Con 0,075 el falso
-rojo cae al 0,1 %, pero R2 casi no se dispara (detecta 0,55 % de los autos distintos): solo salta ante recortes
-groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto con estos datos.
-
-**Limitaciones**
-
-- **Dominio distinto.** VeRi son recortes de cámaras de vigilancia de baja resolución, con cámaras y luz distintas
-  entre fotos del mismo auto. Las fotos de la app son de celular, de la misma escena y en segundos: lo esperable es
-  que el mismo auto se parezca **más** y que 0,075 sea demasiado bajo. Hay que medirlo con fotos propias (pares
-  general–patente del mismo auto y de autos distintos) antes de subirlo.
-- **`REID_T` queda provisorio** hasta esa validación (`.env.example`, `config.py`).
-- Los pares no son independientes (200 autos, unos 24 recortes por auto): la cota 3/N con N = 48 437 es optimista; el
-  tamaño efectivo está más cerca de la cantidad de autos y de pares de cámaras.
-- El 20 % de los recortes sin auto segmentado es por la baja resolución; en fotos de celular no se espera.
-- Se usan hasta 3 recortes por auto y cámara (5 011 de los 11 579) para acotar el costo (unos 40 minutos en CPU).
-- **Esta calibración usó máscaras del segmentador.** El segmentador salió de la cascada y ahora el embedder recibe la caja
-  `car` del detector: con ese recorte, `REID_T` = 0,075 sigue dejando U1 en 0,1 % en VeRi y en 0,3 % en 3DRealCar (ver
-  "Re-ID con 3DRealCar", abajo), pero detecta muy pocos autos distintos (S4 de 0,1 % y 5 %).
-
 ## Re-ID con 3DRealCar: general contra patente (`reid_parciales.py`)
 
 > **Medición vigente de re-ID (15/11/2026).** La sección siguiente ("Re-ID con 3DRealCar") es la de la primera versión (411 autos,
@@ -2077,7 +1955,7 @@ Esta medición usa el dataset completo de 3DRealCar (**2 009 autos usables**: 1 
 
 ```powershell
 $env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-patente"
-uv run --frozen --extra dev --extra tools python tools/eval/reid_parciales.py --models dinov2_vits14 dinov2_vits14_reid_v2 --veri-dir D:\vv-eval\veri\VeRi
+uv run --frozen --extra dev --extra tools python tools/eval/reid_parciales.py --models dinov2_vits14 dinov2_vits14_reid_v2
 ```
 
 ### Datos y partición
@@ -2167,15 +2045,6 @@ Recalculado con las señales de `capture_r1.py` (ver "R1 con el encuadre de 1-2 
 Con los umbrales anteriores (`car` 0,40) eran 1,17 % (cota 5,4 %) en B y 0,92 % (cota 3,24 %) en todas. (La alerta de 3 fotos del 14/11, con detalle, daba
 4,5 %: el detalle era el que más se rechazaba.)
 
-### VeRi-776 como referencia
-
-4 490 recortes de cámaras de vigilancia (521 descartados por no tener auto detectado), con el mismo recorte del detector. **AUC 0,777 con el modelo
-ajustado contra 0,667 sin ajustar** (difíciles: 0,621 contra 0,536). **El umbral calibrado en 3DRealCar no se traslada a VeRi-776**: con el `REID_T` activo
-(0,2565) el modelo ajustado marca como distinto solo el 9,1 % de los pares de autos distintos (S4 de 98 % en 3DRealCar; 3,0 % en los difíciles) y deja U1 en
-2,53 % (cota 2,65 %); con 0,0638, S4 de 0,40 % y U1 de 0,07 %. Calibrado en VeRi con la regla de U1 <= 1 % (cota 1,00 %): S4 de 3,1 % el ajustado y 3,6 % el no
-ajustado. Mejora el ordenamiento, no el umbral: VeRi (cámaras de vigilancia de baja resolución, de otro dominio) es solo una referencia, y el umbral del servicio
-vale para fotos de celular como las de 3DRealCar hasta validarlo con fotos propias.
-
 ### Limitaciones
 
 - **U1 es optimista**: los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma luz).
@@ -2196,7 +2065,7 @@ ICCV 2025) es Apache-2.0 con uso comercial; licencia y cita en [THIRD_PARTY.md](
 
 ```powershell
 $env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-eval"
-uv run --frozen --extra dev --extra tools python tools/eval/reid_3drealcar.py --models dinov2_vits14 dinov2_vits14_reid --veri-dir D:\vv-eval\veri\VeRi
+uv run --frozen --extra dev --extra tools python tools/eval/reid_3drealcar.py --models dinov2_vits14 dinov2_vits14_reid
 ```
 
 **Protocolo.** Partición agrupada por auto (ninguno está en dos particiones), estratificada por luz, tipo y color, con
@@ -2236,28 +2105,14 @@ U1 por rango de ángulo del ajustado (umbral 0,0862): 30-60° 0,7 % (de 550 pare
 y 135-180° 0,7 % (1 072): las vistas más separadas no fallan más que las cercanas.
 
 **Lo que se separa.** El efecto del *ajuste* es enorme: el AUC sube de 0,68 a 0,99 y el S4 de 5 % a 76 %, con el mismo
-recorte. El efecto del *recorte* (caja del detector en vez de máscara del segmentador) es chico: en VeRi, DINOv2 sin
-ajustar da AUC 0,664 con máscaras (medición anterior, 4 010 recortes) y 0,641 con la caja del detector (4 506 recortes).
-Sin ajustar, la re-ID casi no detecta autos distintos con ninguno de los dos recortes.
+recorte. Esta primera versión usaba la caja del detector y no la máscara del segmentador, que es el recorte que el servicio usa hoy;
+la comparación entre los dos recortes se hizo con un dataset que el proyecto dejó de usar (sin camino comercial) y no se mantiene acá.
+Sin ajustar, la re-ID casi no detecta autos distintos.
 
 **Propuesta de `REID_T` (no aplicada).** Para `dinov2_vits14_reid`: **0,086**, con **U1 0,8 % (cota 1,1 %) y S4 76,5 %**
 sobre prueba (objetivo S4 >= 70 % cumplido; la cota de U1 queda apenas sobre el 1 % pedido: 27 pares de 3 287). Sin ajustar,
 con el recorte de la caja, el umbral calibrado (0,074) es casi el actual (0,075): U1 0,3 % y S4 5 %. **El servicio sigue con
 `dinov2_vits14` y `REID_T` = 0,075: el modelo nuevo no está activado** (`MODEL_EMBEDDER`) y el umbral no se cambió.
-
-### Referencia en VeRi-776 (¿generaliza fuera de 3DRealCar?)
-
-Los mismos modelos y el mismo recorte del detector sobre los recortes de VeRi de `reid_veri.py` (4 506 de 5 011; en 505 el
-detector no encuentra un auto): 55 206 pares del mismo auto, 10 090 292 de autos distintos y 915 116 difíciles.
-
-| Modelo | AUC (todos / difíciles) | Con `REID_T` 0,075: U1 / S4 | Con el umbral de 3DRealCar: U1 / S4 | Con el umbral propio de VeRi (U1 0,9 %): S4 |
-|---|---|---|---|---|
-| Sin ajustar | 0,641 / 0,526 | 0,1 % / 0,1 % | 0,1 % / 0,1 % | 1,7 % |
-| **Ajustado** | **0,810 / 0,621** | 0,1 % / 0,8 % | 0,2 % / 1,1 % | 4,6 % |
-
-**Generaliza solo en parte:** el AUC sube de 0,64 a 0,81, pero el S4 útil sigue siendo bajo (1 a 5 %). VeRi son cámaras de
-vigilancia de baja resolución y 3DRealCar son fotos de celular alrededor del auto: el parecido con las fotos de la app es
-mayor con 3DRealCar, pero no está validado.
 
 ### Limitaciones
 
@@ -2276,7 +2131,7 @@ La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
 | Regla | Código | Cuándo |
 |---|---|---|
 | R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay un vehículo (la misma regla para GENERAL, PLATE, DETAIL y CONTEXT): una caja `car` del detector o una instancia del segmentador (det ∨ seg) que ocupa al menos `PRESENCE_MIN_AREA` de la foto. La patente, la rueda y el daño no cuentan. |
-| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,075 con VeRi). Dudoso o no comparable: GREEN. |
+| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,2565, calibrado solo con 3DRealCar). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
 | R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE`, `VALIDATION_FAILED` | Sin fraude: foto ilegible, no se pudo redactar todas las fotos, o el mensaje terminó en la DLQ sin veredicto (`VALIDATION_FAILED`, ver abajo). |
 | R5 | (sin códigos) | Todo lo demás: GREEN. |

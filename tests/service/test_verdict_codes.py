@@ -83,7 +83,7 @@ def _unreadable(scenario: Scenario, _: FakeModels) -> None:
 
 
 def _redaction_unavailable(_: Scenario, models: FakeModels) -> None:
-    models.face.by_marker[GENERAL] = None
+    models.vehicle.by_marker[detail_marker(0)] = None  # falla el detector de patentes en una foto
 
 
 RED = {

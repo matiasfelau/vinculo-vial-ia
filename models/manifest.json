@@ -56,15 +56,15 @@
       "ports": ["ocr"],
       "file": "parseq.onnx",
       "sha256": "7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991",
-      "license": "Apache-2.0 (código); los pesos no declaran licencia",
+      "license": "Apache-2.0 (código y pesos: la declara el autor en la ficha de baudm/parseq-small en Hugging Face)",
       "paper": {
         "title": "Scene Text Recognition with Permuted Autoregressive Sequence Models",
         "venue": "ECCV",
         "year": 2022
       },
-      "source": "https://github.com/baudm/parseq (commit 1902db043c029a7e03a3818c616c06600af574be), pesos de la release v1.0.0 (parseq-bb5792a6.pt), exportado a ONNX con tools/export/parseq.py",
-      "commercial": "escalable",
-      "notes": "PARSeq base preentrenado, sin reentrenar. Antes de un uso comercial hay que confirmar con los autores la licencia de los pesos. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
+      "source": "Pesos: https://huggingface.co/baudm/parseq-small (revisión a1526c3d63740e460153987f9aaf6b86aa199dc1), pytorch_model.bin con SHA-256 bb5792a68e367476abca029cbf8699abc805f3d3dc7e57aae45c8ec4f7b7cd00, byte a byte el parseq-bb5792a6.pt de la release v1.0.0 de https://github.com/baudm/parseq (código del commit 1902db043c029a7e03a3818c616c06600af574be). Exportado a ONNX con tools/export/parseq.py: reexportado el 16/11/2026 desde esos pesos da el mismo SHA-256 de este archivo",
+      "commercial": "yes",
+      "notes": "PARSeq preentrenado, sin reentrenar (en Hugging Face se llama parseq-small: ViT-S, 128x32). La licencia Apache-2.0 de los pesos es la que declara el autor; se entrenaron con datasets reales de texto en escena cuyas licencias propias no se auditaron. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
     },
     {
       "name": "rfdetr_seg_coco",
@@ -136,7 +136,7 @@
       "ports": ["face"],
       "file": "scrfd_10g.onnx",
       "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
-      "license": "InsightFace: pesos para investigación (datos WIDER FACE, CC BY-NC-ND); uso comercial con licencia de InsightFace",
+      "license": "InsightFace: pesos para investigación; uso comercial con licencia de InsightFace",
       "paper": {
         "title": "Sample and Computation Redistribution for Efficient Face Detection",
         "venue": "ICLR",
@@ -144,7 +144,7 @@
       },
       "source": "det_10g.onnx del paquete buffalo_l de InsightFace (SCRFD-10G con puntos de la cara), copiado de https://huggingface.co/public-data/insightface; sin reentrenar ni modificar",
       "commercial": "escalable",
-      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. El uso comercial requiere la licencia de InsightFace; el puerto face admite commercial = no por excepción de privacidad."
+      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. MÓDULO EXPERIMENTAL, fuera del producto y de la cascada desde el 16/11/2026 (el producto no redacta rostros). El uso comercial requiere la licencia de InsightFace."
     }
   ]
 }

@@ -79,7 +79,7 @@ class Models:
     embedder: Embedder
     plate: PlateReader
     damage: DamageDetector
-    face: FaceDetector
+    face: FaceDetector  # EXPERIMENTAL: fuera de la cascada (el producto no redacta rostros); nadie lo llama
 
     def versions(self) -> dict[str, str]:
         """Versiones tal como viajan en `model_versions`."""
@@ -112,7 +112,6 @@ class RedactionSettings:
     """Parámetros de la redacción (paso 8)."""
 
     required: bool
-    face_min_conf: float
     plate_min_conf: float
     max_side_px: int
     workers: int = 1  # fotos que se planifican a la vez (1: una por una)
@@ -443,9 +442,11 @@ class ValidateEvidence:
     ) -> tuple[RedactedRef, ...] | None:
         """Genera y sube las versiones redactadas de TODAS las fotos, o `None` si no se puede.
 
-        Fail-closed: si algún modelo de rostros o de patentes no responde (`None`) o falla la reescritura de
-        alguna foto, no se sube ninguna (nunca quedan redactadas parciales). Una foto sin rostros ni patentes
-        (`[]`) cuenta como redactada. Un error al subir a S3 no es un veredicto: se propaga para reintento.
+        Solo se tapan patentes de terceros: los rostros no se redactan y el modelo de rostros no interviene.
+        Fail-closed: si el detector de patentes no responde (`None`) o falla la reescritura de alguna foto,
+        no se sube ninguna (nunca quedan redactadas parciales). Una foto sin patentes (`[]`) cuenta como
+        redactada.
+        Un error al subir a S3 no es un veredicto: se propaga para reintento.
         Con `REDACTION_REQUIRED=false` (solo `ENV=local`) la foto re-encodeada sin tapar cuenta como lista.
         """
         plans: dict[tuple[EvidenceRole, int], list[Box]] | None
@@ -482,15 +483,14 @@ class ValidateEvidence:
         self, run: _Run, images: Sequence[EvidenceImage], reported: str
     ) -> dict[tuple[EvidenceRole, int], list[Box]] | None:
         """Plan de todas las fotos, o `None` si falta algún modelo (no se redacta ninguna)."""
-        thresholds = RedactionThresholds(self._redaction.face_min_conf, self._redaction.plate_min_conf)
+        thresholds = RedactionThresholds(self._redaction.plate_min_conf)
 
         def plan_one(image: EvidenceImage) -> list[Box] | None:
-            faces = to_original(self._models.face.detect(image.model_pixels), image.ratio)
             detections = run.detect_plates(image)
-            exempt = self._matching_plates(run, image, detections, reported)
-            if faces is None or detections is None:
+            if detections is None:
                 return None
-            return plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
+            exempt = self._matching_plates(run, image, detections, reported)
+            return plan_redaction(detections, thresholds, image.width, image.height, exempt)
 
         workers = min(self._redaction.workers, len(images))
         if workers > 1:

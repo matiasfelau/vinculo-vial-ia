@@ -360,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     pending = [car for car in names if not (cache / f"{car}.json").is_file()]
     models = decoder = None
     if pending:  # los modelos solo se cargan si falta simular algún auto
-        settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+        settings = Settings.model_construct(plate_tiling=False)
         models = build_models(
             {"detector": args.detector}, args.manifest, args.models_dir, 2, adapter_params(settings)
         )

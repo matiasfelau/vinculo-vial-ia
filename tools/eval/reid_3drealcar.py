@@ -1,4 +1,4 @@
-"""Re-ID con 3DRealCar: DINOv2 sin ajustar contra el ajustado, por luz, ángulo y pares difíciles (y VeRi-776).
+"""Re-ID con 3DRealCar: DINOv2 sin ajustar contra el ajustado, por luz, ángulo y pares difíciles.
 
 Para cada modelo (puerto `embedder` del servicio, ONNX en CPU) embebe los recortes de auto que arma
 `tools/training/reid/prepare.py` (la caja `car` del detector, sin segmentador) de las particiones `val` y
@@ -12,9 +12,7 @@ y compara por coseno, con la misma regla que el servicio (otro auto si cos < `RE
 - Por condición de luz: estándar, reflectiva y oscura.
 - El umbral se calibra sobre `val` (el mayor con U1 acotado a 1 % al 95 %) y se reporta sobre `test`.
 
-Con `--veri-dir` mide también a los dos modelos sobre VeRi-776 (recortes de cámaras de vigilancia) con el
-mismo
-recorte del detector y el umbral calibrado en 3DRealCar. Todo sale en cifras; los datos quedan fuera del repo.
+Todo sale en cifras; los datos quedan fuera del repo.
 Uso: ver `tools/eval/README.md`.
 """
 
@@ -42,10 +40,8 @@ from vvi_ia.adapters.models.registry import ModelSetupError, build_models  # noq
 from vvi_ia.config import Settings  # noqa: E402
 from vvi_ia.domain.model import BoxLabel  # noqa: E402
 from vvi_ia.main import adapter_params  # noqa: E402
-from vvi_ia.service.ports import ImageDecodeError  # noqa: E402
 from vvi_ia.service.validate_evidence import reduce_for_models  # noqa: E402
 
-DETECTOR = "rfdetr_openimages"
 BASELINE = "dinov2_vits14"
 TUNED = "dinov2_vits14_reid"
 SERVICE_REID_T = Settings.model_fields["reid_t"].default  # el umbral que hoy usa el servicio
@@ -160,78 +156,6 @@ def detector_crop(pixels: NDArray[np.uint8], models: Any) -> NDArray[np.uint8] |
     return None if x2 <= x1 or y2 <= y1 else np.asarray(shown[y1:y2, x1:x2])
 
 
-def veri_crops(
-    veri: Path, per_track: int, seed: int, limit: int | None, models: Any, workers: int
-) -> tuple[list[Any], list[NDArray[np.uint8]], dict[str, int]]:
-    """Recortes de VeRi (como en `reid_veri.py`) pasados por el detector; descarta los sin auto."""
-    from reid_veri import load_labels, read_names, select_crops  # noqa: PLC0415
-
-    labels = load_labels(veri / "test_label.xml")
-    crops = select_crops(
-        labels,
-        read_names(veri / "name_test.txt"),
-        read_names(veri / "name_query.txt"),
-        per_track,
-        seed,
-        limit,
-    )
-    decoder = CvImageDecoder()
-
-    def one(crop: Any) -> NDArray[np.uint8] | str:
-        try:
-            pixels = decoder.decode((veri / "image_test" / crop.name).read_bytes())
-        except (OSError, ImageDecodeError):
-            return "ilegible"
-        found = detector_crop(pixels, models)
-        return "sin auto detectado" if found is None else found
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(one, crops))
-    kept = [(c, r) for c, r in zip(crops, results, strict=True) if not isinstance(r, str)]
-    discarded: dict[str, int] = {}
-    for result in results:
-        if isinstance(result, str):
-            discarded[result] = discarded.get(result, 0) + 1
-    return [c for c, _ in kept], [r for _, r in kept if not isinstance(r, str)], discarded
-
-
-def veri_report(
-    crops: Sequence[Any],
-    images: Sequence[NDArray[np.uint8]],
-    model: Any,
-    thresholds: Mapping[str, float],
-    workers: int,
-) -> dict[str, Any]:
-    from reid_veri import pair_similarities  # noqa: PLC0415
-
-    def one(image: NDArray[np.uint8]) -> NDArray[np.float32]:
-        embedding = model.embedder.embed(image, np.ones(image.shape[:2], np.bool_))
-        if embedding is None:
-            raise RuntimeError("el embedder no devolvió un vector")
-        return np.asarray(embedding, np.float32)
-
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        matrix = np.stack(list(pool.map(one, images)))
-    same, different, hard, _ = pair_similarities(list(crops), matrix)
-    same, different, hard = (a.astype(np.float64) for a in (same, different, hard))
-    stride = max(1, different.size // 2_000_000)
-    own = calibrate(same, different[::stride], MAX_U1)
-    thresholds = (
-        {**thresholds, "calibrado_en_VeRi": float(own["umbral"])}
-        if own.get("umbral") is not None
-        else dict(thresholds)
-    )
-    return {
-        "pares": {
-            "mismo_auto": int(same.size),
-            "autos_distintos": int(different.size),
-            "dificiles": int(hard.size),
-        },
-        "todos": summarize(same, different[::stride], thresholds),
-        "dificiles": summarize(same, hard[:: max(1, hard.size // 2_000_000)], thresholds),
-    }
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--root", type=Path, default=os.environ.get("REID_DATA_DIR"), help="REID_DATA_DIR")
@@ -241,10 +165,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--models", nargs="+", default=[BASELINE], help=f"embedders a medir (p. ej. {BASELINE} {TUNED})"
     )
-    parser.add_argument(
-        "--veri-dir", type=Path, default=os.environ.get("VERI_DIR"), help="VeRi-776 (VERI_DIR)"
-    )
-    parser.add_argument("--per-track", type=int, default=3, help="recortes de VeRi por (auto, cámara)")
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int, help="recortes por partición (para probar)")
@@ -282,13 +202,13 @@ def main(argv: list[str] | None = None) -> int:
         },
         flush=True,
     )
-    settings = Settings.model_construct(plate_tiling=False, face_tiling=False)
+    settings = Settings.model_construct(plate_tiling=False)
     report: dict[str, Any] = {"REID_T_del_servicio": SERVICE_REID_T, "max_U1": MAX_U1, "modelos": {}}
     built: dict[str, Any] = {}
     try:
         for name in args.models:
             built[name] = build_models(
-                {"embedder": name, "detector": DETECTOR} if args.veri_dir else {"embedder": name},
+                {"embedder": name},
                 args.manifest,
                 args.models_dir,
                 params=adapter_params(settings),
@@ -314,19 +234,6 @@ def main(argv: list[str] | None = None) -> int:
         }
         todos = report["modelos"][name]["test"]["todos"]
         print(f"[{name}] AUC test {todos['auc']:.4f} · umbral calibrado {calibrated[name]}", flush=True)
-    if args.veri_dir:
-        veri = Path(args.veri_dir)
-        first = next(iter(built.values()))
-        crops, images, discarded = veri_crops(
-            veri, args.per_track, args.seed, args.limit, first, args.workers
-        )
-        report["veri"] = {"recortes_usados": len(crops), "descartados": discarded, "modelos": {}}
-        for name, models in built.items():
-            thresholds = {"REID_T_del_servicio": float(SERVICE_REID_T)}
-            if calibrated[name] is not None:
-                thresholds["calibrado_en_3DRealCar"] = float(calibrated[name])
-            report["veri"]["modelos"][name] = veri_report(crops, images, models, thresholds, args.workers)
-            print(f"[VeRi {name}] AUC {report['veri']['modelos'][name]['todos']['auc']}", flush=True)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "reid_3drealcar_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -369,20 +276,6 @@ def print_tables(report: Mapping[str, Any]) -> None:
                 f"  ángulo {label}°: "
                 + " | ".join(f"{k}: U1 {pct(v['U1'])} de {v['pares_mismo_auto']}" for k, v in cell.items())
             )
-    if "veri" in report:
-        print(
-            "\n"
-            f"== VeRi-776 ({report['veri']['recortes_usados']} recortes; "
-            f"descartados {report['veri']['descartados']}) =="
-        )
-        for name, block in report["veri"]["modelos"].items():
-            print(name, block["pares"])
-            for scope in ("todos", "dificiles"):
-                row = f"  {scope:<10} AUC {block[scope]['auc']}"
-                for threshold_name in [k for k in block[scope] if k != "auc"]:
-                    cell = block[scope][threshold_name]
-                    row += f" | {threshold_name}: U1 {pct(cell['U1'])} S4 {pct(cell['S4'])}"
-                print(row)
 
 
 if __name__ == "__main__":

@@ -47,7 +47,7 @@ from vvi_ia.service.validate_evidence import ValidateEvidence
 
 SELECTION = {
     "detector": "rfdetr_openimages_v2",
-    "face": "scrfd_10g",
+    "face": "null",  # el producto no redacta rostros: el módulo experimental no entra a la cascada
     "segmenter": "rfdetr_seg_coco",
     "embedder": "dinov2_vits14",
     "ocr": "parseq",
@@ -209,9 +209,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default="on",
         help="PLATE_TILING (por defecto on, como el servicio)",
     )
-    parser.add_argument(
-        "--face-tiling", choices=("on", "off"), default="on", help="FACE_TILING (por defecto on)"
-    )
     parser.add_argument("--model-max-side", type=int, help="MODEL_MAX_SIDE_PX (por defecto el del servicio)")
     parser.add_argument(
         "--no-segmenter",
@@ -299,7 +296,6 @@ def main(argv: list[str] | None = None) -> int:
     settings = Settings.model_construct(
         redaction_required=not args.no_redaction,
         plate_tiling=args.plate_tiling == "on",
-        face_tiling=args.face_tiling == "on",
         **relaxed,
     )
     selection = dict(SELECTION)
@@ -377,7 +373,6 @@ def main(argv: list[str] | None = None) -> int:
         "hilos_onnx": args.threads,
         "redaccion": not args.no_redaction,
         "mosaico_patentes": args.plate_tiling == "on",
-        "mosaico_rostros": args.face_tiling == "on",
         "lado_maximo_de_los_modelos_px": settings.model_max_side_px,
         "lado_mayor_px": args.long_side,
         "escenarios": {},

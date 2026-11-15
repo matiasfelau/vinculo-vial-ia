@@ -1,4 +1,8 @@
-"""Plan de redacción: qué cajas se tapan en una foto."""
+"""Plan de redacción: qué cajas se tapan en una foto.
+
+El producto tapa solo las patentes de terceros. Los rostros no se redactan (riesgo aceptado: las fotos se
+toman a 1-2 m centradas en el vehículo): el detector de rostros es experimental, fuera de la cascada.
+"""
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass
@@ -10,9 +14,8 @@ REDACTION_MARGIN = 0.10
 
 @dataclass(frozen=True)
 class RedactionThresholds:
-    """Confianza mínima para redactar rostros y patentes (bajas a propósito: ante la duda, tapar)."""
+    """Confianza mínima para redactar una patente (baja a propósito: ante la duda, tapar)."""
 
-    face_min_conf: float
     plate_min_conf: float
 
 
@@ -30,7 +33,6 @@ def expand(box: Box, margin: float, width: int, height: int) -> Box:
 
 
 def plan_redaction(
-    faces: Sequence[Box] | None,
     detections: Sequence[Box] | None,
     thresholds: RedactionThresholds,
     width: int,
@@ -40,14 +42,13 @@ def plan_redaction(
 ) -> list[Box] | None:
     """Cajas a tapar con relleno opaco, o `None` si no se puede redactar (fail-closed).
 
-    `faces` y `detections` (las detecciones de vehículo, de donde salen las patentes) son
-    `None` cuando no hay modelo: en ese caso no hay plan. Las patentes de `exempt_plates`
-    (la que coincide con la reportada) no se tapan.
+    `detections` (las del detector de vehículos, de donde salen las patentes) es `None` cuando no hay
+    modelo o falló la inferencia: en ese caso no hay plan. Es lo único de lo que depende la disponibilidad de
+    la redacción. Las patentes de `exempt_plates` (la que coincide con la reportada) no se tapan.
     """
-    if faces is None or detections is None:
+    if detections is None:
         return None
-    boxes = [face for face in faces if face.conf >= thresholds.face_min_conf]
-    boxes += [
+    boxes = [
         plate
         for plate in detections
         if plate.label == BoxLabel.PLATE

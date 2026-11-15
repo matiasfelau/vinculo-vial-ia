@@ -427,16 +427,15 @@ def test_un_archivo_que_no_es_el_detector_no_deja_arrancar(tmp_path: Path, weigh
 # --- configuración -------------------------------------------------------------------------
 
 
-def test_los_umbrales_por_defecto_y_el_de_redaccion_es_el_mas_bajo(base_env: pytest.MonkeyPatch) -> None:
+def test_el_umbral_de_redaccion_por_defecto_es_el_de_las_patentes(base_env: pytest.MonkeyPatch) -> None:
     params = adapter_params(load_settings())
 
     assert params["detector_min_conf"] == 0.35
-    assert (
-        params["redaction_min_conf"] == 0.1
-    )  # el menor entre FACE_MIN_CONF (0,25) y PLATE_REDACT_MIN_CONF (0,10, desde el 16/11/2026)
+    assert params["redaction_min_conf"] == 0.1  # PLATE_REDACT_MIN_CONF (0,10, desde el 16/11/2026)
+    assert "face_tiling" not in params  # el producto no redacta rostros
 
     base_env.setenv("DETECTOR_MIN_CONF", "0.6")
-    base_env.setenv("FACE_MIN_CONF", "0.05")
+    base_env.setenv("PLATE_REDACT_MIN_CONF", "0.05")
     params = adapter_params(load_settings())
     assert params["detector_min_conf"] == 0.6 and params["redaction_min_conf"] == 0.05
 
