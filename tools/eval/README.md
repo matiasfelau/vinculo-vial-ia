@@ -326,6 +326,85 @@ confianza por carácter.
 - **"No se pudo empezar: ... sha256 ..."**: el archivo de `MODELS_DIR` no es el del manifest; ver
   [tools/export/README.md](../export/README.md).
 
+## Conjunto de evaluación del OCR con "Patentes Argentinas - Master" (`ocr_set.py`)
+
+Arma 300 patentes recortadas para etiquetar a mano y, después, medir `parseq` con un conjunto que no se usó para
+calibrarlo. Parte del export COCO de "Patentes Argentinas - Master" (Roboflow Universe, `xenon-bo5e9`, Public
+Domain, 656 fotos y 800 cajas de una sola clase; la ficha está en [THIRD_PARTY.md](../../THIRD_PARTY.md)). **No corre
+ningún OCR**: las etiquetas las pone una persona antes de medir nada.
+
+```powershell
+python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+```
+
+`--src` es el export descomprimido (`train/`, `valid/`, `test/`), `--reference` el del dataset "patentes" (el de
+`ocr.py`) y `--out` una carpeta fuera del repo (el script se niega a usar una dentro). Si `--out` ya tiene un
+`etiquetas.csv`, no lo pisa. Opciones: `--n` (300), `--night-min` (50), `--seed` (20261116) y `--night-brightness`
+(90).
+
+### Qué hace
+
+1. **Cajas:** se miraron a ojo 72 cajas al azar del export y 72 de las elegidas (cuatro hojas): son patentes completas, no autos ni
+   caracteres sueltos. Las excepciones son pocas y aisladas: una hoja entera con decenas de patentes anotada como una
+   caja, una pila de patentes, alguna caja cortada por el borde de la foto y patentes borrosas. Se marcan al
+   etiquetar (`estado`).
+2. **Recorte:** cada caja con un 15 % de su ancho y alto a cada lado, recortada a la foto, en PNG.
+3. **Descartes**, con motivo en `descartes.csv`:
+   - cajas de menos de 40x24 píxeles (no hay nada que leer);
+   - fotos que ya están en el dataset "patentes" (misma foto, aunque tenga otra resolución) y patentes que también
+     están ahí (la misma patente, aunque sea otra foto);
+   - duplicados y casi duplicados: dos recortes son la misma patente si se parecen en bruto (NCC de 64x32 en gris
+     ≥ 0,6) y en los trazos (NCC de 128x64 sin bajas frecuencias y con corrimiento ≥ 0,75). Mirando pares reales, con
+     esos valores todos los que pasan son la misma patente. Se conserva el de mayor resolución.
+4. **Luz:** noche si el brillo medio de la foto sin la patente (y su entorno) es menor que 90 (gris de 0 a 255). Las
+   fotos donde la patente ocupa el 40 % o más (primeros planos) no tienen escena que juzgar: quedan como `dia` y la
+   hoja las marca `D?`. Es una estimación: mirando las fotos más oscuras, las de noche quedan por debajo de ~90,
+   pero también hay sombras y autos negros de día. Por eso la confirma una persona.
+5. **Elección:** `--n` al azar con semilla fija, con al menos `--night-min` de noche, numeradas en orden aleatorio.
+
+### Corrida de referencia
+
+| Paso | Cajas |
+|---|---:|
+| Export (656 fotos) | 800 |
+| Cajas chicas | −56 |
+| Foto ya en el dataset "patentes" | −4 |
+| Patente ya en el dataset "patentes" | −2 |
+| Duplicados y casi duplicados | −21 |
+| **Candidatas** (90 de noche) | **717** |
+| **Elegidas** (66 de noche) | **300** |
+
+De las 300: 200 vienen de `train`, 76 de `valid` y 24 de `test`; 20 no tienen escena para juzgar la luz y unas 77 son
+probablemente de dos líneas (ancho/alto de la caja menor que 1,4: motos), que el servicio no lee.
+
+### Qué escribe en `--out`
+
+- `recortes/NNN.png`: el recorte de cada patente.
+- `etiquetas.csv`: `id, archivo, recorte, texto, formato, luz, estado`. `archivo` es `<split>/<foto>` del export.
+  `texto`, `formato` y `estado` salen vacíos; `luz` trae la estimación (`dia` o `noche`) para confirmar.
+- `hojas/hoja-NN.jpg`: hojas de contacto de 18 casilleros con el número, el recorte grande, la foto entera chica con la
+  caja marcada (para confirmar la luz) y `D`/`N` (con `?` si no hay escena).
+- `descartes.csv` e `informe.json` (solo cifras).
+
+Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo. Para etiquetar, mirá la hoja y completá
+`etiquetas.csv`. Convención sugerida, la misma que usa `ocr.py` para los formatos:
+
+| Columna | Valores |
+|---|---|
+| `texto` | la patente en mayúsculas, solo letras y dígitos, sin espacios; vacío si no se lee |
+| `formato` | `mercosur` (LLDDDLL), `anterior` (LLLDDD), `moto` (dos líneas) u `otro` |
+| `luz` | confirmá o corregí `dia` / `noche` |
+| `estado` | vacío si está bien; `ilegible`, `caja_mala` (no es una sola patente) o `cortada` |
+
+### Limitaciones
+
+- **La misma patente en dos fotos muy distintas** (otro ángulo, otra distancia) no se detecta por la imagen: la
+  firma del recorte no sobrevive a un cambio de perspectiva. Esos repetidos se sacan después, agrupando por `texto`
+  cuando las etiquetas estén completas.
+- La luz es una estimación y la corrige quien etiqueta.
+- "Public Domain" lo declara quien subió el dataset; el origen de las fotos no se auditó (ver
+  [THIRD_PARTY.md](../../THIRD_PARTY.md)). Solo se usa para evaluar.
+
 ## Re-identificación de autos (`reid.py`)
 
 El servicio decide si las dos fotos de una alerta (la general y la de la patente) muestran **el mismo
