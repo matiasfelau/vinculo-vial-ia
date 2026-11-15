@@ -111,13 +111,13 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
    estándar) los que ya estaban no cambian de partición y solo se sortean los nuevos, de modo que cada estrato
    vuelva a quedar en 70/15/15. Para empezar de cero hay que borrar `split.json` y `crops.json`.
 
-   **Pares parciales** (validación y prueba; ver "Pares parciales" abajo):
+   **Pares de patente** (validación y prueba; ver "Pares de patente" abajo):
 
    ```powershell
    uv run --frozen --extra dev --extra tools python tools/training/reid/partial.py
    ```
 
-   Escribe `partial-v2/`, `partial_v2.json` y `partial_v2_stats.json`.
+   Escribe `partial-v2/`, `partial_v2.json` y `partial_v2_stats.json` (solo patentes).
 
 4. **Entrenar** (GTX 1660 de 6 GB, FP32, lote chico con acumulación; cerrá antes lo que use la GPU):
 
@@ -137,8 +137,8 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
    Imprime el `sha256` para `models/manifest.json` y falla (borrando el archivo) si la diferencia máxima por
    componente del embedding pasa de 1e-3 o el coseno mínimo entre ONNX y PyTorch baja de 0,9999.
 
-6. **Medir** contra el modelo sin ajustar, con pares enteros y parciales y en VeRi-776: ver
-   [tools/eval/README.md](../../eval/README.md#re-id-con-pares-parciales-reid_parcialespy).
+6. **Medir** contra el modelo sin ajustar, con los pares general-patente y en VeRi-776: ver
+   [tools/eval/README.md](../../eval/README.md#re-id-con-3drealcar-general-contra-patente-reid_parcialespy).
 
 ## Pares, ángulos y métricas
 
@@ -153,12 +153,12 @@ $env:EVAL_OUT = "D:\vv-eval\out\reid"
 - **Calibración:** el mayor umbral cuya cota del 95 % de U1 sobre validación no pasa de 1 %; con eso fijo se reporta
   el S4 sobre prueba.
 
-## Pares parciales
+## Pares de patente
 
-El servicio no compara solo autos enteros: R2 compara la foto GENERAL contra la de PLATE (la trompa o la cola, cortada
-entre el capot y el parabrisas, con la patente al 8-15 % del ancho) y contra la de DETAIL (una zona del auto con el
-auto alrededor). 3DRealCar solo tiene vistas del auto entero, así que `partial.py` **simula** esos dos encuadres a
-partir de ellas, solo para **validación y prueba** (el entrenamiento sigue con autos enteros):
+R2 compara la foto GENERAL contra la de PLATE (la trompa o la cola, cortada entre el capot y el parabrisas, con la patente
+al 8-15 % del ancho); **no compara DETAIL ni CONTEXT** (decisión del 15/11/2026: la foto de detalle probablemente se elimine, así
+que no se calibra, no se mide y no se simula). 3DRealCar solo tiene vistas del auto entero, así que `partial.py` **simula** la foto de
+patente a partir de ellas, solo para **validación y prueba** (el entrenamiento sigue con autos enteros):
 
 1. **Vistas frontales y traseras por la pose.** El auto es una caja más ancha de costado que de frente. Con el azimut de
    cada vista (de la pose de ARKit) y la relación ancho/alto de la caja del vehículo, se ajusta `aspecto ≈ c + a·cos(2·az) +
@@ -169,19 +169,18 @@ partir de ellas, solo para **validación y prueba** (el entrenamiento sigue con 
    y con un ancho de 10 a 30 % del ancho del vehículo; hasta 2 por auto (las de mayor confianza, separadas al menos 30°).
    Se recorta la ventana 16:9 de `capture_sets.plate_window` (la misma de los conjuntos de R1): patente al 8-15 % del
    ancho, vehículo entero a lo ancho, corte a la altura del capot.
-3. **Detalle.** Hasta 2 vistas al azar por auto: una ventana de 30 a 55 % del ancho del vehículo con al menos el 85 % de la
-   foto dentro de su caja (`capture_sets.detail_window`).
-4. El recorte se lleva a 1600 px y JPEG de <= 900 KB (lo que envía la app) y pasa por el mismo camino que una foto real:
+3. El recorte se lleva a 1600 px y JPEG de <= 900 KB (lo que envía la app) y pasa por el mismo camino que una foto real:
    se reduce a 1024 px, el detector busca el vehículo dominante y se recorta su caja, **sin máscaras**. Si no encuentra un
    vehículo, el servicio no tendría embedding (duda, GREEN): se cuenta como "sin vehículo" y no entra a los pares.
 
-Pares: **general contra parcial** del mismo auto con una separación mínima de 30° entre la vista entera y la vista de la que
-salió el recorte parcial (ángulos reportados igual), y de autos distintos (todos y difíciles: misma marca y color). Los
-pares de auto entero se arman como siempre.
+Pares: **general contra patente** del mismo auto con una separación mínima de 30° entre la vista entera y la vista de la que
+salió el recorte de patente, y de autos distintos (todos y difíciles: misma marca y color). Los pares de auto entero se
+arman como siempre y quedan solo como referencia.
 
-**Umbral.** Se calibra en validación **con los tres tipos de pares juntos** (enteros, general-patente y general-detalle):
-el mayor con la cota del 95 % de U1 sobre todos ellos <= 1 %. R2 solo rechaza con certeza; ante la duda, GREEN. También se
-reporta el umbral más bajo de los tres calibrados por tipo, como lectura aparte.
+**Umbral.** Un **único umbral** calibrado en validación con los pares general-patente: el menor con el que **S4 >= 70 %** (S4 y U1
+suben juntos con el umbral, así que es el de menor U1; criterio del 15/11/2026), siempre que la cota del 95 % de U1 de validación sea
+<= 2 %. El umbral de U1 del proyecto (1 %) no cambia. Como hay una sola comparación por alerta, el U1 por par es también el U1 por alerta.
+Si el U1 de prueba supera esa cota, el modelo no se activa. R2 solo rechaza con certeza; ante la duda, GREEN.
 
 ## Pérdida: CosFace
 
