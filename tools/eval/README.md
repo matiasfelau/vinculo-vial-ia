@@ -434,7 +434,7 @@ Por cada clase muestra:
 | Columna | Qué significa |
 |---|---|
 | `reales` | Cajas anotadas en las fotos. |
-| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros: son los de `PLATE_REDACT_MIN_CONF` y `FACE_MIN_CONF`). |
+| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros: eran los de `PLATE_REDACT_MIN_CONF` y `FACE_MIN_CONF`; hoy son 0,10 y 0,25). |
 | `recall` | De las cajas reales, qué fracción encontró (IoU 0,5 o más) con ese umbral. |
 | `prec.` | De las cajas que dibujó, qué fracción acertó. |
 | `FP` | Falsos positivos: cajas que no corresponden a nada. |
@@ -611,6 +611,8 @@ Open Images con 0,30), y el mosaico las sube unos 15 puntos a cambio de 5 a 6 ve
 falsos positivos (que al tapar cuestan poco). Los falsos positivos de WIDER están inflados por caras sin anotar.
 
 ### 6. Configuración de redacción (provisoria)
+
+> **Actualización del 16/11/2026:** `PLATE_REDACT_MIN_CONF` es hoy **0,10** y `MODEL_OCR` es `parseq` (ver "S3: umbral de redacción de patentes en 0,10"). El bloque de abajo es el de la primera configuración.
 
 Con estos datos quedó como configuración de `.env.example` (y `PLATE_TILING=true` como default del código),
 **provisoria hasta validar con fotos propias**. `REDACTION_REQUIRED` no se tocó (sigue en `false` solo en local):
@@ -1728,6 +1730,54 @@ precisión oficial es igual (0,745 contra 0,744) y con camiones, vans y colectiv
 (334 contra 324 ms; 1 620 contra 1 569 ms con mosaico). Estas diferencias son chicas para 204 fotos y 379 cajas; no
 alcanzan para decir que uno detecta mejor que el otro en esta prueba. Lo que v2 agrega no se ve acá: autos que no son
 `Car` (camiones, vans, colectivos) y las confusoras. Eso se mide en R1, abajo.
+
+### S3: umbral de redacción de patentes en 0,10 (16/11/2026)
+
+`PLATE_REDACT_MIN_CONF` pasa de 0,20 a **0,10** (`config.py` y `.env.example`). Misma prueba que arriba (las 204 fotos de
+Open Images, con mosaico de patentes, IoU 0,5, cada foto reducida a 1 024 px) y los mismos adaptadores; el recall y los
+falsos positivos son los de `detector.py --plate-tiling --plate-min-conf <umbral>`. **Cajas extra** = cajas de patente que
+se tapan de más por foto, en promedio, respecto del umbral de 0,20 (cajas con confianza ≥ umbral, sobre 204 fotos).
+
+| Umbral | v2: recall | v2: cajas tapadas por foto | v2: **cajas extra** | v2: falsos positivos por foto | v1: recall | v1: **cajas extra** |
+|---|---|---|---|---|---|---|
+| 0,20 (el anterior) | 0,874 | 0,912 | 0 | 0,333 | **0,904** | 0 |
+| 0,15 | 0,889 | 1,176 | +0,264 | 0,588 | 0,919 | +0,196 |
+| **0,10 (el nuevo)** | **0,911** (**91,1 %**) | 1,647 | **+0,735** | 1,044 | 0,919 | +0,691 |
+
+- **Contra v1** (0,904 con 0,20): v2 con 0,10 llega a **0,911**, 0,7 puntos más que v1 con 0,20, a cambio de **~0,7 cajas más
+  tapadas por foto** (1,65 cajas de patente por foto contra 0,95 de v1 con 0,20). v1 con 0,10 sube a 0,919 y tapa 1,64 por foto.
+- Entre 0,15 y 0,10 no se midió. Sin mosaico, v2: 0,807 / 0,830 / 0,859.
+- Los falsos positivos que se agregan se tapan (relleno opaco): cuestan en pantalla, no en privacidad. Las tablas de las
+  secciones anteriores siguen con 0,20 (el umbral de entonces).
+
+**¿Tapa la redacción la patente denunciada?** La excepción tapa todo salvo la caja que el OCR lee igual que la patente
+reportada (`MATCH` o `FUZZY`). Para ver el riesgo de bajar el umbral se corrió el plan de redacción **real** del caso de uso
+sobre las 204 fotos, como si cada una fuera la foto de PATENTE: la patente denunciada es la que lee el OCR en la caja de mayor
+confianza (R3, lectura segura: confianza ≥ `OCR_MIN_CONF`), y se mide qué fracción de esa caja queda dentro de alguna caja a tapar.
+Hay lectura segura en 62 fotos (0,20) y 66 (0,10). Solo las que tienen un formato en alcance (ABC123 o AB123CD) pueden
+exceptuarse: las demás (patentes de otros países, 38 y 40 fotos) son ilegibles para `plate_check`, no se exceptúan y se tapan
+con cualquier umbral, que es el comportamiento seguro, no un efecto del umbral.
+
+| Umbral | Fotos con formato en alcance | Denunciada exceptuada (no se tapa) | **La redacción la tapa (algo)** | La tapa por completo |
+|---|---|---|---|---|
+| 0,20 | 24 | 23 | **1 de 24** | 1 |
+| 0,10 | 26 | 25 | **2 de 26** | 1 |
+
+- **Siempre la misma foto, con ambos umbrales** (tapada al 100 %): la caja del mosaico difiere 1-2 px de la del pase simple y
+  el OCR la lee con confianza 0,57 (< `OCR_MIN_CONF` = 0,78), así que queda ilegible y no se exceptúa.
+- **Nueva con 0,10** (tapada al 28 %): una caja de confianza 0,11 sobre un fragmento de la patente; el OCR no la lee y se tapa. La
+  caja de la patente completa sí se exceptúa (lectura `MATCH`).
+- Con 0,10 se tapan en promedio 4,26 cajas por foto (con 0,20, 3,24), contando rostros.
+
+Es una muestra chica (26 fotos con formato en alcance, de patentes de terceros y no del encuadre de la app) y un solo
+conjunto: no es una tasa. Para cerrar la excepción también cuando el OCR no lee una caja que cae dentro de la patente
+denunciada, habría que exceptuar las cajas contenidas en una exceptuada; no se hizo.
+
+**OCR por defecto.** `MODEL_OCR=parseq` también es ahora el default de `config.py` y `.env.example` (antes `null`, que no era
+una decisión sino el valor inicial del registro de modelos: no hay nada en el historial que lo justifique por licencia). Sin OCR,
+R3 no compara y la patente reportada no se exceptúa. Los pesos de PARSeq no declaran licencia (`models/manifest.json`):
+confirmarla con los autores antes de un uso comercial, igual que con SCRFD. Con el OCR por defecto, `MODELS_DIR` es obligatorio
+para arrancar sin definir `MODEL_OCR=null`.
 
 ### R1 con el detector v2: la regla de patente, v1 y v2 lado a lado
 

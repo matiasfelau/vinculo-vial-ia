@@ -69,6 +69,27 @@ def test_confianza_en_el_umbral_se_tapa() -> None:
     assert len(plan) == 2
 
 
+def test_con_el_umbral_de_patentes_de_0_10_se_tapa_la_de_confianza_baja_pero_no_la_de_0_08() -> None:
+    """16/11/2026: PLATE_REDACT_MIN_CONF=0,10; los rostros siguen en su propio umbral."""
+    thresholds = RedactionThresholds(face_min_conf=0.25, plate_min_conf=0.10)
+    detections = [_plate(100, conf=0.12), _plate(400, conf=0.08)]
+
+    plan = plan_redaction([Box(0, 0, 10, 10, 0.20)], detections, thresholds, W, H)
+
+    assert plan is not None
+    # el rostro de 0,20 queda bajo su umbral (0,25): solo se tapa la patente de 0,12
+    assert [(box.label, round(box.x1)) for box in plan] == [(BoxLabel.PLATE, 90)]
+
+
+def test_la_patente_exceptuada_no_se_tapa_aunque_baje_el_umbral() -> None:
+    thresholds = RedactionThresholds(face_min_conf=0.25, plate_min_conf=0.10)
+    reported, other = _plate(100, conf=0.9), _plate(400, conf=0.11)
+
+    plan = plan_redaction([], [reported, other], thresholds, W, H, exempt_plates=[reported])
+
+    assert plan is not None and [round(box.x1) for box in plan] == [390]
+
+
 def test_las_cajas_que_no_son_patente_no_se_tapan() -> None:
     wheel = Box(10, 10, 50, 50, 0.99, BoxLabel.WHEEL)
 

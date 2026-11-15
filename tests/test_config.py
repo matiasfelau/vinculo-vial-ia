@@ -125,7 +125,7 @@ def test_evidence_max_part_bytes_por_defecto_es_1_mib_y_es_configurable(base_env
 # --- selección de modelos ------------------------------------------------------------------
 
 
-def test_por_defecto_todos_los_modelos_son_null(base_env: pytest.MonkeyPatch) -> None:
+def test_sin_modelos_seleccionados_todos_son_null(base_env: pytest.MonkeyPatch) -> None:
     settings = load_settings()
 
     assert set(settings.model_selection()) == {
@@ -141,8 +141,17 @@ def test_por_defecto_todos_los_modelos_son_null(base_env: pytest.MonkeyPatch) ->
     assert settings.models_dir is None
 
 
-def test_un_modelo_seleccionado_exige_models_dir(base_env: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    base_env.setenv("MODEL_OCR", "parseq")
+def test_el_ocr_por_defecto_es_parseq_y_exige_models_dir(
+    base_env: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """16/11/2026: MODEL_OCR=parseq es el default; solo el OCR (los demás modelos siguen en null)."""
+    assert Settings.model_fields["model_ocr"].default == "parseq"
+    assert all(
+        field.default == "null"
+        for name, field in Settings.model_fields.items()
+        if name in {"model_detector", "model_face", "model_segmenter", "model_embedder", "model_damage"}
+    )
+    base_env.delenv("MODEL_OCR")
     with pytest.raises(ValidationError):
         load_settings()
 
@@ -203,6 +212,23 @@ def test_la_imagen_no_instala_extras_ni_copia_pesos() -> None:
     assert "--all-extras" not in dockerfile
     assert "COPY models/manifest.json" in dockerfile
     assert "COPY models " not in dockerfile and "COPY . " not in dockerfile
+
+
+def test_env_example_activa_el_ocr_y_el_umbral_de_redaccion_de_patentes_de_0_10() -> None:
+    """16/11/2026: MODEL_OCR=parseq y PLATE_REDACT_MIN_CONF=0,10, en .env.example y en config.py."""
+    from pathlib import Path
+
+    from vvi_ia.adapters.models.manifest import load_manifest
+
+    root = Path(__file__).resolve().parents[1]
+    lines = (root / ".env.example").read_text(encoding="utf-8").splitlines()
+    values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#") and "=" in line)
+
+    assert values["MODEL_OCR"] == "parseq" == Settings.model_fields["model_ocr"].default
+    assert float(values["PLATE_REDACT_MIN_CONF"]) == 0.10
+    assert Settings.model_fields["plate_redact_min_conf"].default == 0.10
+    entry = load_manifest(root / "models" / "manifest.json").get("parseq")
+    assert entry is not None and entry.ports == ("ocr",)
 
 
 def test_env_example_activa_el_embedder_ajustado_con_su_umbral() -> None:
