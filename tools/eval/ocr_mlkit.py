@@ -1,9 +1,9 @@
 """Compara ML Kit (medido en un celular por el Frontend) con PARSeq sobre el set etiquetado de OCR.
 
-Cruza por id `resultados/ocr-results.csv` (id, formato, luz, lectura, candidatos crudos, confianza, tiempo)
-con las etiquetas del set (`etiquetas.xlsx` o `etiquetas.csv`, solo las patentes legibles de auto) y con las
-lecturas de PARSeq que escribe `ocr.py --labeled-set` (`readings.csv`). Informa, en total y por luz (día y
-noche):
+Cruza por id `resultados/ocr-results.csv` (id, formato, luz, lectura, candidatos crudos, confianza, tiempo;
+`--results` acepta varias versiones: `v1=...csv v2=...csv`) con las etiquetas del set (`etiquetas.xlsx` o
+`etiquetas.csv`, solo las patentes legibles de auto) y con las lecturas de PARSeq que escribe
+`ocr.py --labeled-set` (`readings.csv`). Informa, en total y por luz (día y noche):
 
 - lectura exacta (aproxima U5: al menos 85 % de día y 70 % de noche), sin lectura (el usuario la tipea) y
   lectura equivocada (error silencioso si el usuario no la corrige), y si la patente correcta aparecía entre
@@ -12,7 +12,8 @@ noche):
 - el error silencioso: para cada lectura equivocada de ML Kit, R3 (`plate_check`) tomándola como patente
   denunciada contra la lectura de PARSeq de la misma foto: patente distinta (RED con penalización a un usuario
   honesto), difiere en un carácter o ilegible (GREEN);
-- el tiempo por recorte (mediana y p95).
+- el tiempo por recorte (mediana y p95) y, con varias versiones, qué cambió de una a la siguiente: lecturas
+  nuevas (cuántas exactas y cuántas equivocadas), perdidas y cambiadas.
 
 No corre ningún modelo. Escribe `mlkit.json` (solo cifras) y `mlkit_rows.csv` (id, luz y clases: nunca el
 texto) en `--out-dir`. Uso: ver `tools/eval/README.md`.
@@ -33,7 +34,7 @@ from typing import Any
 import ocr_labels
 from rapidfuzz.distance import Levenshtein
 
-from vvi_ia.domain.plate import PlateCheck, canonicalize, plate_check
+from vvi_ia.domain.plate import TO_DIGIT, TO_LETTER, PlateCheck, canonicalize, plate_check
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MIN_CONF = 0.78
@@ -154,16 +155,34 @@ def wrong_kind(label: str, reading: str) -> str:
     }[check]
 
 
+def _normalized_equal(label: str, window: str) -> bool:
+    """La ventana es la patente al leer cada carácter como dígito o letra según su posición (O/0, I/1...)."""
+    return all(
+        char.translate(TO_DIGIT if expected.isdigit() else TO_LETTER) == expected
+        for char, expected in zip(window, label, strict=True)
+    )
+
+
 def candidate_match(label: str, candidates: Sequence[str]) -> str:
-    """`exacta` si un candidato crudo contiene la patente correcta; `a_un_caracter` si una ventana del largo
-    de la patente difiere en un solo carácter; `no` en otro caso."""
+    """Si la patente correcta aparece entre los candidatos crudos (de más a menos estricto).
+
+    `exacta`: un candidato contiene la patente tal cual. `normalizada`: una ventana del largo de la
+    patente es la patente al normalizar letra/dígito por posición. `a_un_caracter`: una ventana difiere en
+    un solo carácter.
+    `no` en otro caso.
+    """
     if any(label in candidate for candidate in candidates):
         return "exacta"
     size = len(label)
-    for candidate in candidates:
-        for start in range(len(candidate) - size + 1):
-            if Levenshtein.distance(label, candidate[start : start + size]) <= 1:
-                return "a_un_caracter"
+    windows = [
+        candidate[start : start + size]
+        for candidate in candidates
+        for start in range(len(candidate) - size + 1)
+    ]
+    if any(_normalized_equal(label, window) for window in windows):
+        return "normalizada"
+    if any(Levenshtein.distance(label, window) <= 1 for window in windows):
+        return "a_un_caracter"
     return "no"
 
 
@@ -218,7 +237,15 @@ def mlkit_block(rows: Sequence[Row]) -> dict[str, Any]:
         "candidatos": {
             "la_correcta_aparece": sum(m == "exacta" for m in matches.values()),
             "la_correcta_aparece_pct": pct(sum(m == "exacta" for m in matches.values()), total),
+            # Contando también la que aparece tras normalizar letra/dígito por posición (lo que hace v2).
+            "la_correcta_aparece_normalizada": sum(m in ("exacta", "normalizada") for m in matches.values()),
+            "la_correcta_aparece_normalizada_pct": pct(
+                sum(m in ("exacta", "normalizada") for m in matches.values()), total
+            ),
             "no_exactas": len(not_exact),
+            "no_exactas_con_la_correcta_normalizada": sum(
+                matches[row.ident] in ("exacta", "normalizada") for row in not_exact
+            ),
             "no_exactas_con_la_correcta": sum(matches[row.ident] == "exacta" for row in not_exact),
             "sin_lectura_con_la_correcta": sum(matches[row.ident] == "exacta" for row in by_outcome[NONE]),
             "equivocadas_con_la_correcta": sum(matches[row.ident] == "exacta" for row in by_outcome[WRONG]),
@@ -284,63 +311,146 @@ def timing(rows: Sequence[Row]) -> dict[str, Any]:
 
 def u5(report: Mapping[str, Any]) -> dict[str, Any]:
     """Lectura exacta de cada lector contra la aproximación de U5 (85 % de día y 70 % de noche)."""
-    out: dict[str, Any] = {"umbral_pct": dict(U5_MIN_PCT)}
-    for reader in ("mlkit", "parseq"):
-        out[reader] = {
+
+    def check(blocks: Mapping[str, Any]) -> dict[str, Any]:
+        return {
             light: {
-                "lectura_exacta_pct": report[reader][light]["lectura_exacta_pct"],
-                "cumple": (report[reader][light]["lectura_exacta_pct"] or 0.0) >= U5_MIN_PCT[light],
+                "lectura_exacta_pct": blocks[light]["lectura_exacta_pct"],
+                "cumple": (blocks[light]["lectura_exacta_pct"] or 0.0) >= U5_MIN_PCT[light],
             }
             for light in LIGHTS
-            if light in report[reader]
+            if light in blocks
         }
-    return out
+
+    return {
+        "umbral_pct": dict(U5_MIN_PCT),
+        "mlkit": {version: check(blocks) for version, blocks in report["mlkit"].items()},
+        "parseq": check(report["parseq"]),
+    }
 
 
-def build_report(rows: Sequence[Row], min_conf: float) -> dict[str, Any]:
+def groups_of(rows: Sequence[Row]) -> dict[str, list[Row]]:
     groups: dict[str, list[Row]] = {"total": list(rows)}
     for light in LIGHTS:
         groups[light] = [row for row in rows if row.light == light]
-    groups = {name: items for name, items in groups.items() if items}
+    return {name: items for name, items in groups.items() if items}
+
+
+def new_readings(before: Sequence[Row], after: Sequence[Row], min_conf: float) -> dict[str, Any]:
+    """Qué cambió de una versión de ML Kit a la siguiente (mismos recortes).
+
+    Lecturas nuevas (antes sin lectura): cuántas son exactas y cuántas equivocadas, y el R3 de estas.
+    También las perdidas (antes había lectura) y las cambiadas (otra lectura distinta).
+    """
+    previous = {row.ident: row for row in before}
+    if set(previous) != {row.ident for row in after}:
+        raise ComparisonError("las dos versiones no tienen los mismos recortes")
+    new = [row for row in after if not previous[row.ident].mlkit and row.mlkit]
+
+    def part(items: Sequence[Row]) -> dict[str, Any]:
+        wrong = [row for row in items if mlkit_outcome(row) == WRONG]
+        return {
+            "lecturas_nuevas": len(items),
+            "exactas": sum(mlkit_outcome(row) == EXACT for row in items),
+            "equivocadas": len(wrong),
+            "equivocada_detalle": dict(Counter(wrong_kind(row.label, row.mlkit) for row in wrong)),
+            "r3_de_las_equivocadas": silent_error(items, min_conf),
+        }
+
+    return {
+        **part(new),
+        "perdidas": sum(bool(previous[row.ident].mlkit) and not row.mlkit for row in after),
+        "cambiadas": sum(
+            bool(previous[row.ident].mlkit) and bool(row.mlkit) and previous[row.ident].mlkit != row.mlkit
+            for row in after
+        ),
+        "por_luz": {light: part([row for row in new if row.light == light]) for light in LIGHTS},
+    }
+
+
+def build_report(versions: Mapping[str, Sequence[Row]], min_conf: float) -> dict[str, Any]:
+    """`versions` mapea cada versión de ML Kit a sus filas (mismos recortes y lecturas de PARSeq)."""
+    names = list(versions)
+    first = versions[names[0]]
+    parseq_groups = groups_of(first)
+    candidates_equal = all(
+        [row.candidates for row in versions[name]] == [row.candidates for row in first] for name in names
+    )
     report: dict[str, Any] = {
         "min_conf": min_conf,
-        "mlkit": {name: mlkit_block(items) for name, items in groups.items()},
-        "parseq": {name: parseq_block(items, min_conf) for name, items in groups.items()},
-        "error_silencioso": {name: silent_error(items, min_conf) for name, items in groups.items()},
-        "tiempo": timing(rows),
+        "versiones": names,
+        "candidatos_iguales_entre_versiones": candidates_equal,
+        "mlkit": {
+            name: {g: mlkit_block(items) for g, items in groups_of(rows).items()}
+            for name, rows in versions.items()
+        },
+        "parseq": {g: parseq_block(items, min_conf) for g, items in parseq_groups.items()},
+        "error_silencioso": {
+            name: {g: silent_error(items, min_conf) for g, items in groups_of(rows).items()}
+            for name, rows in versions.items()
+        },
+        "tiempo": {name: timing(rows) for name, rows in versions.items()},
+        "lecturas_nuevas": {
+            f"{later}_contra_{earlier}": new_readings(versions[earlier], versions[later], min_conf)
+            for earlier, later in zip(names, names[1:], strict=False)
+        },
     }
     report["u5"] = u5(report)
     return report
 
 
-def write_rows(path: Path, rows: Sequence[Row], min_conf: float) -> None:
-    """Una fila por recorte con las clases (nunca el texto)."""
+def write_rows(path: Path, versions: Mapping[str, Sequence[Row]], min_conf: float) -> None:
+    """Una fila por recorte con las clases de cada versión (nunca el texto)."""
+    names = list(versions)
+    columns = ["id", "luz", "candidato", "parseq"]
+    for name in names:
+        columns += [f"mlkit_{name}", f"error_{name}", f"r3_{name}"]
+    by_version = {name: {row.ident: row for row in rows} for name, rows in versions.items()}
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(ROW_COLUMNS))
+        writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
-        for row in rows:
-            outcome = mlkit_outcome(row)
-            writer.writerow(
-                {
-                    "id": row.ident,
-                    "luz": row.light,
-                    "mlkit": outcome,
-                    "mlkit_error": wrong_kind(row.label, row.mlkit) if outcome == WRONG else "",
-                    "candidato": candidate_match(row.label, row.candidates),
-                    "parseq": parseq_outcome(row, min_conf),
-                    "r3": r3_of_wrong_reading(row, min_conf) if outcome == WRONG else "",
-                }
-            )
+        for row in versions[names[0]]:
+            out = {
+                "id": row.ident,
+                "luz": row.light,
+                "candidato": candidate_match(row.label, row.candidates),
+                "parseq": parseq_outcome(row, min_conf),
+            }
+            for name in names:
+                mine = by_version[name][row.ident]
+                outcome = mlkit_outcome(mine)
+                out[f"mlkit_{name}"] = outcome
+                out[f"error_{name}"] = wrong_kind(mine.label, mine.mlkit) if outcome == WRONG else ""
+                out[f"r3_{name}"] = r3_of_wrong_reading(mine, min_conf) if outcome == WRONG else ""
+            writer.writerow(out)
 
 
 # --- línea de comandos ----------------------------------------------------------------------------------
+
+
+def parse_results(values: Sequence[str] | None, set_dir: Path) -> dict[str, Path]:
+    """`nombre=ruta` (o solo la ruta: el nombre es el del archivo); por defecto, `v1` con los del set."""
+    if not values:
+        return {"v1": set_dir / RESULTS_PATH}
+    found: dict[str, Path] = {}
+    for value in values:
+        name, separator, path = value.partition("=")
+        if not separator:
+            name, path = Path(value).stem, value
+        if name in found:
+            raise ComparisonError(f"la versión {name} está repetida")
+        found[name] = Path(path)
+    return found
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     parser.add_argument("--labeled-set", type=Path, required=True, help="set etiquetado de ocr_set.py")
     parser.add_argument(
-        "--results", type=Path, help=f"resultados de ML Kit (por defecto <labeled-set>/{RESULTS_PATH})"
+        "--results",
+        nargs="+",
+        metavar="NOMBRE=RUTA",
+        help=f"resultados de ML Kit, una o más versiones en orden (por defecto v1=<set>/{RESULTS_PATH})",
     )
     parser.add_argument(
         "--parseq-readings",
@@ -360,30 +470,67 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("indicá --out-dir o definí EVAL_OUT")
     if not 0.0 <= args.min_conf <= 1.0:
         parser.error("--min-conf debe estar entre 0 y 1")
-    args.results = args.results or args.labeled_set / RESULTS_PATH
+    try:
+        args.results = parse_results(args.results, args.labeled_set)
+    except ComparisonError as exc:
+        parser.error(str(exc))
     return args
 
 
+def cell(count: int, share: float | None) -> str:
+    return f"{count} ({share} %)"
+
+
 def print_table(report: Mapping[str, Any]) -> None:
-    names = [name for name in ("total", "dia", "noche") if name in report["mlkit"]]
-    print(f"{'':28}" + "".join(f"{name:>22}" for name in names))
-    for title, key in (
-        ("lectura exacta", "lectura_exacta"),
-        ("sin lectura", "sin_lectura"),
-        ("lectura equivocada", "lectura_equivocada"),
-    ):
-        for reader, label in (("mlkit", "ML Kit"), ("parseq", "PARSeq")):
+    """Una tabla por grupo (total, día, noche): cada versión de ML Kit y PARSeq lado a lado."""
+    versions = report["versiones"]
+    for group in report["parseq"]:
+        print(
+            f"\n[{group}]".ljust(34) + "".join(f"{'ML Kit ' + v:>18}" for v in versions) + f"{'PARSeq':>18}"
+        )
+        for title, key in (
+            ("lectura exacta", "lectura_exacta"),
+            ("sin lectura", "sin_lectura"),
+            ("lectura equivocada", "lectura_equivocada"),
+        ):
             cells = [
-                f"{report[reader][name][key]} ({report[reader][name][key + '_pct']} %)" for name in names
+                cell(report["mlkit"][v][group][key], report["mlkit"][v][group][key + "_pct"])
+                for v in versions
             ]
-            print(f"{title + ' ' + label:28}" + "".join(f"{cell:>22}" for cell in cells))
+            parseq = report["parseq"][group]
+            cells.append(cell(parseq[key], parseq[key + "_pct"]))
+            print(title.ljust(34) + "".join(f"{c:>18}" for c in cells))
+        found = [
+            cell(
+                report["mlkit"][v][group]["candidatos"]["la_correcta_aparece"],
+                report["mlkit"][v][group]["candidatos"]["la_correcta_aparece_pct"],
+            )
+            for v in versions
+        ]
+        print("la correcta entre los candidatos".ljust(34) + "".join(f"{c:>18}" for c in [*found, "-"]))
+        normalized = [
+            cell(
+                report["mlkit"][v][group]["candidatos"]["la_correcta_aparece_normalizada"],
+                report["mlkit"][v][group]["candidatos"]["la_correcta_aparece_normalizada_pct"],
+            )
+            for v in versions
+        ]
+        print("  y normalizada por posición".ljust(34) + "".join(f"{c:>18}" for c in [*normalized, "-"]))
+        for title, key in (
+            ("R3: patente distinta (RED)", "patente_distinta_RED"),
+            ("R3: un carácter (GREEN)", "difiere_en_un_caracter_GREEN"),
+            ("R3: ilegible (GREEN)", "ilegible_GREEN"),
+            ("R3: coincide (GREEN)", "coincide_GREEN"),
+        ):
+            values = [str(report["error_silencioso"][v][group][key]) for v in versions]
+            print(title.ljust(34) + "".join(f"{c:>18}" for c in [*values, "-"]))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     for name, path in (
         ("el set etiquetado", args.labeled_set),
-        ("los resultados", args.results),
+        *((f"los resultados {version}", path) for version, path in args.results.items()),
         ("las lecturas de PARSeq", args.parseq_readings),
         ("la salida", args.out_dir),
     ):
@@ -393,25 +540,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     try:
-        rows = build_rows(args.labeled_set, read_results(args.results), read_parseq(args.parseq_readings))
+        parseq = read_parseq(args.parseq_readings)
+        versions = {
+            version: build_rows(args.labeled_set, read_results(path), parseq)
+            for version, path in args.results.items()
+        }
+        report = build_report(versions, args.min_conf)
     except (OSError, ComparisonError, ocr_labels.LabelsError, KeyError, ValueError) as exc:
         print(f"No se pudo cruzar: {exc}", file=sys.stderr)
         return 1
-    report = build_report(rows, args.min_conf)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     (args.out_dir / "mlkit.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    write_rows(args.out_dir / "mlkit_rows.csv", rows, args.min_conf)
+    write_rows(args.out_dir / "mlkit_rows.csv", versions, args.min_conf)
     print_table(report)
-    for name, block in report["error_silencioso"].items():
+    print(f"\nCandidatos iguales entre versiones: {report['candidatos_iguales_entre_versiones']}")
+    for name, delta in report["lecturas_nuevas"].items():
         print(
-            f"Error silencioso ({name}): {block['lecturas_equivocadas']} lecturas equivocadas de ML Kit · "
-            f"patente distinta (RED) {block['patente_distinta_RED']} · "
-            f"un carácter {block['difiere_en_un_caracter_GREEN']} · "
-            f"ilegible {block['ilegible_GREEN']} · coincide {block['coincide_GREEN']}"
+            f"Lecturas nuevas ({name}): {delta['lecturas_nuevas']} · exactas {delta['exactas']} · "
+            f"equivocadas {delta['equivocadas']} {delta['equivocada_detalle']} · "
+            f"perdidas {delta['perdidas']} · "
+            f"cambiadas {delta['cambiadas']}"
         )
-    print(f"Tiempo por recorte: {report['tiempo']}")
+    for name, value in report["tiempo"].items():
+        print(f"Tiempo por recorte ({name}): {value}")
     print(f"U5: {report['u5']}")
     print(f"Salida: {args.out_dir / 'mlkit.json'}")
     return 0

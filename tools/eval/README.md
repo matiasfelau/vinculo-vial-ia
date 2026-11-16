@@ -567,69 +567,99 @@ exportación anterior dejó en la carpeta. Falla si faltan etiquetas (o con `--i
 ### ML Kit contra PARSeq (`ocr_mlkit.py`)
 
 El Frontend midió ML Kit sobre los 300 recortes exportados (`mlkit\`, con el margen del 15 %) en un Samsung SM-A155M
-(Android 16, API 36; 3 recortes de calentamiento) y dejó `resultados\ocr-results.csv` (`id, formato, luz, lectura,
-candidatos` crudos separados por `|`, `confianza, tiempo_ms`). `ocr_mlkit.py` lo cruza por id con las etiquetas y con las
-lecturas de PARSeq, sin correr ningún modelo:
+(Android 16, API 36; 3 recortes de calentamiento) y dejó `resultados\ocr-results.csv` (**v1**: `id, formato, luz, lectura,
+candidatos` crudos separados por `|`, `confianza, tiempo_ms`). Después generó `resultados\ocr-results-v2.csv` (**v2**: con
+normalización por posición y selección de candidatos; mismos recortes, mismo celular y **los mismos candidatos crudos**, más
+la columna `linea_elegida`). `ocr_mlkit.py` los cruza por id con las etiquetas y con las lecturas de PARSeq, sin correr
+ningún modelo:
 
 ```powershell
 python tools/eval/ocr.py --data-dir D:\vv-eval --out-dir D:\vv-eval\out\ocr-set-300 --models-dir models\weights --labeled-set D:\vv-eval\ocr-ar-set --incomplete   # escribe readings.csv
-python tools/eval/ocr_mlkit.py --labeled-set D:\vv-eval\ocr-ar-set --parseq-readings D:\vv-eval\out\ocr-set-300\readings.csv --out-dir D:\vv-eval\out\mlkit
+python tools/eval/ocr_mlkit.py --labeled-set D:\vv-eval\ocr-ar-set --parseq-readings D:\vv-eval\out\ocr-set-300\readings.csv --out-dir D:\vv-eval\out\mlkit-v2 --results v1=D:\vv-eval\ocr-ar-set\resultados\ocr-results.csv v2=D:\vv-eval\ocr-ar-set\resultados\ocr-results-v2.csv
 ```
 
-Escribe `mlkit.json` (solo cifras) y `mlkit_rows.csv` (id, luz y clases, **nunca el texto**). `readings.csv` (lo que leyó PARSeq
-por id) lo escribe `ocr.py --labeled-set` en su carpeta de salida: tiene textos de patentes de terceros y no va al repo.
+`--results` acepta una o más versiones (`nombre=ruta`, en orden) y avisa si los candidatos no son los mismos. Escribe
+`mlkit.json` (solo cifras) y `mlkit_rows.csv` (id, luz y clases de cada versión, **nunca el texto**). `readings.csv` (lo que
+leyó PARSeq por id) lo escribe `ocr.py --labeled-set` en su carpeta de salida: tiene textos de patentes de terceros y no va
+al repo.
 
 - **Lectura exacta:** la lectura elegida, canónica, es igual a la etiqueta. Aproxima U5: al menos 85 % de día y 70 % de noche.
 - **Sin lectura:** el lector no devolvió ninguna patente; el usuario la tipea.
 - **Lectura equivocada:** devolvió otra patente: error silencioso si el usuario no la corrige. Se detalla con `plate_check`
   (igual tras normalizar letra/dígito, difiere en un carácter, patente distinta).
-- **Candidatos crudos:** si algún candidato contiene la patente correcta (también se informa la ventana a un carácter).
+- **Candidatos crudos:** si algún candidato contiene la patente correcta tal cual (`literal`) o, además, tras normalizar
+  letra/dígito por posición (`normalizada`: lo que hace v2). Tampoco depende de la versión: los candidatos son los mismos.
 - **PARSeq, con la regla del servicio:** una lectura con menos de `OCR_MIN_CONF` (0,78) o sin la estructura de una patente es
   "sin lectura"; una aceptada que no es exacta es "equivocada". El texto exacto sin aplicar el umbral (245, 81,7 %) es el de la
   sección anterior.
+- **R3 sobre las equivocadas:** para cada lectura equivocada de ML Kit se simula R3 (`plate_check`, `OCR_MIN_CONF` 0,78)
+  tomándola como patente denunciada y la lectura de PARSeq de la misma foto.
 
 **Resultado sobre las 300 (16/11/2026).**
 
-| | ML Kit total | ML Kit día | ML Kit noche | PARSeq total | PARSeq día | PARSeq noche |
-|---|---|---|---|---|---|---|
-| Recortes | 300 | 246 | 54 | 300 | 246 | 54 |
-| **Lectura exacta** | **141 (47,0 %)** | 115 (46,7 %) | 26 (48,1 %) | **214 (71,3 %)** | 176 (71,5 %) | 38 (70,4 %) |
-| **Sin lectura** | 117 (39,0 %) | 95 (38,6 %) | 22 (40,7 %) | 71 (23,7 %) | 56 (22,8 %) | 15 (27,8 %) |
-| **Lectura equivocada** | 42 (14,0 %) | 36 (14,6 %) | 6 (11,1 %) | 15 (5,0 %) | 14 (5,7 %) | 1 (1,9 %) |
-| ¿Cumple U5? (85 % día, 70 % noche) | no | no (46,7 %) | no (48,1 %) | no | no (71,5 %) | sí (70,4 %) |
+| | ML Kit v1 | ML Kit v2 | PARSeq |
+|---|---|---|---|
+| **Total (300)** | | | |
+| Lectura exacta | 141 (47,0 %) | **156 (52,0 %)** | **214 (71,3 %)** |
+| Sin lectura | 117 (39,0 %) | 85 (28,3 %) | 71 (23,7 %) |
+| Lectura equivocada | 42 (14,0 %) | 59 (19,7 %) | 15 (5,0 %) |
+| De las que devolvieron lectura, exactas | 77,0 % | 72,6 % | 93,4 % |
+| La correcta entre los candidatos (literal / normalizada) | 153 (51,0 %) / 169 (56,3 %) | 153 / 169 | - |
+| R3 de las equivocadas: patente distinta (RED) | 6 | 8 | - |
+| R3: difiere en un carácter (GREEN) | 19 | 24 | - |
+| R3: ilegible (GREEN) | 15 | 24 | - |
+| R3: coincide (GREEN) | 2 | 3 | - |
+| **Día (246)** | | | |
+| Lectura exacta | 115 (46,7 %) | 126 (51,2 %) | 176 (71,5 %) |
+| Sin lectura | 95 (38,6 %) | 73 (29,7 %) | 56 (22,8 %) |
+| Lectura equivocada | 36 (14,6 %) | 47 (19,1 %) | 14 (5,7 %) |
+| La correcta entre los candidatos (literal / normalizada) | 125 (50,8 %) / 137 (55,7 %) | 125 / 137 | - |
+| R3: RED / un carácter / ilegible / coincide | 4 / 19 / 11 / 2 | 5 / 22 / 17 / 3 | - |
+| **Noche (54)** | | | |
+| Lectura exacta | 26 (48,1 %) | 30 (55,6 %) | 38 (70,4 %) |
+| Sin lectura | 22 (40,7 %) | 12 (22,2 %) | 15 (27,8 %) |
+| Lectura equivocada | 6 (11,1 %) | 12 (22,2 %) | 1 (1,9 %) |
+| La correcta entre los candidatos (literal / normalizada) | 28 (51,9 %) / 32 (59,3 %) | 28 / 32 | - |
+| R3: RED / un carácter / ilegible / coincide | 2 / 0 / 4 / 0 | 3 / 2 / 7 / 0 | - |
+| **¿Cumple U5?** (85 % día, 70 % noche) | no (46,7 / 48,1 %) | no (51,2 / 55,6 %) | día no (71,5 %), noche sí (70,4 %) |
 
-- **Equivocadas de ML Kit:** 34 difieren en un carácter y 8 son otra patente (6 de día, 2 de noche). Las 15 de PARSeq: 11 a un
-  carácter, 3 iguales tras normalizar letra/dígito y 1 distinta.
-- **Candidatos crudos:** la patente correcta aparece en 153 de 300 (51,0 %; 125 de día, 28 de noche): las 141 exactas y 12 de
-  las 117 sin lectura (10 de día y 2 de noche). **En ninguna de las 42 equivocadas** estaba la correcta entre los candidatos.
-  Contando candidatos a un carácter de la correcta, 72 de las 159 lecturas no exactas (58 de día y 14 de noche). 27
-  recortes no devolvieron ningún candidato. La confianza mediana de ML Kit es 0,717 en las exactas y 0,592 en las
-  equivocadas.
+- **v2 recupera lecturas, pero también suma errores.** Gana 15 lecturas exactas (+5,0 puntos) y a cambio las equivocadas pasan de
+  42 a 59 (+17): la lectura devuelta es correcta el 72,6 % de las veces, contra el 77,0 % de v1 y el 93,4 % de PARSeq. Ninguna
+  versión de ML Kit llega a U5 ni de día ni de noche.
+- **Equivocadas de ML Kit:** v1, 34 a un carácter y 8 otra patente; v2, 46 a un carácter y 13 otra patente.
+- **Las 32 lecturas nuevas de v2** (recortes que en v1 no tenían lectura; no se perdió ni cambió ninguna de las otras):
 
-**Error silencioso.** Para cada lectura equivocada de ML Kit se simula R3 (`plate_check`, `OCR_MIN_CONF` 0,78) tomándola como
-patente denunciada y la lectura de PARSeq de la misma foto:
+  | | Nuevas | Exactas | Equivocadas | De las equivocadas: un carácter / otra patente | R3: RED / un carácter / ilegible / coincide |
+  |---|---|---|---|---|---|
+  | Total | 32 | **15 (46,9 %)** | **17 (53,1 %)** | 12 / 5 | 2 / 5 / 9 / 1 |
+  | Día | 22 | 11 | 11 | 9 / 2 | 1 / 3 / 6 / 1 |
+  | Noche | 10 | 4 | 6 | 3 / 3 | 1 / 2 / 3 / 0 |
 
-| | Lecturas equivocadas | Patente distinta (RED, penaliza a un usuario honesto) | Difiere en un carácter (GREEN) | Ilegible (GREEN) | Coincide (GREEN) |
-|---|---|---|---|---|---|
-| Total | 42 | **6 (14,3 %)** | 19 | 15 | 2 |
-| Día | 36 | 4 | 19 | 11 | 2 |
-| Noche | 6 | 2 | 0 | 4 | 0 |
+  Es decir, de cada dos lecturas nuevas, una es exacta y la otra equivocada. De las 17 equivocadas, PARSeq lee la patente
+  correcta con seguridad en 6.
+- **Candidatos crudos:** la patente correcta aparece tal cual en 153 de 300 (51,0 %) y, normalizando letra/dígito, en 169 (56,3 %).
+  Las 141 exactas de v1 y 12 de las 117 sin lectura están en los 153. v2 llega a 156 exactas: más que las 153 literales,
+  porque la normalización recupera lecturas cuyos candidatos tienen confusiones letra/dígito. Quedan 13 recortes donde la
+  correcta estaba entre los candidatos (normalizada) y v2 no la eligió. **En ninguna de las equivocadas de v1 estaba la
+  correcta tal cual**; 27 recortes no devolvieron ningún candidato.
 
-De las 42, PARSeq lee la patente correcta con seguridad (≥ 0,78) en 24. Las 2 que "coinciden" son los casos en que PARSeq
-comete el mismo error que ML Kit: R3 no los puede detectar. **Salvedad:** el error solo llega a R3 si el texto equivocado
-resuelve a una patente de la red (`POST /alerts/attempts` responde 404 `NOT_IN_NETWORK` si no hay dueños); sobre estos
-datos no se sabe a cuántas lecturas equivocadas les pasaría.
+**Error silencioso.** Con v1, de las 42 lecturas equivocadas 6 (14,3 %) darían patente distinta (RED, penalización a un usuario
+honesto), 19 difieren en un carácter (GREEN), 15 serían ilegibles (GREEN) y 2 "coinciden" (PARSeq repite el error de ML Kit y
+R3 no lo puede detectar); con v2, de 59, son 8 (13,6 %), 24, 24 y 3. **Salvedad:** el error solo llega a R3 si el texto
+equivocado resuelve a una patente de la red (`POST /alerts/attempts` responde 404 `NOT_IN_NETWORK` si no hay dueños); sobre
+estos datos no se sabe a cuántas lecturas equivocadas les pasaría.
 
 **Cómo leer la medición de ML Kit.**
 
 - **Es de un solo recorte, sin la estabilización entre fotogramas de la app**, y por eso es pesimista: en la app ML Kit lee el
-  recuadro de encuadre fotograma tras fotograma y la app estabiliza la lectura entre fotogramas. Un recorte aislado no tiene esa segunda oportunidad: las cifras de arriba son un piso
-  de lo que vería el usuario, no una estimación de U5. Tampoco son fotos de la app (son las de Roboflow, ver
-  "Limitaciones"), y es un solo dispositivo.
-- **Tiempo por recorte (ML Kit en el SM-A155M, 300 recortes): mediana 118,55 ms (118,5 en el informe del Frontend) y p95
-  152,6 ms** (mínimo 60,2 y máximo 188,3 ms; p95 = el valor en la posición `floor(0,95 × n)` de los ordenados). Es un
-  componente de E2, que **no se mide con fotos estáticas**: la latencia de la lectura en la app depende de cuántos
-  fotogramas hacen falta para estabilizarla, no solo del tiempo de un recorte.
+  recuadro de encuadre fotograma tras fotograma y la app estabiliza la lectura entre fotogramas. Un recorte aislado no tiene
+  esa segunda oportunidad: las cifras de arriba son un **piso de U5**, no una estimación. Tampoco son fotos de la app (son las
+  de Roboflow, ver "Limitaciones"), y es un solo dispositivo.
+- **Tiempo por recorte (ML Kit en el SM-A155M, 300 recortes):** v1, mediana 118,55 ms (118,5 en el informe del Frontend) y p95
+  152,6 ms (mínimo 60,2 y máximo 188,3); v2, mediana 109,45 ms y p95 149,5 ms (mínimo 49,8 y máximo 180,3). Son dos corridas
+  del mismo dispositivo: la diferencia entre ellas no se atribuye a la versión. p95 = el valor en la posición `floor(0,95 × n)` de los ordenados. Es un **componente de E2**,
+  que **no se mide con fotos estáticas**: la latencia de la lectura en la app depende de cuántos fotogramas hacen falta para
+  estabilizarla, no solo del tiempo de un recorte.
 
 ### ¿Tapa la redacción la patente denunciada? (`redaction_set.py`)
 
