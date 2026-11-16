@@ -120,7 +120,9 @@ def test_el_umbral_de_contenida_es_el_ochenta_por_ciento_del_area() -> None:
     inside_79 = Box(221, 100, 321, 160, 0.9, BoxLabel.PLATE)  # 79 %: se tapa
 
     assert _plan([reported, inside_80], exempt=[reported]) == []
-    plan = _plan([reported, inside_79], exempt=[reported])
+    plan = plan_redaction(
+        [reported, inside_79], THRESHOLDS, W, H, exempt_plates=[reported], clip_margin=False
+    )
     assert plan is not None and len(plan) == 1
 
 
@@ -128,7 +130,7 @@ def test_una_patente_ajena_que_solo_se_superpone_un_poco_se_tapa() -> None:
     reported = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
     neighbour = Box(280, 100, 480, 160, 0.9, BoxLabel.PLATE)  # 10 % adentro
 
-    plan = _plan([reported, neighbour], exempt=[reported])
+    plan = plan_redaction([reported, neighbour], THRESHOLDS, W, H, [reported], clip_margin=False)
 
     assert plan is not None and len(plan) == 1
 
@@ -248,3 +250,111 @@ def test_sin_principal_el_plan_es_el_de_siempre() -> None:
     plan = plan_redaction([CAR, main], THRESHOLDS, W, H)
 
     assert plan is not None and len(plan) == 1
+
+
+# --- cajas que contienen a la exceptuada y margen recortado ------------------------------------------
+
+
+def _overlap(a: Box, b: Box) -> float:
+    return Box(max(a.x1, b.x1), max(a.y1, b.y1), min(a.x2, b.x2), min(a.y2, b.y2)).area
+
+
+def test_una_caja_que_contiene_entera_a_la_exceptuada_no_se_tapa() -> None:
+    exempt = _plate_at(400, 500, 500, 540, 0.9)
+    bigger = _plate_at(350, 480, 560, 560, 0.2)  # la patente y lo que la rodea
+
+    assert plan_redaction([exempt, bigger], THRESHOLDS, W, H, exempt_plates=[exempt]) == []
+
+
+def test_el_umbral_de_contener_es_el_95_por_ciento_del_area_de_la_exceptuada() -> None:
+    exempt = _plate_at(400, 500, 500, 540, 0.9)  # 100 x 40
+    holds_95 = _plate_at(405, 480, 600, 560, 0.2)  # deja 5 de 100 px de la exceptuada afuera: 95 %
+    holds_94 = _plate_at(406, 480, 600, 560, 0.2)  # 94 %: se tapa
+
+    assert plan_redaction([exempt, holds_95], THRESHOLDS, W, H, exempt_plates=[exempt]) == []
+    plan = plan_redaction([exempt, holds_94], THRESHOLDS, W, H, exempt_plates=[exempt])
+    assert plan is not None and plan != []
+
+
+def test_la_regla_de_contener_alcanza_tambien_a_la_principal() -> None:
+    main = _plate_at(400, 500, 500, 540, 0.9)
+    bigger = _plate_at(350, 480, 560, 560, 0.2)
+
+    assert plan_redaction([CAR, main, bigger], THRESHOLDS, W, H, main_plate=main) == []
+
+
+def test_sin_exceptuada_una_caja_grande_se_tapa_igual() -> None:
+    plate = _plate_at(400, 500, 500, 540, 0.9)
+    bigger = _plate_at(350, 480, 560, 560, 0.2)
+
+    plan = plan_redaction([plate, bigger], THRESHOLDS, W, H)
+
+    assert plan is not None and len(plan) == 2
+
+
+def test_sin_la_regla_de_contener_se_comporta_como_antes() -> None:
+    exempt = _plate_at(400, 500, 500, 540, 0.9)
+    bigger = _plate_at(350, 480, 560, 560, 0.2)
+
+    plan = plan_redaction(
+        [exempt, bigger], THRESHOLDS, W, H, exempt_plates=[exempt], exempt_containing=None, clip_margin=False
+    )
+
+    assert plan is not None and len(plan) == 1
+
+
+def test_el_margen_de_una_vecina_no_pisa_a_la_exceptuada_pero_la_caja_si_se_tapa_entera() -> None:
+    exempt = _plate_at(100, 100, 200, 140, 0.9)
+    neighbour = _plate_at(
+        204, 100, 304, 140, 0.8
+    )  # a 4 px: su margen de 10 px llega 6 px adentro de la exceptuada
+
+    plan = plan_redaction([exempt, neighbour], THRESHOLDS, W, H, exempt_plates=[exempt])
+
+    assert plan is not None
+    assert all(_overlap(piece, exempt) == 0 for piece in plan)  # nada pisa a la exceptuada
+    grown = expand(neighbour, 0.10, W, H)
+    painted = sum(piece.area for piece in plan if piece is not neighbour)
+    assert any(piece == neighbour for piece in plan)  # la caja de la vecina se tapa entera
+    assert (
+        painted >= grown.area - _overlap(grown, exempt) - 1e-6
+    )  # y su margen, salvo lo que pisa la exceptuada
+
+
+def test_el_margen_recortado_se_nota_en_el_plan() -> None:
+    exempt = _plate_at(100, 100, 200, 140, 0.9)
+    neighbour = _plate_at(204, 100, 304, 140, 0.8)
+    clipped = plan_redaction([exempt, neighbour], THRESHOLDS, W, H, exempt_plates=[exempt])
+    legacy = plan_redaction([exempt, neighbour], THRESHOLDS, W, H, exempt_plates=[exempt], clip_margin=False)
+
+    assert legacy is not None and clipped is not None
+    assert len(legacy) == 1 and _overlap(legacy[0], exempt) > 0  # antes el margen pisaba la exceptuada
+    assert all(_overlap(piece, exempt) == 0 for piece in clipped)
+
+
+def test_el_margen_solo_se_recorta_si_toca_una_exceptuada() -> None:
+    exempt = _plate_at(100, 100, 200, 140, 0.9)
+    far = _plate_at(600, 100, 700, 140, 0.8)
+
+    plan = plan_redaction([exempt, far], THRESHOLDS, W, H, exempt_plates=[exempt])
+
+    assert plan == [expand(far, 0.10, W, H)]  # una sola caja, con su margen entero
+
+
+def test_si_la_caja_cruda_toca_a_la_exceptuada_esa_parte_se_tapa() -> None:
+    """Solo se recorta el margen: la caja de otra patente se tapa aunque pise un poco a la exceptuada."""
+    exempt = _plate_at(100, 100, 200, 140, 0.9)
+    overlapping = _plate_at(180, 100, 280, 140, 0.8)  # 20 % de su área sobre la exceptuada: no es contenida
+
+    plan = plan_redaction([exempt, overlapping], THRESHOLDS, W, H, exempt_plates=[exempt])
+
+    assert plan is not None and any(piece == overlapping for piece in plan)
+
+
+def test_el_margen_se_recorta_tambien_contra_la_principal() -> None:
+    main = _plate_at(100, 100, 200, 140, 0.9)
+    neighbour = _plate_at(204, 100, 304, 140, 0.8)
+
+    plan = plan_redaction([CAR, main, neighbour], THRESHOLDS, W, H, main_plate=main)
+
+    assert plan is not None and all(_overlap(piece, main) == 0 for piece in plan)

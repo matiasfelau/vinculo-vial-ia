@@ -581,11 +581,28 @@ de patente más grande de la foto. Las demás patentes siguen la regla de siempr
 contenidas), y las cajas contenidas en la principal tampoco se tapan. En la foto general (y en las demás) no cambia nada.
 Es una decisión de producto: si la principal no es la denunciada, queda a la vista otra patente.
 
+**Dos reglas más, que solo afectan a una patente exceptuada** (la exceptuada por lectura o la principal; en cualquier
+foto donde haya una):
+
+1. **No se tapan las cajas de patente que contienen entera a una exceptuada** (`EXEMPT_CONTAINING` = 95 % del área de la
+   exceptuada adentro). Es la regla espejo de las contenidas: una detección más grande que la patente (casi siempre de
+   confianza baja, 0,11 a 0,23) que la rodea entera la taparía por completo.
+2. **El margen de redacción de las demás cajas se recorta para que nunca se superponga con una exceptuada.** La caja de la
+   otra patente se tapa entera (es la patente); solo se le quita del margen del 10 % lo que pisaría a la exceptuada
+   (`painted_boxes` parte el relleno en rectángulos que dejan afuera a la exceptuada). Si el margen no toca ninguna
+   exceptuada, el relleno es el de siempre.
+
+Las dos tienen un parámetro (`exempt_containing`, `clip_margin`) que las apaga para poder medir el antes. Los tests de
+servicio (`test_una_caja_que_contiene_a_la_patente_exceptuada_no_se_tapa` y
+`test_el_margen_de_una_patente_vecina_no_pisa_a_la_exceptuada`) fallan si se apaga la regla correspondiente.
+
 `redaction_set.py` mide el efecto sobre este set, con el texto etiquetado como patente denunciada y la caja anotada como
 su ubicación. Para cada patente legible de auto corre el camino real del paso 8 (detector de patentes con mosaico, OCR de
-cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (la regla de
-siempre: excepción por OCR y cajas contenidas) y después (además, la patente principal sin tapar). Corre el OCR sobre el set: hacerlo con las etiquetas
-completas.
+cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (el servicio
+con la excepción por OCR, las cajas contenidas y la patente principal) y después (además, las dos reglas de arriba: no
+tapar las cajas que contienen entera a una exceptuada y recortar el margen). La primera tanda de mediciones (abajo, "La
+patente principal") se hizo con una versión anterior de la herramienta, que medía la principal como el "después". Corre
+el OCR sobre el set: hacerlo con las etiquetas completas.
 
 ```powershell
 $env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\redaction-set"; $env:MODELS_DIR = "models\weights"
@@ -600,6 +617,9 @@ uv run --frozen --extra dev --extra tools python tools/eval/redaction_set.py --l
 - **`principal`:** cuántas veces la patente principal elegida **no es la denunciada** (su caja se parece a la anotada con
   IoU menor que 0,5): en esos casos queda a la vista otra patente y la denunciada puede quedar tapada. Aparte cuenta
   cuántas de esas el OCR igual lee como la denunciada (probablemente la misma patente con otra caja).
+- **`ajenas`:** si las dos reglas dejan expuesta alguna **otra patente** de la misma foto. Toma todas las patentes
+  anotadas del export (menos la denunciada y las cajas inválidas) y cuenta cuántas estaban tapadas por completo antes y
+  dejan de estarlo después (`destapadas_por_las_reglas`), y cuántas quedan menos tapadas (caída de más de 5 puntos).
 - **`casos_tapados_con_exencion`:** las fotos donde el OCR leyó la denunciada y el plan igual la tapa, con qué caja la cubre:
   `mayor que la patente` (contiene a la exceptuada), `vecina (solo llega con el margen)` (su caja cruda no toca la
   denunciada; la tapa el margen del 10 %) o `solapada`.
@@ -628,6 +648,41 @@ tapaban y ahora 11; de las 242 donde sí, 13 se tapan antes y después.
   0,28, de 1,2 a 66 veces el área anotada; son las que tapan por completo, salvo la 138), 6 **vecinas que solo llegan con el
   margen del 10 %** (008, 035, 077, 120, 134 y 287; cubren del 1 % al 10 %) y 4 **solapadas** (035, 074 y dos en 138; la 138 es
   un fragmento de la misma patente y la tapa al 68 %).
+
+**Las dos reglas nuevas sobre el set de 300 (16/11/2026).** Antes: lo anterior (principal incluida). Después: además no
+tapar las cajas que contienen entera a una exceptuada y recortar el margen contra las exceptuadas.
+
+| | Antes | Después |
+|---|---|---|
+| Tapa algo (cualquier superposición) | 24 (8,0 %) | **14 (4,7 %)** |
+| Tapa por completo (≥ 95 %) | 11 | **3** |
+| Tapa parcialmente (2 % a 95 %) | 10 | **8** |
+| Sin tapar | 279 | 289 |
+| Día (246): tapa algo / total / parcial | 20 / 10 / 7 | 11 / 3 / 5 |
+| Noche (54): tapa algo / total / parcial | 4 / 1 / 3 | 3 / 0 / 3 |
+| El OCR leyó la denunciada (242): tapa algo / total | 13 / 6 | **6 / 0** |
+| El OCR no la leyó (58): tapa algo / total | 11 / 5 | 8 / 3 |
+
+Cambian de clase 10 fotos y ninguna empeora: 5 pasan de tapada por completo a sin tapar por la regla de contener (009, 073,
+212, 317 y 364), 287 también (de total a 1,7 %), 224 y 331 (sin lectura del OCR: la principal estaba dentro de una caja
+mayor) y 008 y 077 (el margen de una vecina rozaba la denunciada, del 8 % y el 10 % a 0).
+
+- **Patentes ajenas expuestas por estas reglas: ninguna.** El export tiene 127 patentes anotadas además de la denunciada
+  en estas fotos: 36 estaban tapadas por completo antes y 36 después, y ninguna pasó de tapada a destapada. Una sola queda
+  menos tapada (id 077: del 8,2 % a 0 %; ya estaba visible al 92 %, el margen de otra caja apenas la rozaba). **Alcance:**
+  solo mide patentes anotadas en estas 300 fotos; una caja grande que contenga a la exceptuada y a otra patente que el
+  detector no vea por separado dejaría esa otra patente expuesta, y acá no pasó, pero no está descartado.
+- **Quedan 6 fotos donde el OCR leyó la denunciada y se tapa algo** (antes, 13), todas con menos del 6 % salvo la 138:
+  035, 074, 120, 134 y 287 (de 0,5 % a 5,5 %: vecinas y cajas solapadas de baja confianza, probablemente sobre la parte
+  de la anotada que la exceptuada del detector no cubre) y la 138 (62 %: fragmentos de la misma patente que se superponen a una exceptuada
+  que cubre solo el 55 % de la anotada). Las 3 que se tapan por completo (067, 255 y 261) no tienen exención por lectura.
+
+**Limitación: el set de 300 no está encuadrado como la app.** La patente principal no es la denunciada en **53 de 300
+fotos (17,7 %)**. Son fotos de Roboflow con autos enteros, varios vehículos o patentes de fondo, no la foto de patente de la
+app (la patente en primer plano, centrada, a 1-2 m). En la app la patente principal debería ser casi siempre la
+denunciada, así que este porcentaje y los casos de patente denunciada tapada por una principal ajena (9 de 53 con la
+regla de siempre) son un techo de lo que se vería en producción, no una estimación; hasta tener fotos de la app no se puede
+medir. Las demás cifras de esta sección comparten el límite.
 
 
 ### Limitaciones
