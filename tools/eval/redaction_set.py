@@ -4,9 +4,10 @@ Para cada patente legible de auto del set (`ocr_set.py`, etiquetas en `etiquetas
 la foto original como foto de patente, usa el texto etiquetado como la patente denunciada y corre el mismo
 camino que el servicio en el paso 8: el detector de patentes (con mosaico), el OCR sobre cada caja detectada
 (las que coinciden con la denunciada, `MATCH` o `FUZZY`, se exceptúan) y `plan_redaction`. La patente
-denunciada de la foto es la caja anotada del set. Se mide **antes** (la regla de las cajas exceptuadas por
-lectura y las contenidas en ellas) y **después** (además, la patente principal de la foto nunca se tapa:
-`main_plate`), con las mismas detecciones y lecturas: una sola pasada del OCR por caja.
+denunciada de la foto es la caja anotada del set. Se mide **antes** (el servicio con la patente principal
+de la foto de patente, la excepción por lectura y las cajas contenidas en la exceptuada) y **después**
+(además, no se tapan las cajas que contienen entera a una exceptuada y el margen no pisa a una exceptuada),
+con las mismas detecciones y lecturas: una sola pasada del OCR por caja.
 
 "Tapa" se mide por la fracción del área de la caja anotada que queda bajo el relleno de alguna caja del plan
 (con el margen del 10 %): total si cubre al menos `TOTAL_FRACTION`, parcial si cubre al menos
@@ -18,6 +19,8 @@ se tapa a propósito (es el costo de redactar con fail-closed): se informa apart
 menor que `MAIN_TARGET_IOU`): en esos casos queda a la vista otra patente y la denunciada puede quedar tapada.
 `casos_tapados_con_exencion` lista las fotos donde el OCR leyó la denunciada y el plan igual la tapa, con qué
 caja la cubre (mayor que la patente, vecina que solo llega con su margen, o solapada).
+`ajenas` mide si las dos reglas nuevas dejan expuesta alguna otra patente de la misma foto (las demás cajas
+anotadas del export): cuántas estaban tapadas por completo antes y dejan de estarlo después.
 
 Corre el OCR sobre el set: hacerlo recién con las etiquetas completas. Escribe en `--out-dir` `redaction.json`
 (solo cifras) y `redaction_rows.csv` (id, luz y fracciones: nunca el texto). Uso: ver `tools/eval/README.md`.
@@ -30,7 +33,7 @@ import math
 import os
 import sys
 from collections import Counter
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -38,6 +41,7 @@ from typing import Any
 import numpy as np
 import ocr_labels
 from ocr import IN_SCOPE_FORMATS, PHOTOS_DIR, Sample, inside_repo, load_set_samples, sample_format
+from ocr_set import invalid_boxes, load_annotations
 
 from vvi_ia.adapters.imaging import CvImageDecoder, JpegRenderer
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
@@ -46,11 +50,12 @@ from vvi_ia.domain.model import Box, BoxLabel, EvidenceImage, EvidenceRole
 from vvi_ia.domain.plate import canonicalize
 from vvi_ia.domain.redaction import (
     EXEMPT_CONTAINED,
+    EXEMPT_CONTAINING,
     REDACTION_MARGIN,
     RedactionThresholds,
     contained_fraction,
-    expand,
     main_plate,
+    painted_boxes,
     plan_redaction,
 )
 from vvi_ia.main import adapter_params, build_redaction, build_thresholds
@@ -120,13 +125,14 @@ class Measure:
     light: str
     plates: int  # cajas de patente que devolvió el detector con confianza de redacción
     exempt: int  # las que el OCR dio por la denunciada (MATCH o FUZZY)
-    before: float  # cobertura de la denunciada con la regla de siempre
-    after: float  # y además con la patente principal sin tapar
+    before: float  # cobertura de la denunciada con el servicio hasta la patente principal
+    after: float  # y además sin tapar las cajas que contienen a la exceptuada ni su margen
     unavailable: bool = False  # el detector de patentes no respondió (fail-closed: no hay redacción)
     has_main: bool = False  # hay una patente principal (alguna caja con confianza de redacción)
     main_is_target: bool = False  # la principal es la denunciada (IoU con la caja anotada)
     main_read_as_target: bool = False  # y el OCR la lee como la denunciada
     covers: tuple[dict[str, Any], ...] = ()  # qué cajas cubren la denunciada en el plan de después
+    others: tuple[tuple[str, float, float], ...] = ()  # otras patentes anotadas: (clave, antes, después)
 
 
 def iou(a: Box, b: Box) -> float:
@@ -151,15 +157,16 @@ def covering_boxes(
     height: int,
     target: Box,
 ) -> tuple[dict[str, Any], ...]:
-    """Las cajas del plan que tocan la denunciada, con qué son (sin ningún texto)."""
+    """Las cajas del plan (con las dos reglas nuevas) que tocan la denunciada, con qué son (sin texto)."""
     found: list[dict[str, Any]] = []
     for box in detections:
         if box.label != BoxLabel.PLATE or box.conf < thresholds.plate_min_conf or box in exempt:
             continue
         if any(contained_fraction(box, other) >= EXEMPT_CONTAINED for other in exempt):
             continue
-        painted = expand(box, REDACTION_MARGIN, width, height)
-        share = intersection(painted, target) / target.area if target.area > 0 else 0.0
+        if any(contained_fraction(other, box) >= EXEMPT_CONTAINING for other in exempt):
+            continue
+        share = coverage(target, painted_boxes(box, REDACTION_MARGIN, width, height, exempt, True))
         if share <= 0:
             continue
         holds_exempt = max((contained_fraction(other, box) for other in exempt), default=0.0)
@@ -186,8 +193,9 @@ def measure_one(
     image: EvidenceImage,
     sample: Sample,
     thresholds: RedactionThresholds,
+    others: Sequence[tuple[str, Box]] = (),
 ) -> Measure:
-    """La cobertura de la denunciada antes y después de la regla de la principal.
+    """La cobertura de la denunciada (y de las otras patentes anotadas) antes y después de las dos reglas.
 
     Es el camino del paso 8 del servicio: las mismas detecciones, las mismas lecturas y `plan_redaction`.
     """
@@ -198,7 +206,9 @@ def measure_one(
     exempt = use_case._matching_plates(run, image, detections, reported)  # el mismo camino que el servicio
     main = main_plate(detections, thresholds.plate_min_conf)
     size = (image.width, image.height)
-    before = plan_redaction(detections, thresholds, *size, exempt)
+    before = plan_redaction(
+        detections, thresholds, *size, exempt, main_plate=main, exempt_containing=None, clip_margin=False
+    )
     after = plan_redaction(detections, thresholds, *size, exempt, main_plate=main)
     plates = sum(box.label == BoxLabel.PLATE and box.conf >= thresholds.plate_min_conf for box in detections)
     target = sample.box
@@ -216,6 +226,7 @@ def measure_one(
         main_read_as_target=main is not None
         and bool(use_case._matching_plates(run, image, [main], reported)),
         covers=covering_boxes(detections, exempt_after, thresholds, *size, target) if cover_after > 0 else (),
+        others=tuple((key, coverage(box, before or []), coverage(box, after or [])) for key, box in others),
     )
 
 
@@ -225,6 +236,7 @@ def measure_samples(
     photos_dir: Path,
     model_max_side_px: int,
     thresholds: RedactionThresholds,
+    annotated: Mapping[tuple[str, str], Sequence[Box]] | None = None,
 ) -> tuple[list[Measure], Counter[str]]:
     """Mide cada patente legible de auto. Las lecturas del OCR se reutilizan entre filas de la misma foto."""
     decoder = CvImageDecoder()
@@ -248,7 +260,12 @@ def measure_samples(
         )
         run = _Run(models=use_case._models)  # el mismo conjunto de modelos
         for position, sample in items:
-            measured.append((position, measure_one(use_case, run, image, sample, thresholds)))
+            others = [
+                (f"{split}/{file}#{box.x1:.0f},{box.y1:.0f},{box.x2:.0f},{box.y2:.0f}", box)
+                for box in (annotated or {}).get((split, file), ())
+                if iou(box, sample.box) < MAIN_TARGET_IOU  # otra patente, no la misma con otra caja
+            ]
+            measured.append((position, measure_one(use_case, run, image, sample, thresholds, others)))
     return [measure for _, measure in sorted(measured, key=lambda item: item[0])], skipped
 
 
@@ -275,8 +292,12 @@ def side_summary(fractions: Sequence[float]) -> dict[str, Any]:
     }
 
 
-def principal_summary(measures: Sequence[Measure]) -> dict[str, Any]:
+def principal_summary(measures: Sequence[Measure], stage: str = "after") -> dict[str, Any]:
     """Cuántas veces la principal elegida no es la denunciada y qué pasa entonces con la denunciada."""
+
+    def covered(m: Measure) -> float:
+        return m.after if stage == "after" else m.before
+
     with_main = [m for m in measures if m.has_main]
     other = [m for m in with_main if not m.main_is_target]
     return {
@@ -287,11 +308,36 @@ def principal_summary(measures: Sequence[Measure]) -> dict[str, Any]:
         "es_la_denunciada_y_el_ocr_la_lee": sum(
             m.main_is_target and m.main_read_as_target for m in with_main
         ),
-        "no_es_la_denunciada_y_la_denunciada_queda_tapada_algo": sum(m.after > 0 for m in other),
+        "no_es_la_denunciada_y_la_denunciada_queda_tapada_algo": sum(covered(m) > 0 for m in other),
         "no_es_la_denunciada_y_la_denunciada_queda_tapada_total": sum(
-            classify(m.after) == TOTAL for m in other
+            classify(covered(m)) == TOTAL for m in other
         ),
         "no_es_la_denunciada_y_el_ocr_la_lee_como_la_denunciada": sum(m.main_read_as_target for m in other),
+    }
+
+
+def others_summary(measures: Sequence[Measure]) -> dict[str, Any]:
+    """Si las dos reglas nuevas dejan expuesta alguna otra patente anotada de la misma foto.
+
+    Cada otra patente cuenta una vez (la fila donde más se destapa). "Expuesta" es que estaba tapada por
+    completo antes (`TOTAL_FRACTION`) y deja de estarlo; `menos_tapadas`, cualquier caída de más de 5 puntos.
+    """
+    worst: dict[str, tuple[str, float, float]] = {}
+    for m in measures:
+        for key, before, after in m.others:
+            if key not in worst or before - after > worst[key][1] - worst[key][2]:
+                worst[key] = (m.ident, before, after)
+    exposed = [(i, b, a) for i, b, a in worst.values() if b >= TOTAL_FRACTION > a]
+    less = [(i, b, a) for i, b, a in worst.values() if a < b - 0.05]
+    return {
+        "patentes_ajenas_anotadas": len(worst),
+        "tapadas_por_completo_antes": sum(b >= TOTAL_FRACTION for _, b, _ in worst.values()),
+        "tapadas_por_completo_despues": sum(a >= TOTAL_FRACTION for _, _, a in worst.values()),
+        "destapadas_por_las_reglas": len(exposed),
+        "menos_tapadas": len(less),
+        "casos": [
+            {"id": ident, "antes": round(b, 3), "despues": round(a, 3)} for ident, b, a in sorted(less)
+        ],
     }
 
 
@@ -315,6 +361,8 @@ def group_summary(measures: Sequence[Measure]) -> dict[str, Any]:
         "cambian_de_clase": len(changed),
         "empeoran": sum(m.after > m.before + 1e-9 for m in available),
         "principal": principal_summary(available),
+        "principal_antes_de_las_reglas": principal_summary(available, "before"),
+        "ajenas": others_summary(available),
         "casos_tapados_con_exencion": [
             {
                 "id": m.ident,
@@ -342,6 +390,7 @@ def build_report(
         "umbrales": {
             "PLATE_REDACT_MIN_CONF": thresholds.plate_min_conf,
             "contenida_minima": EXEMPT_CONTAINED,
+            "contiene_entera_desde": EXEMPT_CONTAINING,
             "principal_es_la_denunciada_con_iou_desde": MAIN_TARGET_IOU,
             "tapa_total_desde": TOTAL_FRACTION,
             "tapa_parcial_desde": PARTIAL_FRACTION,
@@ -366,6 +415,19 @@ def write_rows(path: Path, measures: Sequence[Measure]) -> None:
                     "cobertura_despues": f"{m.after:.3f}",
                 }
             )
+
+
+def annotated_plates(photos_dir: Path) -> dict[tuple[str, str], list[Box]]:
+    """Todas las patentes anotadas del export por foto (sin las cajas inválidas: autos, pilas de patentes)."""
+    annotations = load_annotations(photos_dir)
+    invalid = invalid_boxes(annotations)
+    found: dict[tuple[str, str], list[Box]] = {}
+    for annotation in annotations:
+        if annotation in invalid:
+            continue
+        x, y, width, height = annotation.box
+        found.setdefault((annotation.split, annotation.file), []).append(Box(x, y, x + width, y + height))
+    return found
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -438,7 +500,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     thresholds = RedactionThresholds(settings.plate_redact_min_conf)
     measures, skipped = measure_samples(
-        use_case, loaded.samples, args.photos_dir, settings.model_max_side_px, thresholds
+        use_case,
+        loaded.samples,
+        args.photos_dir,
+        settings.model_max_side_px,
+        thresholds,
+        annotated_plates(args.photos_dir),
     )
     report = build_report(measures, thresholds, models.versions())
     report["salteadas"] = dict(skipped)
@@ -467,6 +534,13 @@ def main(argv: list[str] | None = None) -> int:
         f"Patente principal: no es la denunciada {main['no_es_la_denunciada']} "
         f"({main['no_es_la_denunciada_pct']} %) · es la denunciada {main['es_la_denunciada']} · "
         f"sin principal {main['sin_principal']}"
+    )
+    others = report["ajenas"]
+    print(
+        f"Otras patentes anotadas: {others['patentes_ajenas_anotadas']} · tapadas por completo antes "
+        f"{others['tapadas_por_completo_antes']} y después {others['tapadas_por_completo_despues']} · "
+        f"destapadas por las reglas {others['destapadas_por_las_reglas']} · "
+        f"menos tapadas {others['menos_tapadas']}"
     )
     print(
         f"Con exención y tapada igual: {len(report['casos_tapados_con_exencion'])} · "

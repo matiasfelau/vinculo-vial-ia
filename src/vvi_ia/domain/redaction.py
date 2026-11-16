@@ -14,6 +14,9 @@ REDACTION_MARGIN = 0.10
 # denunciada) es la misma patente o un pedazo de ella (el mosaico de patentes chicas la detecta dos veces):
 # tapar esa detección taparía la denunciada.
 EXEMPT_CONTAINED = 0.8
+# Una caja de patente que contiene entera a una exceptuada (con esta tolerancia de área) es una detección más
+# grande de la misma patente, o de la patente y lo que la rodea: taparla taparía la exceptuada.
+EXEMPT_CONTAINING = 0.95
 # Una patente está "dentro" del vehículo dominante si al menos esta parte de su área cae en su caja.
 MAIN_PLATE_INSIDE = 0.5
 
@@ -70,6 +73,37 @@ def main_plate(detections: Sequence[Box] | None, plate_min_conf: float) -> Box |
     return max(plates, key=lambda box: box.area)
 
 
+def _outside(box: Box, hole: Box) -> list[Box]:
+    """Lo que queda de `box` fuera de `hole`, en hasta cuatro rectángulos (la caja entera si no se tocan)."""
+    x1, y1 = max(box.x1, hole.x1), max(box.y1, hole.y1)
+    x2, y2 = min(box.x2, hole.x2), min(box.y2, hole.y2)
+    if x2 <= x1 or y2 <= y1:
+        return [box]
+    pieces = [
+        Box(box.x1, box.y1, box.x2, y1, box.conf, box.label),  # arriba
+        Box(box.x1, y2, box.x2, box.y2, box.conf, box.label),  # abajo
+        Box(box.x1, y1, x1, y2, box.conf, box.label),  # izquierda
+        Box(x2, y1, box.x2, y2, box.conf, box.label),  # derecha
+    ]
+    return [piece for piece in pieces if piece.width > 0 and piece.height > 0]
+
+
+def painted_boxes(
+    box: Box, margin: float, width: int, height: int, exempt: Collection[Box], clip_margin: bool
+) -> list[Box]:
+    """El relleno de una caja: la caja con su margen, sin el margen que pise una patente exceptuada.
+
+    La caja en sí se tapa siempre (es la patente); solo el margen se recorta donde toca una exceptuada.
+    """
+    grown = expand(box, margin, width, height)
+    if not clip_margin or not any(_outside(grown, hole) != [grown] for hole in exempt):
+        return [grown]
+    pieces = [grown]
+    for hole in exempt:
+        pieces = [rest for piece in pieces for rest in _outside(piece, hole)]
+    return [*pieces, box]
+
+
 def plan_redaction(
     detections: Sequence[Box] | None,
     thresholds: RedactionThresholds,
@@ -79,6 +113,8 @@ def plan_redaction(
     margin: float = REDACTION_MARGIN,
     exempt_contained: float | None = EXEMPT_CONTAINED,
     main_plate: Box | None = None,
+    exempt_containing: float | None = EXEMPT_CONTAINING,
+    clip_margin: bool = True,
 ) -> list[Box] | None:
     """Cajas a tapar con relleno opaco, o `None` si no se puede redactar (fail-closed).
 
@@ -92,6 +128,11 @@ def plan_redaction(
     `main_plate` (solo en la foto de patente, ver `main_plate`) se trata como una exceptuada más: no se tapa,
     aunque el OCR no la lea, y las cajas contenidas en ella tampoco. Las demás patentes siguen la regla de
     siempre.
+
+    Las dos reglas siguientes solo afectan a las patentes exceptuadas (`exempt_plates` y `main_plate`):
+    una caja de patente que **contiene entera** a una exceptuada (al menos `exempt_containing` del área de la
+    exceptuada adentro) no se tapa, y el margen de redacción de las demás cajas se **recorta** para que nunca
+    pise una exceptuada (`clip_margin`). Con `None` y `False` se comporta como antes, para medir.
     """
     if detections is None:
         return None
@@ -107,5 +148,13 @@ def plan_redaction(
             exempt_contained is not None
             and any(contained_fraction(plate, exempt) >= exempt_contained for exempt in exempt_plates)
         )
+        and not (
+            exempt_containing is not None
+            and any(contained_fraction(exempt, plate) >= exempt_containing for exempt in exempt_plates)
+        )
     ]
-    return [expand(box, margin, width, height) for box in boxes]
+    return [
+        piece
+        for box in boxes
+        for piece in painted_boxes(box, margin, width, height, exempt_plates, clip_margin)
+    ]

@@ -603,3 +603,62 @@ def test_la_principal_de_la_foto_de_patente_se_elige_por_confianza_dentro_del_au
 
     plate_photo = _uploaded(writer, scenario, "plate-0")
     assert _g(plate_photo, 40, 65) > LIGHT and _g(plate_photo, 35, 20) < DARK
+
+
+# --- cajas que contienen a la exceptuada y margen recortado ---------------------------------------------
+
+
+class RecordingRenderer:
+    """Registra las cajas que el caso de uso manda tapar en cada foto (sin codificar nada)."""
+
+    def __init__(self) -> None:
+        self.plans: list[list[Box]] = []
+
+    def render(self, pixels: Pixels, boxes: list[Box], max_side: int) -> bytes:
+        self.plans.append(list(boxes))
+        return b"jpeg"
+
+
+def _plan_of_the_general_photo(models: FakeModels) -> list[Box]:
+    scenario = build_scenario()
+    renderer = RecordingRenderer()
+    use_case = ValidateEvidence(
+        store=scenario.store,
+        writer=FakeWriter(),
+        decryptor=scenario.decryptor,
+        decoder=scenario.decoder,
+        renderer=renderer,  # type: ignore[arg-type]
+        models=models.as_models(),
+        thresholds=THRESHOLDS,
+        redaction=REDACTION,
+    )
+    result = use_case.execute(scenario.payload)
+    assert result.verdict == Verdict.GREEN
+    return renderer.plans[0]  # la primera foto del payload es la general
+
+
+def _overlap(a: Box, b: Box) -> float:
+    return max(0.0, min(a.x2, b.x2) - max(a.x1, b.x1)) * max(0.0, min(a.y2, b.y2) - max(a.y1, b.y1))
+
+
+def test_una_caja_que_contiene_a_la_patente_exceptuada_no_se_tapa() -> None:
+    """La reportada (PLATE_A, leída por el OCR) queda a la vista aunque otra detección la contenga entera."""
+    models = _models_with_two_plates()
+    bigger = Box(5, 5, 80, 40, 0.5, BoxLabel.PLATE)  # contiene a PLATE_A, el OCR la lee como otra patente
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), bigger]
+
+    plan = _plan_of_the_general_photo(models)
+
+    assert all(_overlap(box, PLATE_A) == 0 for box in plan)  # nada pisa a la reportada
+    assert any(_overlap(box, PLATE_B) > 0 for box in plan)  # la otra patente sí se tapa
+
+
+def test_el_margen_de_una_patente_vecina_no_pisa_a_la_exceptuada() -> None:
+    models = _models_with_two_plates()
+    neighbour = Box(62, 10, 100, 30, 0.5, BoxLabel.PLATE)  # a 2 px de PLATE_A: su margen del 10 % la pisaría
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), neighbour]
+
+    plan = _plan_of_the_general_photo(models)
+
+    assert all(_overlap(box, PLATE_A) == 0 for box in plan)
+    assert any(_overlap(box, neighbour) > 0 for box in plan)  # la vecina sí se tapa
