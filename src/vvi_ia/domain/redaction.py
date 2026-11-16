@@ -10,6 +10,10 @@ from dataclasses import dataclass
 from vvi_ia.domain.model import Box, BoxLabel
 
 REDACTION_MARGIN = 0.10
+# Una detección de patente con al menos esta parte de su área adentro de la caja exceptuada (la de la patente
+# denunciada) es la misma patente o un pedazo de ella (el mosaico de patentes chicas la detecta dos veces):
+# tapar esa detección taparía la denunciada.
+EXEMPT_CONTAINED = 0.8
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,19 @@ def expand(box: Box, margin: float, width: int, height: int) -> Box:
     )
 
 
+def contained_fraction(inner: Box, outer: Box) -> float:
+    """Qué parte del área de `inner` queda adentro de `outer` (0 si `inner` no tiene área)."""
+    if inner.area <= 0:
+        return 0.0
+    overlap = Box(
+        x1=max(inner.x1, outer.x1),
+        y1=max(inner.y1, outer.y1),
+        x2=min(inner.x2, outer.x2),
+        y2=min(inner.y2, outer.y2),
+    )
+    return overlap.area / inner.area
+
+
 def plan_redaction(
     detections: Sequence[Box] | None,
     thresholds: RedactionThresholds,
@@ -39,12 +56,16 @@ def plan_redaction(
     height: int,
     exempt_plates: Collection[Box] = (),
     margin: float = REDACTION_MARGIN,
+    exempt_contained: float | None = EXEMPT_CONTAINED,
 ) -> list[Box] | None:
     """Cajas a tapar con relleno opaco, o `None` si no se puede redactar (fail-closed).
 
     `detections` (las del detector de vehículos, de donde salen las patentes) es `None` cuando no hay
     modelo o falló la inferencia: en ese caso no hay plan. Es lo único de lo que depende la disponibilidad de
-    la redacción. Las patentes de `exempt_plates` (la que coincide con la reportada) no se tapan.
+    la redacción. Las patentes de `exempt_plates` (la que coincide con la reportada) no se tapan, ni tampoco
+    las cajas de patente que tienen adentro al menos `exempt_contained` de su área (la misma patente
+    detectada otra vez, o un pedazo): taparlas taparía la denunciada. Con `None` solo se exceptúan las cajas
+    de `exempt_plates` (el comportamiento anterior, para comparar en las mediciones).
     """
     if detections is None:
         return None
@@ -54,5 +75,9 @@ def plan_redaction(
         if plate.label == BoxLabel.PLATE
         and plate.conf >= thresholds.plate_min_conf
         and plate not in exempt_plates
+        and not (
+            exempt_contained is not None
+            and any(contained_fraction(plate, exempt) >= exempt_contained for exempt in exempt_plates)
+        )
     ]
     return [expand(box, margin, width, height) for box in boxes]

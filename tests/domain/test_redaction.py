@@ -1,5 +1,5 @@
 from vvi_ia.domain.model import Box, BoxLabel
-from vvi_ia.domain.redaction import RedactionThresholds, expand, plan_redaction
+from vvi_ia.domain.redaction import RedactionThresholds, contained_fraction, expand, plan_redaction
 
 THRESHOLDS = RedactionThresholds(plate_min_conf=0.20)
 W, H = 1000, 800
@@ -91,3 +91,66 @@ def test_el_margen_se_recorta_a_la_imagen() -> None:
     box = expand(Box(0, 0, 100, 100), 0.10, 105, H)
 
     assert (box.x1, box.y1, box.x2) == (0.0, 0.0, 105.0)
+
+
+# --- cajas contenidas en la patente exceptuada --------------------------------------------------
+
+
+def test_una_caja_contenida_en_la_patente_exceptuada_no_se_tapa() -> None:
+    """La misma patente detectada otra vez (o un pedazo, como en el mosaico) taparía la denunciada."""
+    reported = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
+    piece = Box(150, 110, 250, 150, 0.6, BoxLabel.PLATE)
+
+    plan = _plan([reported, piece], exempt=[reported])
+
+    assert plan == []
+
+
+def test_el_umbral_de_contenida_es_el_ochenta_por_ciento_del_area() -> None:
+    reported = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
+    inside_80 = Box(
+        220, 100, 320, 160, 0.9, BoxLabel.PLATE
+    )  # 80 de 100 px de ancho adentro: justo en el umbral
+    inside_79 = Box(221, 100, 321, 160, 0.9, BoxLabel.PLATE)  # 79 %: se tapa
+
+    assert _plan([reported, inside_80], exempt=[reported]) == []
+    plan = _plan([reported, inside_79], exempt=[reported])
+    assert plan is not None and len(plan) == 1
+
+
+def test_una_patente_ajena_que_solo_se_superpone_un_poco_se_tapa() -> None:
+    reported = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
+    neighbour = Box(280, 100, 480, 160, 0.9, BoxLabel.PLATE)  # 10 % adentro
+
+    plan = _plan([reported, neighbour], exempt=[reported])
+
+    assert plan is not None and len(plan) == 1
+
+
+def test_sin_patente_exceptuada_una_caja_contenida_en_otra_se_tapa_igual() -> None:
+    outer = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
+    inner = Box(150, 110, 250, 150, 0.9, BoxLabel.PLATE)
+
+    plan = _plan([outer, inner])
+
+    assert plan is not None and len(plan) == 2
+
+
+def test_sin_la_regla_de_contenidas_se_comporta_como_antes() -> None:
+    reported = Box(100, 100, 300, 160, 0.9, BoxLabel.PLATE)
+    piece = Box(150, 110, 250, 150, 0.6, BoxLabel.PLATE)
+
+    plan = plan_redaction(
+        [reported, piece], THRESHOLDS, W, H, exempt_plates=[reported], exempt_contained=None
+    )
+
+    assert plan is not None and len(plan) == 1  # el pedazo se tapa: es lo que se mide como "antes"
+
+
+def test_contained_fraction() -> None:
+    outer = Box(0, 0, 100, 100)
+
+    assert contained_fraction(Box(10, 10, 20, 20), outer) == 1.0
+    assert contained_fraction(Box(90, 0, 110, 100), outer) == 0.5
+    assert contained_fraction(Box(200, 200, 300, 300), outer) == 0.0
+    assert contained_fraction(Box(5, 5, 5, 9), outer) == 0.0  # sin área

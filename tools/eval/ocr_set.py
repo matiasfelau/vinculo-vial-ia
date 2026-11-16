@@ -17,6 +17,8 @@ Parte del export COCO (cajas de patente) y deja, fuera del repo, 300 recortes pa
 Escribe en `--out`: `recortes/NNN.png` (caja con 15 % de margen), `etiquetas.csv` (texto, formato y estado
 vacíos), `hojas/hoja-NN.jpg` (hojas de contacto para etiquetar mirando), `informe.json` (solo cifras) y
 `descartes.csv`.
+Con `--topup`, ya con las etiquetas cargadas, deja una sola lectura por patente repetida (según el `texto`) y
+repone hasta `--n` patentes legibles de auto con candidatas nuevas.
 No corre ningún OCR. La consola muestra solo cifras. Uso: ver `tools/eval/README.md`.
 """
 
@@ -88,6 +90,8 @@ MAX_PER_PHOTO = 2  # patentes del set que pueden salir de la misma foto
 REASON_MOTORCYCLE = "probable_moto"
 REASON_INVALID = "caja_invalida"
 REASON_PHOTO_CAP = "exceso_por_foto"
+REASON_REPEATED = "texto_repetido"
+REPEATED_COLUMNS = ("id", "archivo", "caja", "conservada")
 # Una caja contiene a otra de la misma foto si tiene adentro al menos esto de su área y la otra es bastante
 # más chica: es una hoja de patentes, un auto entero o una caja doble, no una patente.
 NESTED_INSIDE = 0.8
@@ -396,13 +400,14 @@ def write_csv(path: Path, columns: Sequence[str], rows: Sequence[dict[str, str]]
         writer.writerows(rows)
 
 
-def build_outputs(
+def render_items(
     root: Path,
     chosen: Sequence[tuple[str, Described]],
     out: Path,
     previous: dict[str, dict[str, str]] | None = None,
-) -> None:
-    """Recortes, etiquetas.csv, cajas.csv y hojas de contacto por id; `previous` conserva filas existentes."""
+    sheet_prefix: str = "hoja",
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Recortes y hojas (`hojas/<sheet_prefix>-NN.jpg`) por id; devuelve las filas de etiquetas y de cajas."""
     (out / "recortes").mkdir(parents=True, exist_ok=True)
     (out / "hojas").mkdir(parents=True, exist_ok=True)
     labels: list[dict[str, str]] = []
@@ -445,9 +450,21 @@ def build_outputs(
         tiles.append(contact_tile(f"{ident}  {mark}", crop, color, pixel_box(annotation.box, width, height)))
         if len(tiles) == per_sheet or position == len(chosen):
             write_jpeg(
-                out / "hojas" / f"hoja-{(position - 1) // per_sheet + 1:02d}.jpg", sheet_from_tiles(tiles)
+                out / "hojas" / f"{sheet_prefix}-{(position - 1) // per_sheet + 1:02d}.jpg",
+                sheet_from_tiles(tiles),
             )
             tiles = []
+    return labels, boxes
+
+
+def build_outputs(
+    root: Path,
+    chosen: Sequence[tuple[str, Described]],
+    out: Path,
+    previous: dict[str, dict[str, str]] | None = None,
+) -> None:
+    """Recortes, etiquetas.csv, cajas.csv y hojas de contacto por id; `previous` conserva filas existentes."""
+    labels, boxes = render_items(root, chosen, out, previous)
     write_csv(out / "etiquetas.csv", LABEL_COLUMNS, labels)
     write_csv(out / "cajas.csv", BOX_COLUMNS, boxes)
 
@@ -547,7 +564,12 @@ def build_pool(source: Path, reference: Path, night_brightness: float = NIGHT_BR
             big_enough.append(annotation)
     sized = describe(source, big_enough)
 
-    references = describe(reference, load_annotations(reference))
+    reference_annotations = load_annotations(reference)
+    if (
+        not reference_annotations
+    ):  # una carpeta mal escrita dejaría pasar las fotos con las que se calibró el OCR
+        raise ValueError(f"{reference} no tiene el export COCO del dataset de calibración (train/valid/test)")
+    references = describe(reference, reference_annotations)
     clean = []
     for item in sized:
         found = in_reference(item, references)
@@ -661,6 +683,37 @@ class Swap:
     replacement: Described
 
 
+def pick_candidates(
+    eligible: Sequence[Described],
+    count: int,
+    per_photo_count: Counter[tuple[str, str]],
+    seed: int,
+    per_photo: int = MAX_PER_PHOTO,
+    allow_short: bool = False,
+) -> list[Described]:
+    """`count` candidatas con la semilla fija: primero las estimadas de noche, sin pasar el tope por foto.
+
+    `per_photo_count` trae las patentes que cada foto ya tiene en el set y se actualiza con las elegidas.
+    Si no alcanzan las candidatas falla, salvo con `allow_short` (devuelve las que haya).
+    """
+    nights = [item for item in eligible if item.light == LIGHT_NIGHT]
+    days = [item for item in eligible if item.light != LIGHT_NIGHT]
+    rng = random.Random(seed)  # noqa: S311 - muestreo de fotos, no criptografía
+    rng.shuffle(nights)
+    rng.shuffle(days)
+    picks: list[Described] = []
+    for candidate in nights + days:
+        if len(picks) == count:
+            break
+        key = photo_of(candidate.annotation)
+        if per_photo_count[key] < per_photo:
+            picks.append(candidate)
+            per_photo_count[key] += 1
+    if len(picks) < count and not allow_short:
+        raise ValueError(f"hay {len(picks)} candidatas de auto y se necesitan {count}")
+    return picks
+
+
 def plan_swaps(
     first: Sequence[Described],
     pool: Sequence[Described],
@@ -688,21 +741,7 @@ def plan_swaps(
             removed.append((position, item, reason))
     taken = {id(item) for item in first}
     eligible = [item for item in pool if id(item) not in taken and classify(item.annotation, invalid) is None]
-    nights = [item for item in eligible if item.light == LIGHT_NIGHT]
-    days = [item for item in eligible if item.light != LIGHT_NIGHT]
-    rng = random.Random(seed)  # noqa: S311 - muestreo de fotos, no criptografía
-    rng.shuffle(nights)
-    rng.shuffle(days)
-    picks: list[Described] = []
-    for candidate in nights + days:
-        if len(picks) == len(removed):
-            break
-        key = photo_of(candidate.annotation)
-        if per_photo_count[key] < per_photo:
-            picks.append(candidate)
-            per_photo_count[key] += 1
-    if len(picks) < len(removed):
-        raise ValueError(f"hay {len(picks)} candidatas de auto y se necesitan {len(removed)}")
+    picks = pick_candidates(eligible, len(removed), per_photo_count, seed, per_photo)
     return [
         Swap(f"{position + 1:03d}", item, reason, pick)
         for (position, item, reason), pick in zip(removed, picks, strict=True)
@@ -804,6 +843,131 @@ def refresh(
     return summary
 
 
+def topup(
+    source: Path,
+    reference: Path,
+    out: Path,
+    count: int = DEFAULT_COUNT,
+    seed: int = DEFAULT_SEED,
+    night_brightness: float = NIGHT_BRIGHTNESS,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Una sola lectura por patente repetida y reposición hasta `count` patentes legibles de auto.
+
+    Parte del set etiquetado de `out`. Agrupa por `texto` y conserva una fila por patente (la de noche,
+    después la de recorte más grande, después la de menor id); las demás salen y quedan en `repetidas.csv`
+    y `descartes.csv`. Después cuenta las legibles de auto (formato anterior o Mercosur) y repone las que
+    faltan para llegar a `count` con candidatas de auto del resto del export (mismos filtros y semilla,
+    primero las estimadas de noche, como mucho 2 por foto), con ids nuevos a partir del mayor. Las filas
+    conservadas mantienen id y etiquetas. Antes de escribir copia `out` a `<out>-vN`. Escribe
+    `hojas/reposicion-<primer id>-NN.jpg` con las nuevas y reconstruye el xlsx con las etiquetas cargadas
+    y las filas nuevas vacías. No corre ningún OCR.
+    Las repuestas pueden salir ilegibles al etiquetarlas: se repite hasta llegar a `count`.
+    """
+    rows = ocr_labels.read_label_rows(out)
+    boxes = {row["id"]: row for row in ocr_labels.read_csv_rows(out / ocr_labels.BOXES_NAME)}
+    removed = dict(ocr_labels.repeated_texts(rows, lambda row: ocr_labels.crop_area(out, row)))
+    kept = [row for row in rows if row["id"] not in removed]
+    legible = sum(ocr_labels.is_legible_car(row) for row in kept)
+    missing = max(0, count - legible)
+    summary: dict[str, Any] = {
+        "filas": len(rows),
+        "repetidas_quitadas": len(removed),
+        "patentes_con_repetidas": len(set(removed.values())),
+        "legibles_de_auto_antes": sum(ocr_labels.is_legible_car(row) for row in rows),
+        "legibles_de_auto_sin_repetidas": legible,
+        "sin_estado": sum(not row["estado"] for row in kept),
+        "pares_a_un_caracter": len(ocr_labels.near_texts(kept)),
+        "faltan": missing,
+    }
+    if not removed and not missing:
+        summary["agregadas"] = 0
+        return summary
+    discards_path = out / "descartes.csv"
+    discards = ocr_labels.read_csv_rows(discards_path) if discards_path.is_file() else []
+    used = {(row["archivo"], boxes[row["id"]]["caja"]) for row in rows}
+    used |= {(d["archivo"], d["caja"]) for d in discards if d["motivo"] == REASON_REPEATED}
+    picks: list[Described] = []
+    if missing:
+        built = build_pool(source, reference, night_brightness)
+        invalid = invalid_boxes(built.annotations)
+        eligible = [
+            item
+            for item in built.items
+            if classify(item.annotation, invalid) is None
+            and (item.annotation.name, box_text(item.annotation.box)) not in used
+        ]
+        taken: Counter[tuple[str, str]] = Counter()
+        for row in kept:
+            split, file = row["archivo"].split("/", 1)
+            taken[(split, file)] += 1
+        picks = pick_candidates(eligible, missing, taken, seed, allow_short=True)
+        random.Random(seed).shuffle(picks)  # noqa: S311 - el orden de los ids no delata la luz
+    first = max(int(row["id"]) for row in rows) + 1
+    chosen = [(f"{first + n:03d}", item) for n, item in enumerate(picks)]
+    summary.update(
+        {
+            "agregadas": len(picks),
+            "agregadas_estimadas_de_noche": sum(item.light == LIGHT_NIGHT for item in picks),
+            "agregadas_revisar_moto": sum(needs_moto_review(item.annotation) for item in picks),
+            "ids_nuevos": f"{chosen[0][0]}-{chosen[-1][0]}" if chosen else "",
+            "faltan_tras_reponer": missing - len(picks),
+        }
+    )
+    if dry_run:
+        return summary
+    xlsx_path = out / ocr_labels.XLSX_NAME
+    if xlsx_path.exists():
+        with xlsx_path.open("ab"):  # con Excel abierto falla acá, antes de tocar nada
+            pass
+    shutil.copytree(out, free_backup(out))
+    new_labels, new_boxes = render_items(source, chosen, out, sheet_prefix=f"reposicion-{first:03d}")
+    kept_labels = [{column: row.get(column, "") for column in LABEL_COLUMNS} for row in kept]
+    write_csv(out / "etiquetas.csv", LABEL_COLUMNS, kept_labels + new_labels)
+    write_csv(out / ocr_labels.BOXES_NAME, BOX_COLUMNS, [boxes[row["id"]] for row in kept] + new_boxes)
+    repeated_path = out / "repetidas.csv"
+    previous_repeated = ocr_labels.read_csv_rows(repeated_path) if repeated_path.is_file() else []
+    write_csv(
+        repeated_path,
+        REPEATED_COLUMNS,
+        previous_repeated
+        + [
+            {
+                "id": gone,
+                "archivo": boxes[gone]["archivo"],
+                "caja": boxes[gone]["caja"],
+                "conservada": keep,
+            }
+            for gone, keep in sorted(removed.items())
+        ],
+    )
+    write_csv(
+        discards_path,
+        DISCARD_COLUMNS,
+        discards
+        + [
+            {
+                "archivo": boxes[gone]["archivo"],
+                "caja": boxes[gone]["caja"],
+                "motivo": REASON_REPEATED,
+                "detalle": f"se conserva el id {keep}",
+            }
+            for gone, keep in sorted(removed.items())
+        ],
+    )
+    fresh = out / "etiquetas.nuevo.xlsx"
+    ocr_labels.build_xlsx(out, source, fresh)
+    os.replace(fresh, out / ocr_labels.XLSX_NAME)  # falla si Excel lo tiene abierto: queda el respaldo
+    summary["xlsx_regenerado"] = True
+    report_path = out / "informe.json"
+    report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
+    report.setdefault("reposiciones", []).append(
+        {k: v for k, v in summary.items() if k not in ("filas", "xlsx_regenerado")}
+    )
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
+    return summary
+
+
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0] if __doc__ else None)
     eval_dir = os.environ.get("EVAL_DATA_DIR")
@@ -830,12 +994,24 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="limpia un set (motos, cajas inválidas y exceso por foto) y escribe el resultado en --out",
     )
     parser.add_argument(
+        "--topup",
+        action="store_true",
+        help="una lectura por patente repetida (según el texto etiquetado) y reposición hasta --n legibles",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="con --topup, solo muestra las cifras: no escribe nada"
+    )
+    parser.add_argument(
         "--original",
         type=Path,
         default=None,
         help="con --refresh, el set del que parte (por defecto --out); --out se respalda en <out>-vN",
     )
     args = parser.parse_args(argv)
+    if args.topup and (args.refresh or args.original):
+        parser.error("--topup no se combina con --refresh ni --original")
+    if args.dry_run and not args.topup:
+        parser.error("--dry-run va con --topup")
     for name in ("src", "reference", "out"):
         if getattr(args, name) is None:
             parser.error(f"indicá --{name} o definí EVAL_DATA_DIR")
@@ -849,11 +1025,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("Las fotos y la salida no pueden estar dentro del repositorio: tienen patentes de terceros.")
         return 1
     existing = [name for name in ("etiquetas.csv", ocr_labels.XLSX_NAME) if (args.out / name).exists()]
-    if not args.refresh and existing:
+    if not (args.refresh or args.topup) and existing:
         print(f"{args.out / existing[0]} ya existe: no se pisa (puede tener etiquetas). Usá otra --out.")
         return 1
     try:
-        if args.refresh:
+        if args.topup:
+            report = topup(
+                args.src,
+                args.reference,
+                args.out,
+                args.n,
+                args.seed,
+                args.night_brightness,
+                dry_run=args.dry_run,
+            )
+        elif args.refresh:
             report = refresh(
                 args.src,
                 args.reference,
