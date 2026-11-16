@@ -876,6 +876,9 @@ def topup(
         "patentes_con_repetidas": len(set(removed.values())),
         "legibles_de_auto_antes": sum(ocr_labels.is_legible_car(row) for row in rows),
         "legibles_de_auto_sin_repetidas": legible,
+        "legibles_de_auto_de_noche": sum(
+            ocr_labels.is_legible_car(row) and row.get("luz") == LIGHT_NIGHT for row in kept
+        ),
         "sin_estado": sum(not row["estado"] for row in kept),
         "pares_a_un_caracter": len(ocr_labels.near_texts(kept)),
         "faltan": missing,
@@ -902,6 +905,9 @@ def topup(
             split, file = row["archivo"].split("/", 1)
             taken[(split, file)] += 1
         picks = pick_candidates(eligible, missing, taken, seed, allow_short=True)
+        summary["candidatas_en_el_export"] = len(eligible)
+        summary["candidatas_de_noche_en_el_export"] = sum(item.light == LIGHT_NIGHT for item in eligible)
+        summary["candidatas_que_quedan"] = len(eligible) - len(picks)
         random.Random(seed).shuffle(picks)  # noqa: S311 - el orden de los ids no delata la luz
     first = max(int(row["id"]) for row in rows) + 1
     chosen = [(f"{first + n:03d}", item) for n, item in enumerate(picks)]
@@ -916,6 +922,10 @@ def topup(
     )
     if dry_run:
         return summary
+    if len(picks) < missing:
+        raise ValueError(
+            f"el export se agotó: faltan {missing} y hay {len(picks)} candidatas; no se escribió nada"
+        )
     xlsx_path = out / ocr_labels.XLSX_NAME
     if xlsx_path.exists():
         with xlsx_path.open("ab"):  # con Excel abierto falla acá, antes de tocar nada

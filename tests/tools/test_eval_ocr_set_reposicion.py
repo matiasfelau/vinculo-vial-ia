@@ -109,18 +109,32 @@ def test_las_repuestas_no_son_ninguna_de_las_que_estaban_ni_la_repetida_quitada(
     src, reference, out = labeled_set(tmp_path)
     before = {row["archivo"] for row in read(out / "etiquetas.csv")}
 
-    topup(src, reference, out, count=8)  # faltan 5 y solo hay 4 candidatas
+    topup(src, reference, out, count=7)  # faltan 4 y hay 4 candidatas
 
     new = [row["archivo"] for row in read(out / "etiquetas.csv") if row["id"] > "006"]
     assert len(new) == len(set(new)) == 4 and not set(new) & before
 
 
-def test_si_no_alcanzan_las_candidatas_repone_las_que_hay_y_lo_dice(tmp_path: Path) -> None:
+def test_si_el_export_se_agota_no_escribe_nada_y_lo_dice(tmp_path: Path) -> None:
+    src, reference, out = labeled_set(tmp_path)
+    before = (out / "etiquetas.csv").read_bytes()
+
+    with pytest.raises(ValueError, match="el export se agotó: faltan 5 y hay 4"):
+        topup(src, reference, out, count=8)
+
+    assert (out / "etiquetas.csv").read_bytes() == before
+    assert not out.with_name(out.name + "-v1").exists() and not (out / "repetidas.csv").exists()
+
+
+def test_en_seco_informa_las_candidatas_que_hay_y_las_que_quedan(tmp_path: Path) -> None:
     src, reference, out = labeled_set(tmp_path)
 
-    summary = topup(src, reference, out, count=8)
+    summary = topup(src, reference, out, count=5, dry_run=True)
+    short = topup(src, reference, out, count=8, dry_run=True)
 
-    assert summary["faltan"] == 5 and summary["agregadas"] == 4 and summary["faltan_tras_reponer"] == 1
+    assert summary["candidatas_en_el_export"] == 4 and summary["candidatas_que_quedan"] == 2
+    assert summary["legibles_de_auto_de_noche"] == 1  # la 002, la que se conserva
+    assert short["faltan"] == 5 and short["agregadas"] == 4 and short["faltan_tras_reponer"] == 1
 
 
 def test_con_menos_patentes_de_las_pedidas_no_hace_falta_reponer_pero_igual_quita_repetidas(
