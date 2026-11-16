@@ -8,9 +8,11 @@ Parte del export COCO (cajas de patente) y deja, fuera del repo, 300 recortes pa
 3. Saca los duplicados y casi duplicados: la misma patente en otra foto, a otra escala o con otra compresión
    (se conserva el de mayor resolución).
 4. Clasifica cada foto en día o noche por el brillo medio de la escena sin la patente.
-5. Saca las probables motos (relación ancho/alto de la caja menor que 1,8) y las cajas inválidas (con varias
-   patentes adentro): el servicio lee una sola línea y esas cajas no son una patente.
-6. Elige `--n` con semilla fija, al menos `--night-min` de noche, y los numera en orden aleatorio.
+5. Saca las probables motos (relación ancho/alto de la caja menor que 1,2) y las cajas inválidas (con varias
+   patentes adentro): el servicio lee una sola línea y esas cajas no son una patente. Entre 1,2 y 1,5 las deja
+   y las marca con `revisar_moto = sí` para que quien etiqueta lo confirme.
+6. Elige `--n` con semilla fija, al menos `--night-min` de noche y como mucho 2 por foto, y los numera en
+   orden aleatorio.
 
 Escribe en `--out`: `recortes/NNN.png` (caja con 15 % de margen), `etiquetas.csv` (texto, formato y estado
 vacíos), `hojas/hoja-NN.jpg` (hojas de contacto para etiquetar mirando), `informe.json` (solo cifras) y
@@ -25,6 +27,7 @@ import os
 import random
 import shutil
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,22 +71,26 @@ MIN_STROKE_NCC = 0.75
 MIN_SAME_PHOTO_NCC = 0.95
 PHOTO_SIZE = (32, 32)
 
-LABEL_COLUMNS = ("id", "archivo", "recorte", "texto", "formato", "luz", "estado")
+REVIEW_COLUMN = "revisar_moto"
+REVIEW_VALUE = "sí"
+LABEL_COLUMNS = ("id", "archivo", "recorte", "texto", "formato", "luz", "estado", REVIEW_COLUMN)
 DISCARD_COLUMNS = ("archivo", "caja", "motivo", "detalle")
 BOX_COLUMNS = ("id", "archivo", "caja", "relacion_aspecto")
 REPLACEMENT_COLUMNS = ("id", "archivo", "caja", "motivo", "reemplazada_por")
 LIGHT_DAY = "dia"
 LIGHT_NIGHT = "noche"
-MOTORCYCLE_ASPECT = 1.8  # ancho/alto de la caja: por debajo, probable moto (patente de dos líneas)
+MOTORCYCLE_ASPECT = 1.2  # ancho/alto de la caja: por debajo, probable moto (patente de dos líneas)
+REVIEW_ASPECT = 1.5  # de MOTORCYCLE_ASPECT a esto queda en el set, con `revisar_moto`
+MAX_PER_PHOTO = 2  # patentes del set que pueden salir de la misma foto
 REASON_MOTORCYCLE = "probable_moto"
 REASON_INVALID = "caja_invalida"
+REASON_PHOTO_CAP = "exceso_por_foto"
 # Una caja contiene a otra de la misma foto si tiene adentro al menos esto de su área y la otra es bastante
 # más chica: es una hoja de patentes, un auto entero o una caja doble, no una patente.
 NESTED_INSIDE = 0.8
 NESTED_SIZE = 0.6
 # Cajas con varias patentes sin otra adentro, vistas a ojo: (split/foto sin el hash de Roboflow, ancho, alto).
 KNOWN_INVALID = (("train/17397969544621434_jpg", 142, 212),)  # pila de cinco patentes
-BACKUP_SUFFIX = "-v1"
 
 TILE_W, TILE_H = 480, 200
 CROP_AREA = (340, 172)
@@ -282,17 +289,50 @@ def dedupe(items: Sequence[Described]) -> tuple[list[Described], list[tuple[Desc
     return [item for index, item in enumerate(items) if index not in removed], dropped
 
 
-def select(pool: Sequence[Described], count: int, night_min: int, seed: int) -> list[Described]:
-    """`count` al azar con semilla fija y al menos `night_min` de noche, en orden aleatorio."""
+def photo_of(annotation: Annotation) -> tuple[str, str]:
+    return annotation.split, annotation.file
+
+
+def _capped_sample(
+    rng: random.Random, items: Sequence[Described], count: int, per_photo: int, already: Sequence[Described]
+) -> list[Described]:
+    """`count` al azar con como mucho `per_photo` por foto, contando las que ya estaban (`already`)."""
+    taken = Counter(photo_of(item.annotation) for item in already)
+    picked: list[Described] = []
+    for item in rng.sample(list(items), len(items)):
+        if len(picked) == count:
+            break
+        key = photo_of(item.annotation)
+        if taken[key] < per_photo:
+            picked.append(item)
+            taken[key] += 1
+    if len(picked) < count:
+        raise ValueError(f"no alcanzan las candidatas con como mucho {per_photo} por foto")
+    return picked
+
+
+def select(
+    pool: Sequence[Described], count: int, night_min: int, seed: int, per_photo: int | None = None
+) -> list[Described]:
+    """`count` al azar con semilla fija y al menos `night_min` de noche, en orden aleatorio.
+
+    Con `per_photo`, como mucho esa cantidad de cada foto. Sin él, la selección es la de siempre.
+    """
     nights = [item for item in pool if item.light == LIGHT_NIGHT]
     if len(nights) < night_min:
         raise ValueError(f"hay {len(nights)} de noche y se piden al menos {night_min}")
     if len(pool) < count:
         raise ValueError(f"hay {len(pool)} candidatas y se piden {count}")
     rng = random.Random(seed)  # noqa: S311 - muestreo de fotos, no criptografía
-    chosen = rng.sample(nights, night_min)
-    taken = {id(item) for item in chosen}
-    chosen += rng.sample([item for item in pool if id(item) not in taken], count - night_min)
+    if per_photo is None:
+        chosen = rng.sample(nights, night_min)
+        taken = {id(item) for item in chosen}
+        chosen += rng.sample([item for item in pool if id(item) not in taken], count - night_min)
+    else:
+        chosen = _capped_sample(rng, nights, night_min, per_photo, [])
+        taken = {id(item) for item in chosen}
+        rest = [item for item in pool if id(item) not in taken]
+        chosen += _capped_sample(rng, rest, count - night_min, per_photo, chosen)
     rng.shuffle(chosen)
     return chosen
 
@@ -373,7 +413,7 @@ def build_outputs(
             raise OSError(f"no se pudo leer {annotation.name}")
         crop = crop_with_margin(color, annotation)
         write_png(out / "recortes" / f"{ident}.png", crop)
-        labels.append(
+        label = dict(
             (previous or {}).get(ident)
             or {
                 "id": ident,
@@ -385,6 +425,8 @@ def build_outputs(
                 "estado": "",
             }
         )
+        label[REVIEW_COLUMN] = REVIEW_VALUE if needs_moto_review(annotation) else ""
+        labels.append(label)
         boxes.append(
             {
                 "id": ident,
@@ -395,6 +437,7 @@ def build_outputs(
         )
         mark = "N" if item.light == LIGHT_NIGHT else "D"
         mark += "" if item.light_is_certain else "?"
+        mark += "  moto?" if needs_moto_review(annotation) else ""
         height, width = color.shape[:2]
         tiles.append(contact_tile(f"{ident}  {mark}", crop, color, pixel_box(annotation.box, width, height)))
         if len(tiles) == per_sheet or position == len(chosen):
@@ -463,6 +506,11 @@ def classify(annotation: Annotation, invalid: set[Annotation]) -> str | None:
     return REASON_MOTORCYCLE if aspect(annotation) < MOTORCYCLE_ASPECT else None
 
 
+def needs_moto_review(annotation: Annotation) -> bool:
+    """Relación entre 1,2 y 1,5: se queda en el set y quien etiqueta confirma si es una moto."""
+    return MOTORCYCLE_ASPECT <= aspect(annotation) < REVIEW_ASPECT
+
+
 @dataclass
 class Pool:
     """Las cajas candidatas tras los descartes de tamaño, referencia y duplicados."""
@@ -523,6 +571,10 @@ def chosen_stats(chosen: Sequence[Described]) -> dict[str, Any]:
         "elegidas_de_noche": sum(item.light == LIGHT_NIGHT for item in chosen),
         "elegidas_sin_escena_para_juzgar_la_luz": sum(not item.light_is_certain for item in chosen),
         "elegidas_probable_moto": sum(aspect(item.annotation) < MOTORCYCLE_ASPECT for item in chosen),
+        "elegidas_revisar_moto": sum(needs_moto_review(item.annotation) for item in chosen),
+        "elegidas_max_por_foto": max(
+            Counter(photo_of(item.annotation) for item in chosen).values(), default=0
+        ),
         "elegidas_por_split": {
             split: sum(item.annotation.split == split for item in chosen) for split in SPLITS
         },
@@ -539,7 +591,9 @@ def parameters(count: int, night_min: int, seed: int, night_brightness: float) -
         "caja_minima": f"{MIN_BOX_WIDTH}x{MIN_BOX_HEIGHT}",
         "ncc_crudo_minimo": MIN_RAW_NCC,
         "ncc_trazos_minimo": MIN_STROKE_NCC,
-        "relacion_aspecto_minima": MOTORCYCLE_ASPECT,
+        "relacion_aspecto_moto": MOTORCYCLE_ASPECT,
+        "relacion_aspecto_revisar_moto": REVIEW_ASPECT,
+        "maximo_por_foto": MAX_PER_PHOTO,
     }
 
 
@@ -569,7 +623,7 @@ def run(
                     "detalle": f"relacion {aspect(item.annotation):.2f}",
                 }
             )
-    chosen = select(pool, count, night_min, seed)
+    chosen = select(pool, count, night_min, seed, MAX_PER_PHOTO)
     build_outputs(source, [(f"{n:03d}", item) for n, item in enumerate(chosen, start=1)], out)
     write_csv(out / "descartes.csv", DISCARD_COLUMNS, built.discards)
 
@@ -610,17 +664,30 @@ class Swap:
 
 
 def plan_swaps(
-    first: Sequence[Described], pool: Sequence[Described], invalid: set[Annotation], seed: int
+    first: Sequence[Described],
+    pool: Sequence[Described],
+    invalid: set[Annotation],
+    seed: int,
+    per_photo: int = MAX_PER_PHOTO,
 ) -> list[Swap]:
-    """Reemplazos de las cajas que no son de auto por candidatas de auto que no estaban elegidas.
+    """Reemplazos de las cajas que no sirven por candidatas de auto que no estaban elegidas.
 
-    Con la misma semilla; primero las estimadas de noche. Cada reemplazo toma el id de la caja que sale.
+    Salen las probables motos, las cajas inválidas y las que pasan el tope por foto (se conservan las de menor
+    id). Con la misma semilla; primero las estimadas de noche, sin pasar el tope. Cada reemplazo toma el id de
+    la caja que sale.
     """
-    removed = [
-        (position, item, reason)
-        for position, item in enumerate(first)
-        if (reason := classify(item.annotation, invalid)) is not None
-    ]
+    per_photo_count: Counter[tuple[str, str]] = Counter()
+    removed: list[tuple[int, Described, str]] = []
+    for position, item in enumerate(first):
+        reason = classify(item.annotation, invalid)
+        if reason is None:
+            key = photo_of(item.annotation)
+            if per_photo_count[key] >= per_photo:
+                reason = REASON_PHOTO_CAP
+            else:
+                per_photo_count[key] += 1
+        if reason is not None:
+            removed.append((position, item, reason))
     taken = {id(item) for item in first}
     eligible = [item for item in pool if id(item) not in taken and classify(item.annotation, invalid) is None]
     nights = [item for item in eligible if item.light == LIGHT_NIGHT]
@@ -628,13 +695,32 @@ def plan_swaps(
     rng = random.Random(seed)  # noqa: S311 - muestreo de fotos, no criptografía
     rng.shuffle(nights)
     rng.shuffle(days)
-    picks = nights + days
+    picks: list[Described] = []
+    for candidate in nights + days:
+        if len(picks) == len(removed):
+            break
+        key = photo_of(candidate.annotation)
+        if per_photo_count[key] < per_photo:
+            picks.append(candidate)
+            per_photo_count[key] += 1
     if len(picks) < len(removed):
         raise ValueError(f"hay {len(picks)} candidatas de auto y se necesitan {len(removed)}")
     return [
         Swap(f"{position + 1:03d}", item, reason, pick)
-        for (position, item, reason), pick in zip(removed, picks, strict=False)
+        for (position, item, reason), pick in zip(removed, picks, strict=True)
     ]
+
+
+def has_labels(rows: Sequence[dict[str, str]]) -> bool:
+    return any(row["texto"] or row["formato"] or row["estado"] for row in rows)
+
+
+def free_backup(out: Path) -> Path:
+    """`<out>-v1`, o el primer `<out>-vN` que no exista."""
+    number = 1
+    while out.with_name(f"{out.name}-v{number}").exists():
+        number += 1
+    return out.with_name(f"{out.name}-v{number}")
 
 
 def refresh(
@@ -646,15 +732,24 @@ def refresh(
     seed: int = DEFAULT_SEED,
     night_brightness: float = NIGHT_BRIGHTNESS,
     dry_run: bool = False,
+    original: Path | None = None,
 ) -> dict[str, Any]:
-    """Limpia un set ya armado: reemplaza motos y cajas inválidas y conserva los ids de las demás.
+    """Limpia un set: reemplaza motos, cajas inválidas y el exceso por foto, y conserva los demás ids.
 
-    Reconstruye la selección original (mismos filtros y semilla), la compara con `etiquetas.csv` y, antes de
-    escribir, copia la carpeta a `<out>-v1`. Si `etiquetas.csv` ya tiene texto, formato o estado, no lo pisa.
+    Parte de `original` (por defecto `out`): reconstruye su selección (mismos filtros y semilla) y la compara
+    con su `etiquetas.csv`. Escribe el set limpio en `out`; si `out` existe, antes lo copia a `<out>-vN`.
+    No pisa etiquetas ya cargadas, ni en `original` ni en `out`.
     """
-    rows = read_labels(out / "etiquetas.csv")
-    if any(row["texto"] or row["formato"] or row["estado"] for row in rows):
+    original = original or out
+    rows = read_labels(original / "etiquetas.csv")
+    if has_labels(rows):
         raise ValueError("etiquetas.csv ya tiene etiquetas cargadas: no se pisa")
+    if (
+        original != out
+        and (out / "etiquetas.csv").exists()
+        and has_labels(read_labels(out / "etiquetas.csv"))
+    ):
+        raise ValueError("el etiquetas.csv de --out ya tiene etiquetas cargadas: no se pisa")
     built = build_pool(source, reference, night_brightness)
     first = select(built.items, count, night_min, seed)
     if [row["archivo"] for row in rows] != [item.annotation.name for item in first]:
@@ -673,6 +768,7 @@ def refresh(
         "reemplazadas": len(swaps),
         "reemplazadas_probable_moto": sum(s.reason == REASON_MOTORCYCLE for s in swaps),
         "reemplazadas_caja_invalida": sum(s.reason == REASON_INVALID for s in swaps),
+        "reemplazadas_exceso_por_foto": sum(s.reason == REASON_PHOTO_CAP for s in swaps),
         "reemplazadas_estimadas_de_noche": sum(s.removed.light == LIGHT_NIGHT for s in swaps),
         "reemplazos_estimados_de_noche": sum(s.replacement.light == LIGHT_NIGHT for s in swaps),
         "conservadas": len(first) - len(swaps),
@@ -681,10 +777,8 @@ def refresh(
     if dry_run:
         summary["swaps"] = swaps
         return summary
-    backup = out.with_name(out.name + BACKUP_SUFFIX)
-    if backup.exists():
-        raise ValueError(f"{backup} ya existe: no se pisa")
-    shutil.copytree(out, backup)
+    if out.exists():
+        shutil.copytree(out, free_backup(out))
     previous = {row["id"]: row for row in rows if row["id"] not in swapped}
     build_outputs(
         source, [(f"{n:03d}", item) for n, item in enumerate(final, start=1)], out, previous=previous
@@ -704,8 +798,11 @@ def refresh(
             for swap in swaps
         ],
     )
-    report_path = out / "informe.json"
+    if original != out and (original / "descartes.csv").exists():
+        shutil.copyfile(original / "descartes.csv", out / "descartes.csv")
+    report_path = original / "informe.json"
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
+    report.pop("limpieza", None)
     report.update(chosen_stats(final))
     report["limpieza"] = {k: v for k, v in summary.items() if k.startswith(("reemplaz", "conserv"))}
     report["parametros"] = parameters(count, night_min, seed, night_brightness)
@@ -736,7 +833,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="limpia el set ya armado en --out (reemplaza motos y cajas inválidas, conserva los demás ids)",
+        help="limpia un set (motos, cajas inválidas y exceso por foto) y escribe el resultado en --out",
+    )
+    parser.add_argument(
+        "--original",
+        type=Path,
+        default=None,
+        help="con --refresh, el set del que parte (por defecto --out); --out se respalda en <out>-vN",
     )
     args = parser.parse_args(argv)
     for name in ("src", "reference", "out"):
@@ -747,7 +850,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
-    if any(path.resolve().is_relative_to(REPO_ROOT) for path in (args.src, args.reference, args.out)):
+    paths = [args.src, args.reference, args.out] + ([args.original] if args.original else [])
+    if any(path.resolve().is_relative_to(REPO_ROOT) for path in paths):
         print("Las fotos y la salida no pueden estar dentro del repositorio: tienen patentes de terceros.")
         return 1
     if not args.refresh and (args.out / "etiquetas.csv").exists():
@@ -756,7 +860,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.refresh:
             report = refresh(
-                args.src, args.reference, args.out, args.n, args.night_min, args.seed, args.night_brightness
+                args.src,
+                args.reference,
+                args.out,
+                args.n,
+                args.night_min,
+                args.seed,
+                args.night_brightness,
+                original=args.original,
             )
         else:
             report = run(
