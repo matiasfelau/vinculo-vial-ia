@@ -226,3 +226,28 @@ def test_s5_va_en_total_y_por_luz_contra_las_etiquetas_de_todo_el_set() -> None:
         block["por_luz"]["dia"]["S5"]["todos"]["pares"] == 2
     )  # una lectura de día contra las 2 etiquetas ajenas
     assert block["por_luz"]["noche"]["S5"]["todos"]["pares"] == 4
+
+
+def test_las_lecturas_con_id_se_escriben_para_cruzarlas_con_otro_lector(tmp_path: Path) -> None:
+    set_dir, photos = labeled_set(tmp_path)
+    loaded = ocr.load_set_samples(set_dir)
+    items, _ = ocr.read_samples(loaded.samples, photos, FixedReader("AB123CD"))
+    out = tmp_path / "readings.csv"
+
+    written = ocr.write_readings(out, [reading for reading, _ in items])
+
+    assert written == 3
+    with out.open(encoding="utf-8", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert [(r["id"], r["lectura"], r["confianza"], r["falla"]) for r in rows] == [
+        ("001", "AB123CD", "0.9500", "no"),
+        ("002", "AB123CD", "0.9500", "no"),
+        ("004", "AB123CD", "0.9500", "no"),
+    ]
+
+
+def test_sin_id_no_se_escribe_ninguna_lectura(tmp_path: Path) -> None:
+    out = tmp_path / "readings.csv"
+
+    assert ocr.write_readings(out, [reading("AB123CD", "AB123CD", 0.95, "")]) == 0  # type: ignore[list-item]
+    assert not out.exists()
