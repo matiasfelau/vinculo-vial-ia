@@ -351,7 +351,7 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
    completas, no autos ni caracteres sueltos. Las excepciones son pocas y aisladas: una hoja entera con decenas de
    patentes anotada como una caja, una pila de patentes, un auto entero con la patente anotada adentro, alguna caja
    cortada por el borde de la foto y patentes borrosas. Las primeras tres se descartan solas (paso 4); el resto se
-   marca al etiquetar (`estado`).
+   marca al etiquetar (`estado = ilegible` o `fuera_de_alcance`).
 2. **Recorte:** cada caja con un 15 % de su ancho y alto a cada lado, recortada a la foto, en PNG.
 3. **Descartes**, con motivo en `descartes.csv`:
    - cajas de menos de 40x24 píxeles (no hay nada que leer);
@@ -418,16 +418,70 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
 - `cajas.csv` (la caja de cada id y su relación ancho/alto), `descartes.csv`, `reemplazos.csv` (solo tras `--refresh`)
   e `informe.json` (solo cifras).
 
-Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo. Para etiquetar, mirá la hoja y completá
-`etiquetas.csv`. Convención sugerida:
+Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo.
 
-| Columna | Valores |
+### Etiquetar en Excel (`ocr_labels.py`)
+
+Para etiquetar cómodo hay un `etiquetas.xlsx` que se arma desde `etiquetas.csv` (que no se toca). Necesita `openpyxl` y
+`pillow` (están en los extras `tools` y `dev`: `uv sync --extra tools`).
+
+```powershell
+python tools/eval/ocr_labels.py xlsx --set D:\vv-eval\ocr-ar-set --photos D:\vv-eval\ocr-ar
+```
+
+`--photos` es el export con las fotos enteras (por defecto, `ocr-ar` al lado del set); sin él, la miniatura lleva solo
+el recorte. Una fila por id:
+
+| Columna | Qué es |
 |---|---|
-| `texto` | la patente en mayúsculas, solo letras y dígitos, sin espacios; vacío si no se lee |
-| `formato` | `anterior` (LLLDDD), `mercosur` (LLDDDLL), `moto` (dos líneas) u `otro` |
-| `luz` | confirmá o corregí `dia` / `noche` |
-| `estado` | vacío si está bien; `ilegible`, `caja_mala` (no es una sola patente) o `cortada` |
-| `revisar_moto` | `sí` si la relación ancho/alto es de 1,2 a menos de 1,5: confirmá si es una moto con `formato` |
+| `id`, `miniatura`, `revisar_moto` | solo lectura (en gris y bloqueadas). La miniatura trae el recorte grande y, a la derecha, la foto entera con la caja marcada. |
+| `texto` | la patente: **vacío, o 6 a 7 caracteres en mayúsculas** (letras y dígitos, sin espacios ni guiones). Si no cumple, Excel la rechaza con un mensaje que lo explica. |
+| `formato` | desplegable: `anterior` (LLLDDD), `mercosur` (LLDDDLL), `moto` (dos líneas) u `otro` |
+| `luz` | desplegable: `dia`, `noche`. Viene con la estimación: confirmala o corregila. |
+| `estado` | desplegable: `legible`, `ilegible`, `fuera_de_alcance` |
+
+- **Colores:** la fila se pinta de amarillo si `revisar_moto = sí` (confirmá si es una moto con `formato`) y de rojo si
+  el estado es `legible` pero el texto está vacío.
+- **Comodidades:** encabezado congelado, filtros en todas las columnas y anchos de columna cómodos. Las miniaturas se
+  ocultan con la fila al filtrar. La hoja `instrucciones` repite todo esto.
+- **Protección:** la hoja está protegida **sin contraseña** (Revisar > Desproteger hoja) para que `id`, `miniatura` y
+  `revisar_moto` no se cambien por error; se puede filtrar y cambiar el ancho de las columnas. No cambies el orden de
+  las columnas.
+- **Qué hacer con cada fila:** si se lee, `estado = legible` y el `texto`; si no se lee ni a ojo, `ilegible` (se excluye
+  de la evaluación y no cuenta como falla); si no es una patente o no es de las que lee el servicio, `fuera_de_alcance`.
+
+El xlsx es la fuente de `texto`, `formato`, `luz` y `estado`; el csv, de `archivo`, `recorte` y `revisar_moto`. No hay que
+convertir nada a mano:
+
+- **`ocr.py --labeled-set`** y **`ocr_set.py`** leen el xlsx si existe y, si no, el csv.
+- **`ocr_set.py` no pisa** un set con etiquetas cargadas aunque estén solo en el xlsx (`--refresh` incluido). Si hay un
+  xlsx sin etiquetas y se limpia el set, se regenera solo para que las miniaturas de los reemplazos se vean.
+- `python tools/eval/ocr_labels.py xlsx ...` regenera el xlsx, pero **no pisa uno que ya tenga etiquetas**.
+- `python tools/eval/ocr_labels.py check --set ...` muestra el avance (solo cifras, nunca patentes): filas con estado,
+  legibles sin texto, valores no válidos.
+- `python tools/eval/ocr_labels.py to-csv --set ...` escribe en `etiquetas.csv` lo que hay en el xlsx, si hace falta
+  tener el csv al día (por ejemplo para otra herramienta). Antes copia el csv a `etiquetas-previo-N.csv`.
+
+Si Excel tiene abierto el archivo, cerralo antes de correr cualquiera de estos comandos.
+
+### Evaluar el set etiquetado (`ocr.py --labeled-set`)
+
+```powershell
+python tools/eval/ocr.py --data-dir D:\vv-eval --out-dir D:\vv-eval\out\ocr-set --models-dir <MODELS_DIR> --labeled-set D:\vv-eval\ocr-ar-set
+```
+
+Lee `etiquetas.xlsx` (o `etiquetas.csv`), toma la caja de `cajas.csv` y **recorta de la foto original** (`--photos-dir`,
+por defecto `<data-dir>/ocr-ar`) igual que el servicio, sin el margen del recorte del set. Genera el mismo informe que
+con el dataset "patentes" (`report.json`, `audit.csv`, `audit.html`), con estas diferencias:
+
+- solo cuentan las filas con `estado = legible`; `ilegible` va a "ilegibles" (no son fallas) y `fuera_de_alcance`, a
+  "descartadas";
+- el `formato` etiquetado a mano reemplaza al que se deduce de la forma de la patente: `moto` y `otro` quedan fuera de
+  alcance (lecturas que no entran en la propuesta de `OCR_MIN_CONF`);
+- el informe agrega `por_luz` (día y noche, según la `luz` confirmada).
+
+Si falta etiquetar alguna fila, **falla** y dice cuántas y cuáles (ids): completalas o usá `--incomplete` para saltarlas.
+También falla si hay valores no válidos pegados en el xlsx.
 
 ### Limitaciones
 

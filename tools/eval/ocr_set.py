@@ -37,6 +37,9 @@ import cv2
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ocr_labels  # noqa: E402 - las etiquetas en csv o xlsx
+
 SPLITS = ("train", "valid", "test")
 ANNOTATIONS = "_annotations.coco.json"
 DEFAULT_SOURCE = "ocr-ar"
@@ -648,11 +651,6 @@ def run(
     return report
 
 
-def read_labels(path: Path) -> list[dict[str, str]]:
-    with path.open(encoding="utf-8-sig", newline="") as handle:
-        return list(csv.DictReader(handle))
-
-
 @dataclass(frozen=True)
 class Swap:
     """Una caja del set anterior que sale y la candidata que ocupa su id."""
@@ -711,10 +709,6 @@ def plan_swaps(
     ]
 
 
-def has_labels(rows: Sequence[dict[str, str]]) -> bool:
-    return any(row["texto"] or row["formato"] or row["estado"] for row in rows)
-
-
 def free_backup(out: Path) -> Path:
     """`<out>-v1`, o el primer `<out>-vN` que no exista."""
     number = 1
@@ -738,18 +732,15 @@ def refresh(
 
     Parte de `original` (por defecto `out`): reconstruye su selección (mismos filtros y semilla) y la compara
     con su `etiquetas.csv`. Escribe el set limpio en `out`; si `out` existe, antes lo copia a `<out>-vN`.
-    No pisa etiquetas ya cargadas, ni en `original` ni en `out`.
+    No pisa etiquetas ya cargadas (en `etiquetas.csv` o en `etiquetas.xlsx`), ni en `original` ni en `out`.
+    Si hay un `etiquetas.xlsx` sin etiquetas, lo regenera con las miniaturas nuevas.
     """
     original = original or out
-    rows = read_labels(original / "etiquetas.csv")
-    if has_labels(rows):
-        raise ValueError("etiquetas.csv ya tiene etiquetas cargadas: no se pisa")
-    if (
-        original != out
-        and (out / "etiquetas.csv").exists()
-        and has_labels(read_labels(out / "etiquetas.csv"))
-    ):
-        raise ValueError("el etiquetas.csv de --out ya tiene etiquetas cargadas: no se pisa")
+    rows = ocr_labels.read_label_rows(original)
+    if ocr_labels.has_labels(rows):
+        raise ValueError("el set ya tiene etiquetas cargadas (en el csv o el xlsx): no se pisa")
+    if original != out and (out / "etiquetas.csv").exists() and ocr_labels.labels_loaded(out):
+        raise ValueError("el set de --out ya tiene etiquetas cargadas (en el csv o el xlsx): no se pisa")
     built = build_pool(source, reference, night_brightness)
     first = select(built.items, count, night_min, seed)
     if [row["archivo"] for row in rows] != [item.annotation.name for item in first]:
@@ -800,6 +791,9 @@ def refresh(
     )
     if original != out and (original / "descartes.csv").exists():
         shutil.copyfile(original / "descartes.csv", out / "descartes.csv")
+    if (out / ocr_labels.XLSX_NAME).exists() or (original / ocr_labels.XLSX_NAME).exists():
+        ocr_labels.build_xlsx(out, source)  # las miniaturas de los reemplazos tienen que verse
+        summary["xlsx_regenerado"] = True
     report_path = original / "informe.json"
     report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.exists() else {}
     report.pop("limpieza", None)
@@ -854,8 +848,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     if any(path.resolve().is_relative_to(REPO_ROOT) for path in paths):
         print("Las fotos y la salida no pueden estar dentro del repositorio: tienen patentes de terceros.")
         return 1
-    if not args.refresh and (args.out / "etiquetas.csv").exists():
-        print(f"{args.out / 'etiquetas.csv'} ya existe: no se pisa (puede tener etiquetas). Usá otra --out.")
+    existing = [name for name in ("etiquetas.csv", ocr_labels.XLSX_NAME) if (args.out / name).exists()]
+    if not args.refresh and existing:
+        print(f"{args.out / existing[0]} ya existe: no se pisa (puede tener etiquetas). Usá otra --out.")
         return 1
     try:
         if args.refresh:
@@ -873,7 +868,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             report = run(
                 args.src, args.reference, args.out, args.n, args.night_min, args.seed, args.night_brightness
             )
-    except ValueError as error:
+    except (ValueError, OSError, ImportError) as error:
         print(error)
         return 1
     print(json.dumps(report, indent=2, ensure_ascii=False))

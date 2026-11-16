@@ -5,6 +5,10 @@ el adaptador seleccionado y compara el texto con la etiqueta (el nombre de la cl
 sin espacios) usando `domain.plate.plate_check`. Descarta los marcadores de posición (patentes con
 todos los dígitos en cero, como `AA000AA`).
 
+Con `--labeled-set` evalúa en cambio el set de `ocr_set.py` etiquetado a mano: lee `etiquetas.xlsx` (o
+`etiquetas.csv`) de esa carpeta y recorta de la foto original con la caja de `cajas.csv`. Solo cuentan las
+filas con estado `legible`; el `formato` y la `luz` etiquetados arman los cortes del informe.
+
 Escribe en `EVAL_OUT`: `report.json` (solo cifras), `audit.csv`, `audit.html` y `audit/` con los
 recortes que hay que mirar a ojo. Esas carpetas contienen patentes de terceros: nunca van al repo.
 La consola muestra solo cifras. Uso: ver `tools/eval/README.md`.
@@ -20,7 +24,7 @@ import random
 import sys
 from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +39,9 @@ from vvi_ia.service.ports import ImageDecodeError
 from vvi_ia.service.validate_evidence import crop_box
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import ocr_labels  # noqa: E402 - el set etiquetado, en xlsx o csv
+
 SPLITS = ("train", "valid", "test")
 ANNOTATIONS = "_annotations.coco.json"
 DEFAULT_MIN_CONF = 0.78
@@ -44,10 +51,12 @@ PROPOSAL_MARGIN = 0.01
 PROPOSAL_CEIL = 0.99
 DEFAULT_MATCH_SAMPLES = 20
 FORMATS = {"LLDDDLL": "mercosur", "LLLDDD": "anterior"}
+IN_SCOPE_FORMATS = frozenset(FORMATS.values())  # los que lee el servicio: una sola línea
 OTHER_FORMAT = "otro"
 OVERRIDE_COLUMNS = ("archivo", "etiqueta", "motivo")
 EXCLUDE = "EXCLUIR"
 DATASET_DIR = "ocr-roboflow"
+PHOTOS_DIR = "ocr-ar"  # el export COCO de las fotos del set etiquetado
 OVERRIDES_PATH = Path("ocr") / "label_overrides.csv"
 
 
@@ -61,6 +70,8 @@ class Sample:
     label: str
     image_size: tuple[int, int] = (0, 0)  # (ancho, alto) de la foto completa
     corrected: bool = False  # la etiqueta viene del archivo de correcciones, no del dataset
+    format: str = ""  # el formato etiquetado a mano (set de `ocr_set.py`); vacío: sale de la etiqueta
+    light: str = ""  # `dia` o `noche`, etiquetada a mano (set de `ocr_set.py`)
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,11 @@ def is_placeholder(label: str) -> bool:
 
 def label_format(label: str) -> str:
     return FORMATS.get(shape(label), OTHER_FORMAT)
+
+
+def sample_format(sample: Sample) -> str:
+    """El formato etiquetado a mano si lo hay; si no, el que sale de la forma de la etiqueta."""
+    return sample.format or label_format(sample.label)
 
 
 class OverridesError(ValueError):
@@ -187,6 +203,50 @@ def load_samples(data_dir: Path, splits: Sequence[str], overrides: dict[str, str
     return Loaded(samples, discarded, unreadable)
 
 
+def load_set_samples(set_dir: Path, incomplete: bool = False) -> Loaded:
+    """Muestras del set etiquetado a mano con `ocr_set.py`: `etiquetas.xlsx` si existe, si no `etiquetas.csv`.
+
+    La caja sale de `cajas.csv` y el recorte, de la foto original (igual que el servicio, sin el margen del
+    recorte del set). Solo cuentan las filas con estado `legible`: `ilegible` se excluye como en el archivo de
+    correcciones y `fuera_de_alcance` se descarta. Si falta etiquetar alguna fila, falla; con `incomplete`
+    las salta.
+    """
+    rows = ocr_labels.read_label_rows(set_dir)
+    invalid = [row["id"] for row in rows if ocr_labels.row_problems(row)]
+    if invalid:
+        shown = ", ".join(invalid[:10]) + (" ..." if len(invalid) > 10 else "")
+        raise ocr_labels.LabelsError(f"hay valores no válidos en {len(invalid)} filas (ids {shown})")
+    boxes = {row["id"]: row["caja"] for row in ocr_labels.read_csv_rows(set_dir / ocr_labels.BOXES_NAME)}
+    pending = [
+        row["id"]
+        for row in rows
+        if not row["estado"] or (row["estado"] == ocr_labels.STATE_LEGIBLE and not row["texto"])
+    ]
+    if pending and not incomplete:
+        shown = ", ".join(pending[:10]) + (" ..." if len(pending) > 10 else "")
+        raise ocr_labels.LabelsError(
+            f"faltan etiquetas en {len(pending)} filas (ids {shown}): completalas o usá --incomplete"
+        )
+    samples: list[Sample] = []
+    discarded: Counter[str] = Counter()
+    unreadable = 0
+    for row in rows:
+        if row["id"] in pending:
+            discarded["sin etiquetar"] += 1
+        elif row["estado"] == "ilegible":
+            unreadable += 1
+        elif row["estado"] != ocr_labels.STATE_LEGIBLE:
+            discarded["fuera de alcance"] += 1
+        else:
+            split, file = row["archivo"].split("/", 1)
+            x, y, width, height = (float(part) for part in boxes[row["id"]].split())
+            box = Box(x1=x, y1=y, x2=x + width, y2=y + height)
+            samples.append(
+                Sample(split, file, box, canonicalize(row["texto"]), format=row["formato"], light=row["luz"])
+            )
+    return Loaded(samples, discarded, unreadable)
+
+
 # --- lectura -------------------------------------------------------------------------------
 
 
@@ -214,6 +274,9 @@ def read_samples(
         if crop is None:
             discarded["caja vacía"] += 1
             continue
+        if sample.image_size == (0, 0):
+            height, width = image.pixels.shape[:2]
+            sample = replace(sample, image_size=(int(width), int(height)))
         read = reader.read(crop)
         text, conf = read if read is not None else ("", 0.0)
         raw_text = getattr(reader, "raw_text", None)
@@ -360,7 +423,7 @@ def diagnose(reading: Reading, crop: Any) -> Diagnosis:
     sample, label, text = reading.sample, reading.sample.label, canonicalize(reading.text)
     box, (image_width, image_height) = sample.box, sample.image_size
     factors: list[str] = []
-    if label_format(label) == OTHER_FORMAT:
+    if sample_format(sample) not in IN_SCOPE_FORMATS:
         factors.append(TWO_LINES)
     if has_stripe(reading.raw):
         factors.append(STRIPE)
@@ -516,11 +579,15 @@ def build_report(
     unreadable: int = 0,
     diagnoses: Sequence[Diagnosis] = (),
 ) -> dict[str, Any]:
-    in_scope = [reading for reading in readings if label_format(reading.sample.label) != OTHER_FORMAT]
+    in_scope = [reading for reading in readings if sample_format(reading.sample) in IN_SCOPE_FORMATS]
     groups: dict[str, dict[str, list[Reading]]] = {"por_split": {}, "por_formato": {}}
+    if any(reading.sample.light for reading in readings):
+        groups["por_luz"] = {}
     for reading in readings:
         groups["por_split"].setdefault(reading.sample.split, []).append(reading)
-        groups["por_formato"].setdefault(label_format(reading.sample.label), []).append(reading)
+        groups["por_formato"].setdefault(sample_format(reading.sample), []).append(reading)
+        if "por_luz" in groups:
+            groups["por_luz"].setdefault(reading.sample.light or "sin dato", []).append(reading)
     return {
         "modelo": model_version,
         "min_conf": min_conf,
@@ -536,7 +603,8 @@ def build_report(
             for name, group in groups.items()
         },
         "barrido_de_umbrales": sweep(readings),
-        # Los formatos que no son Mercosur ni el anterior son, en este dataset, motos de dos líneas:
+        # Los formatos que no son Mercosur ni anterior son motos de dos líneas u otros: fuera de alcance.
+        # (Los datos de `--labeled-set` traen el formato etiquetado a mano.)
         # fuera de alcance. La propuesta se calcula sin ellas; la otra se muestra por transparencia.
         "propuesta": propose_min_conf(in_scope),
         "propuesta_con_todos_los_formatos": propose_min_conf(readings),
@@ -632,6 +700,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--overrides", type=Path, help=f"correcciones de etiquetas (por defecto <data-dir>/{OVERRIDES_PATH})"
     )
+    parser.add_argument(
+        "--labeled-set",
+        type=Path,
+        help="set etiquetado de ocr_set.py (lee etiquetas.xlsx o etiquetas.csv); en vez del dataset COCO",
+    )
+    parser.add_argument(
+        "--photos-dir",
+        type=Path,
+        help=f"con --labeled-set, el export con las fotos (por defecto <data-dir>/{PHOTOS_DIR})",
+    )
+    parser.add_argument(
+        "--incomplete",
+        action="store_true",
+        help="con --labeled-set, saltar las filas sin etiquetar en vez de fallar",
+    )
     parser.add_argument("--out-dir", type=Path, default=os.environ.get("EVAL_OUT"), help="salida (EVAL_OUT)")
     parser.add_argument(
         "--models-dir", type=Path, default=os.environ.get("MODELS_DIR"), help="pesos (MODELS_DIR)"
@@ -661,7 +744,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             parser.error(f"indicá {flag} o definí su variable de entorno")
     if not 0.0 <= args.min_conf <= 1.0:
         parser.error("--min-conf debe estar entre 0 y 1")
-    args.dataset_dir = args.dataset_dir or args.data_dir / DATASET_DIR
+    args.dataset_dir = args.dataset_dir or args.data_dir / (PHOTOS_DIR if args.labeled_set else DATASET_DIR)
+    if args.photos_dir:
+        args.dataset_dir = args.photos_dir
     args.overrides = args.overrides or args.data_dir / OVERRIDES_PATH
     return args
 
@@ -676,6 +761,7 @@ def main(argv: list[str] | None = None) -> int:
         ("el dataset", args.dataset_dir),
         ("las correcciones", args.overrides),
         ("la salida", args.out_dir),
+        *([("el set etiquetado", args.labeled_set)] if args.labeled_set else []),
     ):
         if inside_repo(path):
             print(
@@ -683,13 +769,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
     splits = args.splits or [split for split in SPLITS if (args.dataset_dir / split / ANNOTATIONS).is_file()]
-    if not splits:
+    if not splits and not args.labeled_set:
         print(f"No hay ningún split con {ANNOTATIONS} en el dataset.", file=sys.stderr)
         return 1
     try:
-        loaded = load_samples(args.dataset_dir, splits, load_overrides(args.overrides))
+        if args.labeled_set:
+            loaded = load_set_samples(args.labeled_set, args.incomplete)
+        else:
+            loaded = load_samples(args.dataset_dir, splits, load_overrides(args.overrides))
         models = build_models({"ocr": args.model}, args.manifest, args.models_dir)
-    except (FileNotFoundError, OverridesError, ModelSetupError) as exc:
+    except (FileNotFoundError, OverridesError, ModelSetupError, ocr_labels.LabelsError, ImportError) as exc:
         print(f"No se pudo empezar: {exc}", file=sys.stderr)
         return 1
     discarded = loaded.discarded
