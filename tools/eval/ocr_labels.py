@@ -44,6 +44,11 @@ TEXT_FORMULA = (
     '"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")))=7))'
 )
 TEXT_PATTERN = re.compile(r"^[A-Z0-9]{6,7}$")
+# La forma de cada formato de auto: anterior LLLDDD y Mercosur LLDDDLL.
+FORMAT_SHAPES = {
+    "anterior": re.compile(r"^[A-Z]{3}[0-9]{3}$"),
+    "mercosur": re.compile(r"^[A-Z]{2}[0-9]{3}[A-Z]{2}$"),
+}
 TEXT_ERROR = (
     "El texto tiene que quedar vacío o ser la patente de 6 o 7 caracteres: letras MAYÚSCULAS y dígitos, sin "
     "espacios ni guiones (por ejemplo AB123CD o ABC123). Si no se lee, dejalo vacío y poné estado = ilegible."
@@ -156,6 +161,9 @@ def row_problems(row: Mapping[str, str]) -> list[str]:
         problems.append(f"estado '{row['estado']}'")
     if row.get("texto") and not TEXT_PATTERN.match(row["texto"]):
         problems.append(f"texto '{row['texto']}'")
+    shape = FORMAT_SHAPES.get(row.get("formato", ""))
+    if row.get("texto") and shape is not None and not shape.match(row["texto"]):
+        problems.append(f"el texto no tiene la forma del formato {row['formato']}")
     return problems
 
 
@@ -173,6 +181,13 @@ def check_rows(rows: Sequence[Mapping[str, str]]) -> dict[str, Any]:
         "con_texto_sin_estado_legible": sum(
             bool(row["texto"]) and row["estado"] != STATE_LEGIBLE for row in rows
         ),
+        "ids_sin_estado": sorted(row["id"] for row in rows if not row["estado"]),
+        "legibles_sin_formato": sorted(
+            row["id"] for row in rows if row["estado"] == STATE_LEGIBLE and not row["formato"]
+        ),
+        "legibles_de_auto": sum(is_legible_car(row) for row in rows),
+        "legibles_de_auto_de_noche": sum(is_legible_car(row) and row.get("luz") == "noche" for row in rows),
+        "pares_a_un_caracter": [list(pair) for pair in near_texts(rows)],
         "filas_con_problemas": len(invalid),
         "ids_con_problemas": sorted(invalid),
     }

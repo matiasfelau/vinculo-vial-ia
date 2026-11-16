@@ -407,3 +407,40 @@ def test_ocr_set_no_pisa_un_set_cuyas_etiquetas_estan_solo_en_el_xlsx(
     code = ocr_set.main(["--src", str(tmp_path), "--reference", str(tmp_path), "--out", str(only_xlsx)])
     assert code == 1
     assert "etiquetas.xlsx ya existe" in capsys.readouterr().out
+
+
+def test_la_forma_del_texto_tiene_que_ser_la_del_formato() -> None:
+    ok = {"texto": "ABC123", "formato": "anterior", "luz": "dia", "estado": "legible"}
+    assert ocr_labels.row_problems(ok) == []
+    assert ocr_labels.row_problems({**ok, "texto": "AB123CD", "formato": "mercosur"}) == []
+    assert ocr_labels.row_problems({**ok, "texto": "AB123CD"}) == [
+        "el texto no tiene la forma del formato anterior"
+    ]
+    assert ocr_labels.row_problems({**ok, "texto": "ABC1234"}) == [
+        "el texto no tiene la forma del formato anterior"
+    ]
+    assert ocr_labels.row_problems({**ok, "texto": "ABC123", "formato": "mercosur"}) == [
+        "el texto no tiene la forma del formato mercosur"
+    ]
+    assert (
+        ocr_labels.row_problems({**ok, "texto": "AB12345", "formato": "moto"}) == []
+    )  # moto y otro: sin forma fija
+
+
+def test_el_check_lista_ids_sin_estado_formato_roto_pares_y_cuenta_legibles_de_auto_y_de_noche() -> None:
+    rows = [
+        {"id": "001", "texto": "ABC123", "formato": "anterior", "luz": "noche", "estado": "legible"},
+        {"id": "002", "texto": "ABC124", "formato": "anterior", "luz": "dia", "estado": "legible"},
+        {"id": "003", "texto": "AB123CD", "formato": "anterior", "luz": "dia", "estado": "legible"},
+        {"id": "004", "texto": "", "formato": "", "luz": "dia", "estado": ""},
+        {"id": "005", "texto": "XYZ999", "formato": "", "luz": "dia", "estado": "legible"},
+        {"id": "006", "texto": "KLM456", "formato": "moto", "luz": "noche", "estado": "legible"},
+    ]
+
+    report = ocr_labels.check_rows(rows)
+
+    assert report["ids_sin_estado"] == ["004"] and report["legibles_sin_formato"] == ["005"]
+    assert report["ids_con_problemas"] == ["003"]  # el texto no tiene la forma del formato
+    assert report["legibles_de_auto"] == 3 and report["legibles_de_auto_de_noche"] == 1  # 001, 002 y 003
+    assert report["pares_a_un_caracter"] == [["001", "002"]]
+    assert "ABC123" not in json.dumps(report)
