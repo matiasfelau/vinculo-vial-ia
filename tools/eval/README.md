@@ -528,6 +528,30 @@ También falla si hay valores no válidos pegados en el xlsx.
 - S5 es `pares_cruzados` (la lectura de cada foto contra la etiqueta de **otra** patente): `todos.mismatch_pct` y
   `con_lectura_segura`.
 
+#### Resultado de referencia: el set de certificación de 300 (16/11/2026)
+
+PARSeq como lo usa el servicio (`OCR_MIN_CONF` 0,78, normalización por posición y estructura válida) sobre las 300
+patentes legibles de auto del set (155 anterior y 145 mercosur, sin repetidas; 4 filas sin estado quedaron afuera):
+
+| | Total | Día | Noche |
+|---|---|---|---|
+| Lecturas | 300 | 246 | 54 |
+| Lectura exacta | 245 (81,7 %) | 198 (80,5 %) | 47 (87,0 %) |
+| Coincide (`PLATE_MATCH`) | 217 (72,3 %) | 179 | 38 |
+| Difiere en un carácter (`PLATE_FUZZY`) | 11 (3,7 %) | 10 | 1 |
+| Ilegible (`PLATE_UNREADABLE`) | 71 (23,7 %) | 56 | 15 |
+| Patente distinta (`PLATE_MISMATCH`) | 1 (0,3 %) | 1 | 0 |
+| **U2** (cota 95 %) | **1 de 300** (1,57 %) | 1 de 246 (1,91 %) | 0 de 54 (5,56 %) |
+| **S5** (pares cruzados) | 76,3 % de 89 700 | 77,2 % de 73 554 | 72,1 % de 16 146 |
+| S5 solo con lectura segura | 99,1 % de 69 069 | 98,9 % | 99,9 % |
+
+**U2: 1 de 300 (cota 1,57 %): válido con tolerancia.** La única patente correcta marcada como distinta es el **id 065**
+(de día): la lectura tiene el mismo largo que la etiqueta (6 caracteres), con confianza **0,7895**, apenas por encima de
+`OCR_MIN_CONF` = 0,78, y el diagnóstico la atribuye al ángulo. Con un umbral de 0,79 no se habría marcado, pero **no se
+cambia `OCR_MIN_CONF`**: este set es de certificación, no de calibración, y el valor del servicio no se ajusta sobre él.
+La tolerancia es esa: un caso, con la cota del 1,57 % (3/N si hubiera 0). Causas de las 55 lecturas sin coincidencia
+exacta: desenfoque o baja resolución 19, confusión de caracteres 17, ángulo 7, otras 8 y recorte cortado 4.
+
 **Exportar los recortes para otro lector (`--export-mlkit`).** No corre ningún modelo:
 
 ```powershell
@@ -535,7 +559,8 @@ python tools/eval/ocr.py --data-dir D:\vv-eval --labeled-set D:\vv-eval\ocr-ar-s
 ```
 
 Guarda `<id>.png` de las patentes legibles de auto y un `indice.csv` con `id, formato, luz`: **nunca el texto de las
-etiquetas**. Por defecto el recorte es el que lee el OCR (la caja sin margen, de la foto original: ambos lectores ven
+etiquetas**. Para el Frontend se exportó con `--mlkit-crop set` en `ocr-ar-set\mlkit\` (en la app ML Kit lee el
+recuadro de encuadre, que deja margen alrededor de la patente) y la exportación sin margen quedó en `mlkit-sin-margen\`. Por defecto el recorte es el que lee el OCR (la caja sin margen, de la foto original: ambos lectores ven
 lo mismo); con `--mlkit-crop set` copia el recorte con margen del 15 % que se ve en la hoja. Reemplaza lo que una
 exportación anterior dejó en la carpeta. Falla si faltan etiquetas (o con `--incomplete` las salta).
 
@@ -548,10 +573,18 @@ Ahora `plan_redaction` tampoco tapa las cajas de patente con al menos el **80 % 
 una caja exceptuada. Una patente ajena que solo se superpone un poco se sigue tapando, y sin patente exceptuada no cambia
 nada.
 
+**La patente principal de la foto de patente nunca se tapa.** En la foto de patente (rol `PLATE`), la patente principal
+no se tapa aunque el OCR no la lea (`main_plate` en `domain/redaction.py`): es la caja de patente (con confianza de
+redacción, `PLATE_REDACT_MIN_CONF`) de mayor confianza **dentro de la caja del vehículo dominante** (la caja `car` más
+grande; "dentro" es tener al menos la mitad de su área en esa caja) y, si ninguna cae adentro o no hay vehículo, la caja
+de patente más grande de la foto. Las demás patentes siguen la regla de siempre (excepción por lectura del OCR y cajas
+contenidas), y las cajas contenidas en la principal tampoco se tapan. En la foto general (y en las demás) no cambia nada.
+Es una decisión de producto: si la principal no es la denunciada, queda a la vista otra patente.
+
 `redaction_set.py` mide el efecto sobre este set, con el texto etiquetado como patente denunciada y la caja anotada como
 su ubicación. Para cada patente legible de auto corre el camino real del paso 8 (detector de patentes con mosaico, OCR de
-cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (solo la
-excepción por OCR) y después (con la regla de las contenidas). Corre el OCR sobre el set: hacerlo con las etiquetas
+cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (la regla de
+siempre: excepción por OCR y cajas contenidas) y después (además, la patente principal sin tapar). Corre el OCR sobre el set: hacerlo con las etiquetas
 completas.
 
 ```powershell
@@ -564,7 +597,37 @@ uv run --frozen --extra dev --extra tools python tools/eval/redaction_set.py --l
   `tapa_parcial` entre el 2 % y el 95 %; `cobertura_mayor_que` da los cortes 0, 2, 10, 50 y 95 %.
 - **`con_exencion` y `sin_exencion`:** si el OCR no lee la denunciada no hay excepción y se tapa a propósito (es el costo del
   fail-closed). Esos casos se informan aparte: la regla nueva actúa solo cuando hay una caja exceptuada.
+- **`principal`:** cuántas veces la patente principal elegida **no es la denunciada** (su caja se parece a la anotada con
+  IoU menor que 0,5): en esos casos queda a la vista otra patente y la denunciada puede quedar tapada. Aparte cuenta
+  cuántas de esas el OCR igual lee como la denunciada (probablemente la misma patente con otra caja).
+- **`casos_tapados_con_exencion`:** las fotos donde el OCR leyó la denunciada y el plan igual la tapa, con qué caja la cubre:
+  `mayor que la patente` (contiene a la exceptuada), `vecina (solo llega con el margen)` (su caja cruda no toca la
+  denunciada; la tapa el margen del 10 %) o `solapada`.
 - Escribe `redaction.json` (solo cifras, también `por_luz`) y `redaction_rows.csv` (id, luz y fracciones, sin el texto).
+
+**Resultado sobre el set de 300 (16/11/2026).** Antes: la regla de las cajas contenidas. Después: más la patente principal.
+
+| | Antes | Después |
+|---|---|---|
+| Tapa algo (cualquier superposición) | 68 (22,7 %) | **24 (8,0 %)** |
+| Tapa por completo (≥ 95 %) | 47 | **11** |
+| Tapa parcialmente (2 % a 95 %) | 19 | **10** |
+| Sin tapar | 234 | 279 |
+| Día: tapa algo / total | 58 / 42 | 20 / 10 |
+| Noche: tapa algo / total | 10 / 5 | 4 / 1 |
+
+Cambian de clase 49 fotos y ninguna empeora. De las 58 donde el OCR no leyó la denunciada (se tapaba a propósito), 55 se
+tapaban y ahora 11; de las 242 donde sí, 13 se tapan antes y después.
+
+- **La principal no es la denunciada en 53 de 300 (17,7 %)**: 47 de 246 de día y 6 de 54 de noche; en 1 no hay ninguna
+  caja de patente. En esos 53 queda a la vista otra patente y la denunciada se tapa algo en 9 (por completo en 3). En 20
+  de los 53 el OCR lee la principal como la denunciada: es casi seguro la misma patente con una caja distinta de la
+  anotada (IoU menor que 0,5), así que la cifra de patentes ajenas expuestas está más cerca de 33 que de 53.
+- **Quedan 13 fotos donde el OCR leyó la denunciada y igual se tapa** (las mismas con y sin la regla de la principal, que no
+  las toca): 7 cajas **mayores que la patente** que la contienen entera (009, 073, 138, 212, 287, 317 y 364; confianza 0,11 a
+  0,28, de 1,2 a 66 veces el área anotada; son las que tapan por completo, salvo la 138), 6 **vecinas que solo llegan con el
+  margen del 10 %** (008, 035, 077, 120, 134 y 287; cubren del 1 % al 10 %) y 4 **solapadas** (035, 074 y dos en 138; la 138 es
+  un fragmento de la misma patente y la tapa al 68 %).
 
 
 ### Limitaciones

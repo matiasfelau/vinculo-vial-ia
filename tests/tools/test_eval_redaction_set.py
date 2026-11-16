@@ -49,6 +49,7 @@ PIECE = Box(
     120, 85, 190, 115, 0.6, BoxLabel.PLATE
 )  # un pedazo de la misma patente que el mosaico detecta de nuevo
 FULL = Box(100, 80, 200, 120, 0.9, BoxLabel.PLATE)  # la patente completa
+CAR = Box(0, 0, 300, 200, 0.95, BoxLabel.CAR)  # el vehículo dominante de la foto
 STRAY = Box(10, 10, 70, 40, 0.5, BoxLabel.PLATE)  # la de otro auto
 REPORTED = "AB123CD"
 
@@ -153,27 +154,56 @@ def test_clase_de_la_tapada(fraction: float, kind: str) -> None:
 # --- medición -------------------------------------------------------------------------------------
 
 
-def test_un_pedazo_contenido_tapa_parcialmente_antes_y_ya_no_despues(tmp_path: Path) -> None:
+def test_un_pedazo_contenido_en_la_exceptuada_no_tapa_ni_antes_ni_despues(tmp_path: Path) -> None:
     [one] = measure(tmp_path, [FULL, PIECE], [sample()])
 
     assert one.plates == 2 and one.exempt == 1
-    assert (
-        rs.classify(one.before) == "parcial" and one.before > 0.5
-    )  # el pedazo (con su margen) cubre la mitad
-    assert one.after == 0.0 and rs.classify(one.after) == "ninguna"
+    assert one.before == one.after == 0.0  # la regla de las contenidas ya estaba en el "antes"
 
 
-def test_sin_detecciones_contenidas_antes_y_despues_son_iguales(tmp_path: Path) -> None:
-    [one] = measure(tmp_path, [FULL, STRAY], [sample()])
-
-    assert one.exempt == 1 and one.before == one.after == 0.0
-
-
-def test_si_el_ocr_no_lee_la_denunciada_se_tapa_igual_antes_y_despues(tmp_path: Path) -> None:
-    [one] = measure(tmp_path, [FULL], [sample(label="XY987ZW")])  # el OCR lee otra: sin exención
+def test_la_principal_destapa_a_la_denunciada_que_el_ocr_no_leyo(tmp_path: Path) -> None:
+    [one] = measure(tmp_path, [FULL, STRAY], [sample(label="XY987ZW")])  # el OCR lee otra: sin exención
 
     assert one.exempt == 0
+    assert rs.classify(one.before) == "total"  # sin lectura se tapaba
+    assert one.after == 0.0  # la principal (la más grande) es la denunciada y ya no se tapa
+    assert one.has_main and one.main_is_target and not one.main_read_as_target
+
+
+def test_si_la_principal_no_es_la_denunciada_esta_queda_tapada_y_se_cuenta(tmp_path: Path) -> None:
+    big_other = Box(10, 10, 90, 70, 0.9, BoxLabel.PLATE)  # la más grande de la foto, otra patente
+    [one] = measure(tmp_path, [FULL, big_other], [sample(label="XY987ZW")])
+
+    assert one.has_main and not one.main_is_target
     assert rs.classify(one.before) == "total" and rs.classify(one.after) == "total"
+    summary = rs.principal_summary([one])
+    assert summary["no_es_la_denunciada"] == 1
+    assert summary["no_es_la_denunciada_y_la_denunciada_queda_tapada_total"] == 1
+
+
+def test_con_el_vehiculo_la_principal_es_la_de_mayor_confianza_adentro(tmp_path: Path) -> None:
+    more_confident = Box(5, 5, 90, 50, 0.99, BoxLabel.PLATE)  # dentro del auto y más confiable que FULL (0,9)
+    [one] = measure(tmp_path, [CAR, FULL, more_confident], [sample()])
+
+    assert (
+        one.has_main and not one.main_is_target
+    )  # la principal es la otra, aunque la denunciada sea la mayor
+    assert one.exempt == 1 and one.after == one.before == 0.0  # la denunciada sigue exceptuada por lectura
+
+
+def test_las_cajas_que_cubren_la_denunciada_se_describen_sin_texto(tmp_path: Path) -> None:
+    bigger = Box(
+        60, 40, 240, 160, 0.2, BoxLabel.PLATE
+    )  # contiene a la denunciada, la principal es otra más confiable
+    main = Box(10, 10, 50, 30, 0.95, BoxLabel.PLATE)
+    neighbour = Box(201, 80, 260, 120, 0.8, BoxLabel.PLATE)  # no la toca: solo llega con su margen del 10 %
+    [one] = measure(tmp_path, [CAR, FULL, main, bigger, neighbour], [sample()])
+
+    kinds = {cover["tipo"]: cover for cover in one.covers}
+    assert set(kinds) == {rs.BIGGER, rs.NEIGHBOUR}
+    assert kinds[rs.BIGGER]["confianza"] == 0.2 and kinds[rs.BIGGER]["area_sobre_la_denunciada"] == 5.4
+    assert 0 < kinds[rs.NEIGHBOUR]["cubre_de_la_denunciada"] < 0.1
+    assert REPORTED not in json.dumps(one.covers)
 
 
 def test_sin_detector_de_patentes_no_hay_redaccion(tmp_path: Path) -> None:
@@ -208,27 +238,43 @@ def test_una_foto_que_no_se_puede_abrir_se_saltea_y_se_cuenta(tmp_path: Path) ->
 
 def test_el_informe_cuenta_antes_y_despues_total_y_por_luz(tmp_path: Path) -> None:
     measures = [
-        *measure(tmp_path / "a", [FULL, PIECE], [sample("001", light="dia")]),
-        *measure(tmp_path / "b", [FULL, STRAY], [sample("002", light="noche")]),
-        *measure(tmp_path / "c", [FULL], [sample("003", label="XY987ZW", light="dia")]),
+        *measure(tmp_path / "a", [FULL, STRAY], [sample("001", label="XY987ZW", light="dia")]),  # se destapa
+        *measure(
+            tmp_path / "b", [FULL, STRAY], [sample("002", light="noche")]
+        ),  # exceptuada, nada que cambiar
+        *measure(
+            tmp_path / "c",
+            [FULL, Box(10, 10, 90, 70, 0.9, BoxLabel.PLATE)],
+            [sample("003", label="XY987ZW", light="dia")],  # la principal es otra: sigue tapada
+        ),
         *measure(tmp_path / "d", None, [sample("004", light="noche")]),
     ]
 
     report = rs.build_report(measures, REDACT, {"detector": "d", "ocr": "o"})
 
     assert report["fotos"] == 4 and report["sin_detector_de_patentes"] == 1
-    assert report["con_exencion"] == 2 and report["sin_exencion"] == 1
-    assert report["antes"]["tapa_parcial"] == 1 and report["antes"]["tapa_total"] == 1
-    assert report["despues"]["tapa_parcial"] == 0 and report["despues"]["tapa_total"] == 1
-    assert report["antes"]["tapa_algo"] == 2 and report["despues"]["tapa_algo"] == 1
-    assert report["antes"]["tapa_total_o_parcial"] == 2 and report["despues"]["tapa_total_o_parcial"] == 1
-    assert (
-        report["con_exencion_antes"]["tapa_parcial"] == 1 and report["con_exencion_despues"]["sin_tapar"] == 2
-    )
+    assert report["con_exencion"] == 1 and report["sin_exencion"] == 2
+    assert report["antes"]["tapa_total"] == 2 and report["antes"]["tapa_algo"] == 2
+    assert report["despues"]["tapa_total"] == 1 and report["despues"]["tapa_algo"] == 1
     assert report["cambian_de_clase"] == 1 and report["empeoran"] == 0
-    assert report["por_luz"]["dia"]["antes"]["tapa_total_o_parcial"] == 2
-    assert report["por_luz"]["noche"]["antes"]["tapa_total_o_parcial"] == 0
+    assert report["por_luz"]["dia"]["antes"]["tapa_total"] == 2
+    assert report["por_luz"]["dia"]["despues"]["tapa_total"] == 1
+    assert report["por_luz"]["noche"]["antes"]["tapa_algo"] == 0
+    principal = report["principal"]
+    assert principal["es_la_denunciada"] == 2 and principal["no_es_la_denunciada"] == 1
+    assert principal["no_es_la_denunciada_y_la_denunciada_queda_tapada_algo"] == 1
     assert report["umbrales"]["contenida_minima"] == 0.8
+
+
+def test_los_casos_tapados_con_exencion_traen_el_tipo_de_caja(tmp_path: Path) -> None:
+    bigger = Box(60, 40, 240, 160, 0.2, BoxLabel.PLATE)
+    main = Box(10, 10, 50, 30, 0.95, BoxLabel.PLATE)
+    measures = measure(tmp_path, [CAR, FULL, main, bigger], [sample("001")])
+
+    report = rs.build_report(measures, REDACT, {})
+
+    assert [case["id"] for case in report["casos_tapados_con_exencion"]] == ["001"]
+    assert report["tipos_de_caja_que_cubre_con_exencion"] == {rs.BIGGER: 1}
 
 
 def test_las_filas_no_llevan_el_texto_de_la_patente(tmp_path: Path) -> None:
