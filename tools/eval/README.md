@@ -328,6 +328,9 @@ confianza por carácter.
 
 ## Conjunto de evaluación del OCR con "Patentes Argentinas - Master" (`ocr_set.py`)
 
+**Valores de `formato` en `etiquetas.csv`** (los mismos que usa `ocr.py`): `anterior` (LLLDDD), `mercosur` (LLDDDLL),
+`moto` (dos líneas) u `otro`.
+
 Arma 300 patentes recortadas para etiquetar a mano y, después, medir `parseq` con un conjunto que no se usó para
 calibrarlo. Parte del export COCO de "Patentes Argentinas - Master" (Roboflow Universe, `xenon-bo5e9`, Public
 Domain, 656 fotos y 800 cajas de una sola clase; la ficha está en [THIRD_PARTY.md](../../THIRD_PARTY.md)). **No corre
@@ -344,10 +347,11 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
 
 ### Qué hace
 
-1. **Cajas:** se miraron a ojo 72 cajas al azar del export y 72 de las elegidas (cuatro hojas): son patentes completas, no autos ni
-   caracteres sueltos. Las excepciones son pocas y aisladas: una hoja entera con decenas de patentes anotada como una
-   caja, una pila de patentes, alguna caja cortada por el borde de la foto y patentes borrosas. Se marcan al
-   etiquetar (`estado`).
+1. **Cajas:** se miraron a ojo 72 cajas al azar del export y 72 de las primeras elegidas (cuatro hojas): son patentes
+   completas, no autos ni caracteres sueltos. Las excepciones son pocas y aisladas: una hoja entera con decenas de
+   patentes anotada como una caja, una pila de patentes, un auto entero con la patente anotada adentro, alguna caja
+   cortada por el borde de la foto y patentes borrosas. Las primeras tres se descartan solas (paso 4); el resto se
+   marca al etiquetar (`estado`).
 2. **Recorte:** cada caja con un 15 % de su ancho y alto a cada lado, recortada a la foto, en PNG.
 3. **Descartes**, con motivo en `descartes.csv`:
    - cajas de menos de 40x24 píxeles (no hay nada que leer);
@@ -356,11 +360,18 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
    - duplicados y casi duplicados: dos recortes son la misma patente si se parecen en bruto (NCC de 64x32 en gris
      ≥ 0,6) y en los trazos (NCC de 128x64 sin bajas frecuencias y con corrimiento ≥ 0,75). Mirando pares reales, con
      esos valores todos los que pasan son la misma patente. Se conserva el de mayor resolución.
-4. **Luz:** noche si el brillo medio de la foto sin la patente (y su entorno) es menor que 90 (gris de 0 a 255). Las
+4. **Probables motos y cajas inválidas:** el servicio lee una sola línea y esas cajas no miden nada.
+   - *Probable moto* (`probable_moto`): relación ancho/alto de la caja menor que 1,2. Sale del set.
+   - *A revisar* (`revisar_moto = sí`): relación de 1,2 a menos de 1,5. Se queda en el set y quien etiqueta
+     confirma si es una moto (`formato = moto`). La hoja la marca con `moto?`.
+   - *Caja inválida* (`caja_invalida`): la que tiene adentro otra caja de patente de la misma foto (hojas de
+     patentes, un auto entero, una caja doble) y las vistas a ojo (`KNOWN_INVALID`, una pila de cinco patentes).
+5. **Luz:** noche si el brillo medio de la foto sin la patente (y su entorno) es menor que 90 (gris de 0 a 255). Las
    fotos donde la patente ocupa el 40 % o más (primeros planos) no tienen escena que juzgar: quedan como `dia` y la
    hoja las marca `D?`. Es una estimación: mirando las fotos más oscuras, las de noche quedan por debajo de ~90,
    pero también hay sombras y autos negros de día. Por eso la confirma una persona.
-5. **Elección:** `--n` al azar con semilla fija, con al menos `--night-min` de noche, numeradas en orden aleatorio.
+6. **Elección:** `--n` al azar con semilla fija, al menos `--night-min` de noche y como mucho 2 por foto, numeradas
+   en orden aleatorio.
 
 ### Corrida de referencia
 
@@ -371,37 +382,63 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
 | Foto ya en el dataset "patentes" | −4 |
 | Patente ya en el dataset "patentes" | −2 |
 | Duplicados y casi duplicados | −21 |
-| **Candidatas** (90 de noche) | **717** |
-| **Elegidas** (66 de noche) | **300** |
+| Candidatas | 717 (90 de noche) |
+| Elegidas con los filtros 1 a 3 (sin tope por foto) | 300 (66 de noche) |
+| Reemplazadas por la limpieza (paso 4 y tope por foto) | 56: 49 probables motos, 1 inválida, 6 por exceso de fotos (20 de las nuevas son de noche) |
+| **Set final** | **300 (77 de noche estimadas, 53 con `revisar_moto`)** |
 
-De las 300: 200 vienen de `train`, 76 de `valid` y 24 de `test`; 20 no tienen escena para juzgar la luz y unas 77 son
-probablemente de dos líneas (ancho/alto de la caja menor que 1,4: motos), que el servicio no lee.
+El set final tiene 208 patentes de `train`, 69 de `valid` y 23 de `test`; 10 no tienen escena para juzgar la luz. Todas
+tienen una relación ancho/alto de 1,2 o más y ninguna foto aporta más de 2.
+
+### Limpiar un set ya armado (`--refresh`)
+
+`--refresh` reconstruye la selección original (mismos filtros y semilla) y la compara con el `etiquetas.csv` del set
+de partida. Después reemplaza las probables motos, las cajas inválidas y el exceso por foto (se conservan las dos de
+menor id de cada foto) por candidatas de auto que no estaban elegidas, con la misma semilla, **primero las estimadas
+de noche** y sin pasar el tope por foto. Cada reemplazo toma el id de la caja que sale; los demás ids no cambian.
+
+- `--original` es el set del que parte (por defecto, `--out`). Para volver a limpiar con otros criterios se parte del
+  primer respaldo: `--original D:\vv-eval\ocr-ar-set-v1`.
+- Si `--out` existe, antes de escribir se copia a `<out>-vN` (el primer número libre). El original no se toca.
+- Si el `etiquetas.csv` del original o el de `--out` tienen `texto`, `formato` o `estado` cargados, no hace nada.
+- Escribe `reemplazos.csv` (qué caja salió, por qué motivo y cuál la reemplazó).
+
+```powershell
+python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set --original D:\vv-eval\ocr-ar-set-v1 --refresh
+```
 
 ### Qué escribe en `--out`
 
 - `recortes/NNN.png`: el recorte de cada patente.
-- `etiquetas.csv`: `id, archivo, recorte, texto, formato, luz, estado`. `archivo` es `<split>/<foto>` del export.
-  `texto`, `formato` y `estado` salen vacíos; `luz` trae la estimación (`dia` o `noche`) para confirmar.
+- `etiquetas.csv`: `id, archivo, recorte, texto, formato, luz, estado, revisar_moto`. `archivo` es `<split>/<foto>`
+  del export. `texto`, `formato` y `estado` salen vacíos; `luz` trae la estimación (`dia` o `noche`) para confirmar y
+  `revisar_moto` trae `sí` en las de relación de 1,2 a menos de 1,5.
 - `hojas/hoja-NN.jpg`: hojas de contacto de 18 casilleros con el número, el recorte grande, la foto entera chica con la
-  caja marcada (para confirmar la luz) y `D`/`N` (con `?` si no hay escena).
-- `descartes.csv` e `informe.json` (solo cifras).
+  caja marcada (para confirmar la luz), `D`/`N` (con `?` si no hay escena) y `moto?` si hay que revisar.
+- `cajas.csv` (la caja de cada id y su relación ancho/alto), `descartes.csv`, `reemplazos.csv` (solo tras `--refresh`)
+  e `informe.json` (solo cifras).
 
 Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo. Para etiquetar, mirá la hoja y completá
-`etiquetas.csv`. Convención sugerida, la misma que usa `ocr.py` para los formatos:
+`etiquetas.csv`. Convención sugerida:
 
 | Columna | Valores |
 |---|---|
 | `texto` | la patente en mayúsculas, solo letras y dígitos, sin espacios; vacío si no se lee |
-| `formato` | `mercosur` (LLDDDLL), `anterior` (LLLDDD), `moto` (dos líneas) u `otro` |
+| `formato` | `anterior` (LLLDDD), `mercosur` (LLDDDLL), `moto` (dos líneas) u `otro` |
 | `luz` | confirmá o corregí `dia` / `noche` |
 | `estado` | vacío si está bien; `ilegible`, `caja_mala` (no es una sola patente) o `cortada` |
+| `revisar_moto` | `sí` si la relación ancho/alto es de 1,2 a menos de 1,5: confirmá si es una moto con `formato` |
 
 ### Limitaciones
 
+- **La relación ancho/alto no separa del todo las motos.** En una muestra de 54 de las primeras 135 cajas con menos de
+  1,8, casi todas las de menos de 1,2 eran motos (dos líneas) y casi todas las de 1,2 a 1,8 eran patentes de auto con
+  la caja holgada, inclinada o en primer plano. Por eso el corte es 1,2 y lo que queda hasta 1,5 se revisa a mano. Una
+  moto con la caja ancha (de 1,5 o más) pasa sin marca; ya con las etiquetas, `formato` lo corrige.
+- **Pocas de noche, y estimadas:** las 77 son una estimación por brillo y se confirman al etiquetar.
 - **La misma patente en dos fotos muy distintas** (otro ángulo, otra distancia) no se detecta por la imagen: la
   firma del recorte no sobrevive a un cambio de perspectiva. Esos repetidos se sacan después, agrupando por `texto`
   cuando las etiquetas estén completas.
-- La luz es una estimación y la corrige quien etiqueta.
 - "Public Domain" lo declara quien subió el dataset; el origen de las fotos no se auditó (ver
   [THIRD_PARTY.md](../../THIRD_PARTY.md)). Solo se usa para evaluar.
 

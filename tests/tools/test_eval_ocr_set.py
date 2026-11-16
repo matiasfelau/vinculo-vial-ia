@@ -28,6 +28,7 @@ ocr_set = load()
 
 PLATE_W, PLATE_H = 160, 60
 BOX = (80.0, 90.0, float(PLATE_W), float(PLATE_H))
+MOTO_BOX = (100.0, 80.0, 70.0, 70.0)  # casi cuadrada: relación ancho/alto de 1,0
 TEXTS = [
     "AB123CD",
     "KLM456",
@@ -50,7 +51,16 @@ def plate_image(text: str) -> np.ndarray:
     return plate
 
 
-def photo(text: str, night: bool = False, seed: int = 0, scale: float = 1.0) -> np.ndarray:
+def moto_plate_image(text: str) -> np.ndarray:
+    plate = np.full((70, 70, 3), 235, np.uint8)
+    cv2.putText(plate, text[:3], (6, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2, cv2.LINE_AA)
+    cv2.putText(plate, text[3:6], (6, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (20, 20, 20), 2, cv2.LINE_AA)
+    return plate
+
+
+def photo(
+    text: str, night: bool = False, seed: int = 0, scale: float = 1.0, moto: bool = False
+) -> np.ndarray:
     rng = np.random.default_rng(seed)
     level = 25 if night else 190
     blocks = rng.uniform(level - 20, level + 20, (6, 8, 1)).astype(
@@ -65,28 +75,39 @@ def photo(text: str, night: bool = False, seed: int = 0, scale: float = 1.0) -> 
         image[by : by + int(rng.integers(20, 50)), bx : bx + int(rng.integers(30, 60))] = int(
             rng.integers(0, 255)
         )
-    x, y, w, h = (int(v) for v in BOX)
-    image[y : y + h, x : x + w] = plate_image(text)
+    x, y, w, h = (int(v) for v in (MOTO_BOX if moto else BOX))
+    image[y : y + h, x : x + w] = moto_plate_image(text) if moto else plate_image(text)
     if scale != 1.0:
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     return image
 
 
-def write_export(root: Path, photos: dict[str, tuple[np.ndarray, float]]) -> None:
-    """Un export COCO de un solo split: `photos` mapea el nombre a (imagen, escala de la caja)."""
+def write_export(root: Path, photos: dict[str, Any]) -> None:
+    """Un export COCO de un solo split: `photos` mapea el nombre a (imagen, escala[, cajas])."""
     (root / "train").mkdir(parents=True)
     images, annotations = [], []
-    for number, (name, (image, scale)) in enumerate(photos.items()):
+    for number, (name, value) in enumerate(photos.items()):
+        image, scale = value[0], value[1]
+        boxes = value[2] if len(value) > 2 else [BOX]
         assert cv2.imwrite(str(root / "train" / name), image)
         images.append({"id": number, "file_name": name, "width": image.shape[1], "height": image.shape[0]})
-        box = [v * scale for v in BOX]
-        annotations.append({"id": number, "image_id": number, "category_id": 1, "bbox": box})
+        for index, box in enumerate(boxes):
+            annotations.append(
+                {
+                    "id": number * 10 + index,
+                    "image_id": number,
+                    "category_id": 1,
+                    "bbox": [v * scale for v in box],
+                }
+            )
     coco = {"images": images, "annotations": annotations, "categories": [{"id": 1, "name": "patente"}]}
     (root / "train" / ocr_set.ANNOTATIONS).write_text(json.dumps(coco), encoding="utf-8")
 
 
-def described(root: Path, name: str, image: np.ndarray, scale: float = 1.0) -> Any:
-    write_export(root, {name: (image, scale)})
+def described(
+    root: Path, name: str, image: np.ndarray, scale: float = 1.0, box: tuple[float, ...] = BOX
+) -> Any:
+    write_export(root, {name: (image, scale, [box])})
     return ocr_set.describe(root, ocr_set.load_annotations(root))[0]
 
 
@@ -190,7 +211,7 @@ def test_el_armado_completo_descarta_cada_cosa_y_deja_las_etiquetas_vacias(tmp_p
     assert report["elegidas_de_noche"] >= 2
     with (out / "etiquetas.csv").open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.DictReader(handle))
-    assert list(rows[0]) == ["id", "archivo", "recorte", "texto", "formato", "luz", "estado"]
+    assert list(rows[0]) == ["id", "archivo", "recorte", "texto", "formato", "luz", "estado", "revisar_moto"]
     assert [row["id"] for row in rows] == ["001", "002", "003", "004", "005", "006"]
     assert all(row["texto"] == row["formato"] == row["estado"] == "" for row in rows)
     assert {row["luz"] for row in rows} <= {"dia", "noche"}
@@ -216,6 +237,196 @@ def test_el_recorte_tiene_el_margen_de_15_por_ciento(tmp_path: Path) -> None:
     ocr_set.run(src, reference, out, count=3, night_min=0, seed=1)
     crop = cv2.imdecode(np.fromfile(str(out / "recortes" / "001.png"), np.uint8), cv2.IMREAD_COLOR)
     assert crop.shape[:2] == (round(PLATE_H * 1.3), round(PLATE_W * 1.3))
+
+
+def moto_photos(first_seed: int, texts: list[str]) -> dict[str, Any]:
+    return {
+        f"moto{n}.jpg": (photo(text, seed=first_seed + n, moto=True), 1.0, [MOTO_BOX])
+        for n, text in enumerate(texts)
+    }
+
+
+def test_una_caja_con_otra_adentro_o_vista_a_ojo_es_invalida(tmp_path: Path) -> None:
+    inner = (120.0, 100.0, 80.0, 30.0)
+    outer = (60.0, 70.0, 220.0, 120.0)
+    write_export(
+        tmp_path,
+        {
+            "hoja.jpg": (photo("AB123CD", seed=1), 1.0, [outer, inner]),
+            "sola.jpg": (photo("KLM456", seed=2), 1.0),
+        },
+    )
+    annotations = ocr_set.load_annotations(tmp_path)
+    invalid = ocr_set.invalid_boxes(annotations)
+    assert {(a.file, a.box) for a in invalid} == {("hoja.jpg", outer)}
+    pile = ocr_set.Annotation("train", "17397969544621434_jpg.rf.abc.jpg", (32.0, 13.0, 142.0, 212.0))
+    assert ocr_set.invalid_boxes([pile]) == {pile}
+
+
+def test_la_caja_se_clasifica_como_invalida_moto_o_de_auto() -> None:
+    plate = ocr_set.Annotation("train", "a.jpg", (0.0, 0.0, 200.0, 100.0))  # 2,0
+    edge = ocr_set.Annotation("train", "b.jpg", (0.0, 0.0, 120.0, 100.0))  # justo 1,2
+    moto = ocr_set.Annotation("train", "c.jpg", (0.0, 0.0, 119.0, 100.0))
+    assert ocr_set.classify(plate, set()) is None
+    assert ocr_set.classify(edge, set()) is None
+    assert ocr_set.classify(moto, set()) == ocr_set.REASON_MOTORCYCLE
+    assert ocr_set.classify(plate, {plate}) == ocr_set.REASON_INVALID
+    assert ocr_set.classify(moto, {moto}) == ocr_set.REASON_INVALID  # inválida gana a moto
+
+
+def test_el_armado_nuevo_no_deja_motos(tmp_path: Path) -> None:
+    src, reference, out = tmp_path / "src", tmp_path / "reference", tmp_path / "out"
+    photos = {f"p{n}.jpg": (photo(TEXTS[n], seed=n), 1.0) for n in range(4)}
+    photos["moto.jpg"] = (photo(TEXTS[5], seed=30, moto=True), 1.0, [MOTO_BOX])
+    write_export(src, photos)
+    write_export(reference, {"r.jpg": (photo(TEXTS[11], seed=77), 1.0)})
+    report = ocr_set.run(src, reference, out, count=4, night_min=0, seed=1)
+    assert report["probable_moto"] == 1
+    assert report["elegidas_probable_moto"] == 0
+    with (out / "cajas.csv").open(encoding="utf-8-sig", newline="") as handle:
+        assert all(float(row["relacion_aspecto"]) >= 1.2 for row in csv.DictReader(handle))
+
+
+def test_el_reemplazo_toma_el_id_de_la_que_sale_y_prioriza_las_de_noche(tmp_path: Path) -> None:
+    moto = described(tmp_path / "m", "m.jpg", photo(TEXTS[0], seed=1, moto=True), box=MOTO_BOX)
+    car = described(tmp_path / "c", "c.jpg", photo(TEXTS[1], seed=2))
+    day = described(tmp_path / "d", "d.jpg", photo(TEXTS[2], seed=3))
+    night = described(tmp_path / "n", "n.jpg", photo(TEXTS[3], night=True, seed=4))
+    for item in (moto, car, day, night):
+        item.light = ocr_set.estimate_light(item.surround)
+    swaps = ocr_set.plan_swaps([car, moto], [car, moto, day, night], set(), seed=1)
+    assert [(s.ident, s.reason, s.replacement is night) for s in swaps] == [
+        ("002", ocr_set.REASON_MOTORCYCLE, True)
+    ]
+
+
+def test_sin_candidatas_de_auto_alcanzan_el_reemplazo_falla(tmp_path: Path) -> None:
+    moto = described(tmp_path / "m", "m.jpg", photo(TEXTS[0], seed=1, moto=True), box=MOTO_BOX)
+    with pytest.raises(ValueError, match="candidatas de auto"):
+        ocr_set.plan_swaps([moto], [moto], set(), seed=1)
+
+
+def _old_set(tmp_path: Path) -> tuple[Path, Path, Path, Any]:
+    """Un set armado como el anterior a la limpieza: con motos entre las elegidas."""
+    src, reference, out = tmp_path / "src", tmp_path / "reference", tmp_path / "out"
+    photos: dict[str, Any] = {f"p{n}.jpg": (photo(TEXTS[n], night=n < 2, seed=n), 1.0) for n in range(6)}
+    photos.update(moto_photos(10, TEXTS[6:10]))
+    write_export(src, photos)
+    write_export(reference, {"r.jpg": (photo(TEXTS[11], seed=77), 1.0)})
+    built = ocr_set.build_pool(src, reference)
+    first = ocr_set.select(built.items, 6, 1, 5)
+    ocr_set.build_outputs(src, [(f"{n:03d}", item) for n, item in enumerate(first, start=1)], out)
+    return src, reference, out, first
+
+
+def test_la_limpieza_reemplaza_las_motos_y_conserva_los_demas_ids(tmp_path: Path) -> None:
+    src, reference, out, first = _old_set(tmp_path)
+    before = list(csv.DictReader((out / "etiquetas.csv").open(encoding="utf-8-sig")))
+    motos = [n for n, item in enumerate(first) if ocr_set.aspect(item.annotation) < 1.2]
+    assert motos  # con esta semilla, al menos una moto entre las elegidas
+
+    summary = ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5)
+
+    after = list(csv.DictReader((out / "etiquetas.csv").open(encoding="utf-8-sig")))
+    assert summary["reemplazadas"] == len(motos)
+    assert summary["elegidas_probable_moto"] == 0
+    assert [row["id"] for row in after] == [f"{n:03d}" for n in range(1, 7)]
+    for n, (old, new) in enumerate(zip(before, after, strict=True)):
+        assert (old == new) == (n not in motos)
+    assert len({row["archivo"] for row in after}) == 6
+    backup = out.with_name(out.name + "-v1")
+    assert list(csv.DictReader((backup / "etiquetas.csv").open(encoding="utf-8-sig"))) == before
+    swaps = list(csv.DictReader((out / "reemplazos.csv").open(encoding="utf-8-sig")))
+    assert [row["id"] for row in swaps] == [f"{n + 1:03d}" for n in motos]
+    assert {row["motivo"] for row in swaps} == {ocr_set.REASON_MOTORCYCLE}
+    assert json.loads((out / "informe.json").read_text(encoding="utf-8"))["limpieza"]["reemplazadas"] == len(
+        motos
+    )
+
+
+def test_la_limpieza_no_pisa_etiquetas_cargadas(tmp_path: Path) -> None:
+    src, reference, out, _ = _old_set(tmp_path)
+    labeled = (out / "etiquetas.csv").read_bytes().replace(b"recortes/001.png,,", b"recortes/001.png,ABC123,")
+    (out / "etiquetas.csv").write_bytes(labeled)
+    with pytest.raises(ValueError, match="etiquetas cargadas"):
+        ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5)
+    assert (out / "etiquetas.csv").read_bytes() == labeled
+    assert not out.with_name(out.name + "-v1").exists()
+
+
+def test_la_limpieza_parte_del_original_y_respalda_el_set_actual_con_el_siguiente_numero(
+    tmp_path: Path,
+) -> None:
+    src, reference, out, _ = _old_set(tmp_path)
+    ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5)  # crea <out>-v1 con el original
+    v1 = out.with_name(out.name + "-v1")
+    cleaned = (out / "etiquetas.csv").read_bytes()
+
+    ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5, original=v1)
+
+    v2 = out.with_name(out.name + "-v2")
+    assert (v2 / "etiquetas.csv").read_bytes() == cleaned  # el set que había quedó respaldado
+    assert (out / "etiquetas.csv").read_bytes() == cleaned  # y se regeneró igual desde el original
+    assert (v1 / "etiquetas.csv").is_file()
+
+    # etiquetas cargadas en --out (no en el original): tampoco se pisan
+    labeled = cleaned.replace(b"recortes/001.png,,", b"recortes/001.png,ABC123,")
+    (out / "etiquetas.csv").write_bytes(labeled)
+    with pytest.raises(ValueError, match="de --out"):
+        ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5, original=v1)
+    assert (out / "etiquetas.csv").read_bytes() == labeled
+    assert not out.with_name(out.name + "-v3").exists()
+
+
+def test_entre_1_2_y_1_5_se_queda_en_el_set_con_revisar_moto(tmp_path: Path) -> None:
+    for width, expected in ((119.0, False), (120.0, True), (149.0, True), (150.0, False)):
+        annotation = ocr_set.Annotation("train", "a.jpg", (0.0, 0.0, width, 100.0))
+        assert ocr_set.needs_moto_review(annotation) is expected
+    src, reference, out = tmp_path / "src", tmp_path / "reference", tmp_path / "out"
+    photos = {f"p{n}.jpg": (photo(TEXTS[n], seed=n), 1.0) for n in range(4)}
+    photos["media.jpg"] = (photo(TEXTS[5], seed=31, moto=True), 1.0, [(100.0, 80.0, 91.0, 70.0)])  # 1,3
+    write_export(src, photos)
+    write_export(reference, {"r.jpg": (photo(TEXTS[11], seed=77), 1.0)})
+    report = ocr_set.run(src, reference, out, count=5, night_min=0, seed=1)
+    with (out / "etiquetas.csv").open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    assert {row["archivo"]: row["revisar_moto"] for row in rows} == {
+        "train/media.jpg": "sí",
+        **{f"train/p{n}.jpg": "" for n in range(4)},
+    }
+    assert report["elegidas_revisar_moto"] == 1
+    assert report["probable_moto"] == 0
+
+
+def three_boxes_in_one_photo(root: Path) -> list[Any]:
+    boxes = [BOX, (10.0, 10.0, 100.0, 40.0), (200.0, 10.0, 100.0, 40.0)]
+    write_export(root, {"x.jpg": (photo(TEXTS[0], seed=1), 1.0, boxes)})
+    return ocr_set.describe(root, ocr_set.load_annotations(root))
+
+
+def test_la_seleccion_respeta_el_maximo_por_foto(tmp_path: Path) -> None:
+    shared = three_boxes_in_one_photo(tmp_path / "x")
+    others = [described(tmp_path / f"o{n}", "o.jpg", photo(TEXTS[n + 1], seed=n + 5)) for n in range(3)]
+    pool = shared + others
+    for seed in range(12):
+        chosen = ocr_set.select(pool, count=4, night_min=0, seed=seed, per_photo=2)
+        assert len(chosen) == 4
+        assert sum(item.annotation.file == "x.jpg" for item in chosen) <= 2
+    with pytest.raises(ValueError, match="por foto"):
+        ocr_set.select(shared, count=3, night_min=0, seed=1, per_photo=2)
+
+
+def test_el_exceso_por_foto_se_reemplaza_y_los_reemplazos_no_pasan_el_tope(tmp_path: Path) -> None:
+    shared = three_boxes_in_one_photo(tmp_path / "x")
+    fourth = ocr_set.describe(
+        tmp_path / "x", [ocr_set.Annotation("train", "x.jpg", (100.0, 150.0, 100.0, 40.0))]
+    )
+    other = described(tmp_path / "o", "o.jpg", photo(TEXTS[1], seed=9))
+    swaps = ocr_set.plan_swaps(shared, [*shared, *fourth, other], set(), seed=1)
+    # se conservan las dos de menor id; la tercera sale y la que entra no es de la misma foto
+    assert [(w.ident, w.reason, w.replacement is other) for w in swaps] == [
+        ("003", ocr_set.REASON_PHOTO_CAP, True)
+    ]
 
 
 def test_se_niega_a_leer_o_escribir_dentro_del_repo(capsys: pytest.CaptureFixture[str]) -> None:
