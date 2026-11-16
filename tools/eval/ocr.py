@@ -300,7 +300,7 @@ def read_samples(
         raw_text = getattr(reader, "raw_text", None)
         raw = (raw_text(crop) if raw_text is not None else text) or ""
         reading = Reading(sample, text, conf, failed=read is None, raw=raw)
-        readings.append((reading, crop))
+        readings.append((reading, crop.copy()))  # el recorte es una vista: sin copia retiene la foto entera
     return readings, discarded
 
 
@@ -591,13 +591,23 @@ def scope_report(in_scope: Sequence[Reading], min_conf: float) -> dict[str, Any]
     carácter (`FUZZY`), ilegible (`UNREADABLE`: sin lectura, poco segura o sin la estructura de una patente)
     y patente distinta (`MISMATCH`).
     """
-    report: dict[str, Any] = {**summarize(in_scope, min_conf), "U2": u2(in_scope, min_conf)}
+    labels = sorted({reading.sample.label for reading in in_scope})
+    report: dict[str, Any] = {
+        **summarize(in_scope, min_conf),
+        "U2": u2(in_scope, min_conf),
+        "S5": cross_pairs(in_scope, min_conf),
+    }
     by_light: dict[str, list[Reading]] = {}
     for reading in in_scope:
         by_light.setdefault(reading.sample.light or "sin dato", []).append(reading)
     if any(reading.sample.light for reading in in_scope):
         report["por_luz"] = {
-            light: {**summarize(items, min_conf), "U2": u2(items, min_conf)}
+            # S5 por luz: las lecturas de esa luz contra las etiquetas de todas las demás patentes del set
+            light: {
+                **summarize(items, min_conf),
+                "U2": u2(items, min_conf),
+                "S5": cross_pairs(items, min_conf, labels),
+            }
             for light, items in sorted(by_light.items())
         }
     return report
@@ -647,14 +657,16 @@ def propose_min_conf(readings: Sequence[Reading]) -> dict[str, Any]:
     }
 
 
-def cross_pairs(readings: Sequence[Reading], min_conf: float) -> dict[str, Any]:
+def cross_pairs(
+    readings: Sequence[Reading], min_conf: float, all_labels: Sequence[str] | None = None
+) -> dict[str, Any]:
     """R3 con pares cruzados: la lectura de una foto contra la etiqueta de OTRA patente.
 
     Son casos que deberían dar `PLATE_MISMATCH` (la patente de la foto no es la reportada). Se cuenta qué
     parte sale MISMATCH con el umbral `min_conf` (RED en el servicio) y cuál se escapa como GREEN: `FUZZY`
     (una etiqueta parecida), `UNREADABLE` (lectura poco segura) o `MATCH` (etiquetas parecidas en el texto).
     """
-    labels = sorted({reading.sample.label for reading in readings})
+    labels = sorted(set(all_labels) if all_labels is not None else {r.sample.label for r in readings})
     total: Counter[str] = Counter()
     sure: Counter[str] = Counter()
     for reading in readings:
@@ -965,13 +977,15 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Legibles de auto: {scope['lecturas']} · lectura exacta {scope['coincidencia_exacta']} "
         f"({scope['coincidencia_exacta_pct']} %) · distribución {scope['distribucion']} · "
-        f"U2 {scope['U2']['marcadas']} de {scope['U2']['lecturas']} (cota 95 % {scope['U2']['cota_95']})"
+        f"U2 {scope['U2']['marcadas']} de {scope['U2']['lecturas']} (cota 95 % {scope['U2']['cota_95']}) · "
+        f"S5 {scope['S5']['todos']['mismatch_pct']} % de {scope['S5']['todos']['pares']} pares"
     )
     for light, block in scope.get("por_luz", {}).items():
         print(
             f"  {light}: {block['lecturas']} lecturas · exacta {block['coincidencia_exacta']} "
             f"({block['coincidencia_exacta_pct']} %) · {block['distribucion']} · "
-            f"U2 {block['U2']['marcadas']} de {block['U2']['lecturas']} (cota {block['U2']['cota_95']})"
+            f"U2 {block['U2']['marcadas']} de {block['U2']['lecturas']} (cota {block['U2']['cota_95']}) · "
+            f"S5 {block['S5']['todos']['mismatch_pct']} % de {block['S5']['todos']['pares']} pares"
         )
     print(
         f"Propuesta (sin {report['lecturas_fuera_de_alcance']} lecturas de otros formatos): "
