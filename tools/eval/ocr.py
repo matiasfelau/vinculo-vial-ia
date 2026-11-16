@@ -304,8 +304,33 @@ def read_samples(
     return readings, discarded
 
 
+def write_readings(path: Path, readings: Iterable[Reading]) -> int:
+    """Escribe `id, lectura, confianza, falla` de cada lectura del set etiquetado (con id).
+
+    Tiene los textos que leyó el OCR: queda en la carpeta de salida, fuera del repo, y no en el informe.
+    """
+    rows = [
+        {
+            "id": reading.sample.ident,
+            "lectura": reading.text,
+            "confianza": f"{reading.conf:.4f}",
+            "falla": "si" if reading.failed else "no",
+        }
+        for reading in readings
+        if reading.sample.ident
+    ]
+    if rows:
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(READINGS_COLUMNS))
+            writer.writeheader()
+            writer.writerows(rows)
+    return len(rows)
+
+
 # --- exportación para otro lector ------------------------------------------------------------
 
+READINGS_FILE = "readings.csv"
+READINGS_COLUMNS = ("id", "lectura", "confianza", "falla")
 MLKIT_INDEX = "indice.csv"
 MLKIT_INDEX_COLUMNS = ("id", "formato", "luz")  # nunca el texto: es lo que el otro lector tiene que leer
 MLKIT_CROPS = ("servicio", "set")
@@ -955,6 +980,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     selection = audit_selection(items, args.min_conf, args.match_samples, args.seed)
     write_audit(selection, args.out_dir, args.min_conf, diagnoses)
+    if args.labeled_set:
+        write_readings(args.out_dir / READINGS_FILE, readings)
 
     total, proposal = report["total"], report["propuesta"]
     every_format = report["propuesta_con_todos_los_formatos"]
