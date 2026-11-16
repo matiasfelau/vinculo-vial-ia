@@ -407,6 +407,32 @@ de noche** y sin pasar el tope por foto. Cada reemplazo toma el id de la caja qu
 python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set --original D:\vv-eval\ocr-ar-set-v1 --refresh
 ```
 
+### Una lectura por patente y reposición (`--topup`)
+
+Con las etiquetas cargadas, `--topup` hace dos cosas (no corre ningún OCR):
+
+1. **Agrupa por `texto`** (las filas `legible`) y deja **una sola lectura por patente repetida**: la de noche (la luz
+   más escasa), después la de recorte más grande y, si empatan, la de menor id. Las que salen quedan en `repetidas.csv`
+   (id, caja y a cuál se conservó) y en `descartes.csv` con el motivo `texto_repetido`, así que no vuelven a elegirse.
+2. **Repone hasta `--n` patentes legibles de auto** (formato `anterior` o `mercosur`; no cuentan `ilegible`,
+   `fuera_de_alcance`, las de moto ni las que todavía no tienen estado) con candidatas de auto del resto del export: los
+   mismos filtros y la misma semilla, primero las estimadas de noche y como mucho 2 por foto. Los ids nuevos siguen del
+   mayor que hubo (nunca se reutiliza el de una fila quitada).
+
+```powershell
+python tools/eval/ocr_set.py --topup --dry-run --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+python tools/eval/ocr_set.py --topup           --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+```
+
+`--dry-run` muestra solo las cifras. Sin él, copia antes `--out` a `<out>-vN`, conserva el id y las etiquetas de las
+filas que quedan, escribe `recortes/NNN.png` y `hojas/reposicion-<primer id>-NN.jpg` de las nuevas y reconstruye
+`etiquetas.xlsx` con las etiquetas cargadas y las filas nuevas vacías (cerrá Excel antes: si lo tiene abierto falla antes
+de tocar nada). Cuando las nuevas ya estén etiquetadas se vuelve a correr: las repuestas pueden salir ilegibles, y cada
+pasada repone lo que falte. El resumen trae `pares_a_un_caracter`: cuántos pares de patentes etiquetadas difieren en un
+solo carácter (¿la misma mal escrita?), para revisarlos a ojo; no se saca nada. Como antes, la misma patente en dos
+fotos muy distintas la agarra el `texto`, y la repuesta puede repetir una patente que ya estaba (se ve al etiquetarla y
+se quita en la pasada siguiente).
+
 ### Qué escribe en `--out`
 
 - `recortes/NNN.png`: el recorte de cada patente.
@@ -415,8 +441,8 @@ python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-
   `revisar_moto` trae `sí` en las de relación de 1,2 a menos de 1,5.
 - `hojas/hoja-NN.jpg`: hojas de contacto de 18 casilleros con el número, el recorte grande, la foto entera chica con la
   caja marcada (para confirmar la luz), `D`/`N` (con `?` si no hay escena) y `moto?` si hay que revisar.
-- `cajas.csv` (la caja de cada id y su relación ancho/alto), `descartes.csv`, `reemplazos.csv` (solo tras `--refresh`)
-  e `informe.json` (solo cifras).
+- `cajas.csv` (la caja de cada id y su relación ancho/alto), `descartes.csv`, `reemplazos.csv` (solo tras `--refresh`),
+  `repetidas.csv` y `hojas/reposicion-*.jpg` (solo tras `--topup`) e `informe.json` (solo cifras).
 
 Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo.
 
@@ -483,6 +509,58 @@ con el dataset "patentes" (`report.json`, `audit.csv`, `audit.html`), con estas 
 Si falta etiquetar alguna fila, **falla** y dice cuántas y cuáles (ids): completalas o usá `--incomplete` para saltarlas.
 También falla si hay valores no válidos pegados en el xlsx.
 
+**Las legibles de auto (`en_alcance` en `report.json`).** Es el bloque de las patentes legibles de formato `anterior` o
+`mercosur` (sin las motos ni `otro`), con el OCR como lo usa el servicio (`OCR_MIN_CONF`, normalización por posición en
+`plate_check` y regla de estructura), en total y en `por_luz`:
+
+- `coincidencia_exacta`: la lectura canónica es igual a la etiqueta, sin corregir ninguna confusión;
+- `distribucion`: cada lectura contra **su propia** etiqueta: `PLATE_MATCH` (coincide), `PLATE_FUZZY` (difiere en un
+  carácter), `PLATE_UNREADABLE` (ilegible: sin lectura, poco segura o sin la estructura de una patente) y
+  `PLATE_MISMATCH` (patente distinta);
+- `U2`: cuántas patentes **correctas** salen `PLATE_MISMATCH` (RED, fraude), de cuántas lecturas, con la cota de una cola al
+  95 % (3/N con 0 casos; Clopper-Pearson con más);
+- S5 es `pares_cruzados` (la lectura de cada foto contra la etiqueta de **otra** patente): `todos.mismatch_pct` y
+  `con_lectura_segura`.
+
+**Exportar los recortes para otro lector (`--export-mlkit`).** No corre ningún modelo:
+
+```powershell
+python tools/eval/ocr.py --data-dir D:\vv-eval --labeled-set D:\vv-eval\ocr-ar-set --export-mlkit D:\vv-eval\ocr-ar-set\mlkit
+```
+
+Guarda `<id>.png` de las patentes legibles de auto y un `indice.csv` con `id, formato, luz`: **nunca el texto de las
+etiquetas**. Por defecto el recorte es el que lee el OCR (la caja sin margen, de la foto original: ambos lectores ven
+lo mismo); con `--mlkit-crop set` copia el recorte con margen del 15 % que se ve en la hoja. Reemplaza lo que una
+exportación anterior dejó en la carpeta. Falla si faltan etiquetas (o con `--incomplete` las salta).
+
+### ¿Tapa la redacción la patente denunciada? (`redaction_set.py`)
+
+La excepción de la redacción deja sin tapar la caja que el OCR lee igual que la patente reportada (`MATCH` o `FUZZY`).
+Una detección de patente que **cae adentro** de esa caja (la misma patente detectada otra vez, o un pedazo, como pasa con
+el mosaico de patentes chicas) y que el OCR no lee igual se tapaba, y con eso quedaba tapada parte de la denunciada.
+Ahora `plan_redaction` tampoco tapa las cajas de patente con al menos el **80 % de su área** (`EXEMPT_CONTAINED`) dentro de
+una caja exceptuada. Una patente ajena que solo se superpone un poco se sigue tapando, y sin patente exceptuada no cambia
+nada.
+
+`redaction_set.py` mide el efecto sobre este set, con el texto etiquetado como patente denunciada y la caja anotada como
+su ubicación. Para cada patente legible de auto corre el camino real del paso 8 (detector de patentes con mosaico, OCR de
+cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (solo la
+excepción por OCR) y después (con la regla de las contenidas). Corre el OCR sobre el set: hacerlo con las etiquetas
+completas.
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\redaction-set"; $env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/redaction_set.py --labeled-set D:\vv-eval\ocr-ar-set
+```
+
+- **Qué cuenta como tapar:** la fracción del área de la caja anotada que queda bajo el relleno (con el margen del 10 %).
+  `tapa_algo` es cualquier superposición (como en la medición de S3 de abajo), `tapa_total` cubre al menos el 95 % y
+  `tapa_parcial` entre el 2 % y el 95 %; `cobertura_mayor_que` da los cortes 0, 2, 10, 50 y 95 %.
+- **`con_exencion` y `sin_exencion`:** si el OCR no lee la denunciada no hay excepción y se tapa a propósito (es el costo del
+  fail-closed). Esos casos se informan aparte: la regla nueva actúa solo cuando hay una caja exceptuada.
+- Escribe `redaction.json` (solo cifras, también `por_luz`) y `redaction_rows.csv` (id, luz y fracciones, sin el texto).
+
+
 ### Limitaciones
 
 - **La relación ancho/alto no separa del todo las motos.** En una muestra de 54 de las primeras 135 cajas con menos de
@@ -491,8 +569,8 @@ También falla si hay valores no válidos pegados en el xlsx.
   moto con la caja ancha (de 1,5 o más) pasa sin marca; ya con las etiquetas, `formato` lo corrige.
 - **Pocas de noche, y estimadas:** las 77 son una estimación por brillo y se confirman al etiquetar.
 - **La misma patente en dos fotos muy distintas** (otro ángulo, otra distancia) no se detecta por la imagen: la
-  firma del recorte no sobrevive a un cambio de perspectiva. Esos repetidos se sacan después, agrupando por `texto`
-  cuando las etiquetas estén completas.
+  firma del recorte no sobrevive a un cambio de perspectiva. Esos repetidos se sacan agrupando por `texto` con las
+  etiquetas cargadas (`--topup`).
 - "Public Domain" lo declara quien subió el dataset; el origen de las fotos no se auditó (ver
   [THIRD_PARTY.md](../../THIRD_PARTY.md)). Solo se usa para evaluar.
 
@@ -1885,7 +1963,9 @@ con cualquier umbral, que es el comportamiento seguro, no un efecto del umbral.
 
 Es una muestra chica (26 fotos con formato en alcance, de patentes de terceros y no del encuadre de la app) y un solo
 conjunto: no es una tasa. Para cerrar la excepción también cuando el OCR no lee una caja que cae dentro de la patente
-denunciada, habría que exceptuar las cajas contenidas en una exceptuada; no se hizo.
+denunciada, habría que exceptuar las cajas contenidas en una exceptuada; no se hizo. **Se hizo después**
+(`EXEMPT_CONTAINED` = 80 %, ver "¿Tapa la redacción la patente denunciada?" más arriba) y se mide sobre el set etiquetado
+con `redaction_set.py`.
 
 **OCR por defecto.** `MODEL_OCR=parseq` también es ahora el default de `config.py` y `.env.example` (antes `null`, que no era
 una decisión sino el valor inicial del registro de modelos: no hay nada en el historial que lo justifique por licencia). Sin OCR,

@@ -14,7 +14,7 @@ import os
 import re
 import shutil
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,7 @@ FORMATS = ("anterior", "mercosur", "moto", "otro")
 LIGHTS = ("dia", "noche")
 STATES = ("legible", "ilegible", "fuera_de_alcance")
 STATE_LEGIBLE = "legible"
+CAR_FORMATS = ("anterior", "mercosur")  # los que lee el servicio: una sola línea
 REVIEW_VALUE = "sí"
 LABEL_FIELDS = ("texto", "formato", "luz", "estado")
 # Validación de Excel de la celda C2 (se extiende a la columna): vacío, o 6 a 7 caracteres, solo letras
@@ -197,6 +198,57 @@ def to_csv(set_dir: Path) -> Path | None:
         writer.writeheader()
         writer.writerows(merged)
     return backup
+
+
+# --- repetidos y reposición ----------------------------------------------------------------------------
+
+
+def is_legible_car(row: Mapping[str, str]) -> bool:
+    """Una patente legible de auto (formato anterior o Mercosur) con su texto cargado."""
+    return row.get("estado") == STATE_LEGIBLE and row.get("formato") in CAR_FORMATS and bool(row.get("texto"))
+
+
+def crop_area(set_dir: Path, row: Mapping[str, str]) -> int:
+    """Píxeles del recorte de una fila (0 si no se puede leer): a más resolución, mejor para conservar."""
+    crop = _decode(set_dir / row["recorte"])
+    return 0 if crop is None else int(crop.shape[0] * crop.shape[1])
+
+
+def repeated_texts(
+    rows: Sequence[Mapping[str, str]], area: Callable[[Mapping[str, str]], int]
+) -> list[tuple[str, str]]:
+    """Una sola lectura por patente repetida: pares `(id que sale, id que se conserva)`.
+
+    Agrupa por el texto de las filas legibles. De cada grupo se conserva la de noche (la luz más escasa),
+    después la de recorte más grande y, si empatan, la de menor id.
+    """
+    groups: dict[str, list[Mapping[str, str]]] = {}
+    for row in rows:
+        if row.get("estado") == STATE_LEGIBLE and row.get("texto"):
+            groups.setdefault(row["texto"], []).append(row)
+    pairs: list[tuple[str, str]] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        keep = min(group, key=lambda row: (row.get("luz") != "noche", -area(row), row["id"]))
+        pairs.extend((row["id"], keep["id"]) for row in group if row is not keep)
+    return sorted(pairs)
+
+
+def near_texts(rows: Sequence[Mapping[str, str]]) -> list[tuple[str, str]]:
+    """Pares de ids de patentes legibles de auto que difieren en un solo carácter (¿la misma mal escrita?).
+
+    Solo para revisar a ojo: no se saca nada. Nunca devuelve los textos.
+    """
+    from rapidfuzz.distance import Levenshtein
+
+    cars = [row for row in rows if is_legible_car(row)]
+    return [
+        (a["id"], b["id"])
+        for index, a in enumerate(cars)
+        for b in cars[index + 1 :]
+        if a["texto"] != b["texto"] and Levenshtein.distance(a["texto"], b["texto"]) == 1
+    ]
 
 
 # --- armado del xlsx -------------------------------------------------------------------------------
