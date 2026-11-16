@@ -556,3 +556,22 @@ def test_en_paralelo_si_falla_una_sola_foto_no_se_sube_ninguna() -> None:
     result, writer = _run(build_scenario(), models, redaction=_in_parallel(3))
 
     _unavailable(result, writer)
+
+
+# --- cajas contenidas en la patente exceptuada ------------------------------------------------------
+
+
+NESTED = Box(20, 12, 50, 28, 0.6, BoxLabel.PLATE)  # un pedazo de PLATE_A (la reportada), de 16x30
+
+
+def test_una_deteccion_contenida_en_la_patente_denunciada_no_la_tapa() -> None:
+    """El mosaico detecta dos veces la misma patente: la caja de adentro no es una patente ajena."""
+    scenario = build_scenario()
+    models = _models_with_two_plates()
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), NESTED]
+
+    _, writer = _run(scenario, models)
+
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 35, 20) > LIGHT  # la patente denunciada queda a la vista, también bajo el pedazo
+    assert _g(general, 40, 65) < DARK  # la ajena sigue tapada
