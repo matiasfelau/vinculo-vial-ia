@@ -32,7 +32,6 @@ from typing import Any
 
 import numpy as np
 import ocr_labels
-from cascade import MemoryStore, PassthroughDecryptor
 from ocr import IN_SCOPE_FORMATS, PHOTOS_DIR, Sample, inside_repo, load_set_samples, sample_format
 
 from vvi_ia.adapters.imaging import CvImageDecoder, JpegRenderer
@@ -53,6 +52,26 @@ PARTIAL_FRACTION = 0.02  # y al menos esto: tapa parcial (menos es un borde que 
 THRESHOLDS = (0.0, PARTIAL_FRACTION, 0.10, 0.50, TOTAL_FRACTION)  # cortes de la cobertura que se informan
 ROW_COLUMNS = ("id", "luz", "patentes_detectadas", "exceptuadas", "cobertura_antes", "cobertura_despues")
 NONE, PARTIAL, TOTAL = "ninguna", "parcial", "total"
+
+
+class PassthroughDecryptor:
+    """Sin cifrado: el descifrado HPKE no entra en esta medición."""
+
+    def open(self, ciphertext: bytes, info: bytes) -> bytes:
+        return ciphertext
+
+
+class MemoryStore:
+    """Almacenamiento en memoria: el caso de uso no se ejecuta, solo se usan sus piezas del paso 8."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def get(self, key: str) -> bytes:
+        return self.objects[key]
+
+    def put(self, key: str, body: bytes, content_type: str) -> None:
+        self.objects[key] = body
 
 
 def coverage(target: Box, plan: Sequence[Box]) -> float:

@@ -41,7 +41,6 @@ def load() -> ModuleType:
 
 
 rs = load()
-from cascade import MemoryStore, PassthroughDecryptor  # noqa: E402
 from ocr import Sample  # noqa: E402
 
 REDACT = RedactionThresholds(plate_min_conf=0.10)
@@ -81,7 +80,7 @@ class FakeReader:
 
 
 def use_case(plates: list[Box] | None, reader: FakeReader | None = None) -> ValidateEvidence:
-    store = MemoryStore()
+    store = rs.MemoryStore()
     models = Models(
         FakeDetector(plates),
         NullCarSegmenter(),
@@ -94,7 +93,7 @@ def use_case(plates: list[Box] | None, reader: FakeReader | None = None) -> Vali
     return ValidateEvidence(
         store=store,
         writer=store,
-        decryptor=PassthroughDecryptor(),
+        decryptor=rs.PassthroughDecryptor(),
         decoder=CvImageDecoder(),
         renderer=JpegRenderer(),
         models=models,
