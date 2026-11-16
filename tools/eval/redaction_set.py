@@ -143,35 +143,34 @@ def measure_samples(
 ) -> tuple[list[Measure], Counter[str]]:
     """Mide cada patente legible de auto. Las lecturas del OCR se reutilizan entre filas de la misma foto."""
     decoder = CvImageDecoder()
-    runs: dict[tuple[str, str], tuple[EvidenceImage, _Run] | None] = {}
-    measures: list[Measure] = []
+    by_photo: dict[tuple[str, str], list[tuple[int, Sample]]] = {}
+    for position, sample in enumerate(samples):
+        if sample_format(sample) in IN_SCOPE_FORMATS:
+            by_photo.setdefault((sample.split, sample.file), []).append((position, sample))
+    measured: list[tuple[int, Measure]] = []
     skipped: Counter[str] = Counter()
-    for sample in samples:
-        if sample_format(sample) not in IN_SCOPE_FORMATS:
+    for (split, file), items in by_photo.items():  # una foto por vez: la decodificada pesa decenas de MB
+        try:
+            pixels = decoder.decode((photos_dir / split / file).read_bytes())
+        except (OSError, ImageDecodeError):
+            skipped["foto ilegible"] += len(items)
             continue
-        key = (sample.split, sample.file)
-        if key not in runs:
-            try:
-                pixels = decoder.decode((photos_dir / sample.split / sample.file).read_bytes())
-            except (OSError, ImageDecodeError):
-                runs[key] = None
-            else:
-                view = reduce_for_models(pixels, model_max_side_px)
-                runs[key] = (
-                    EvidenceImage(role=EvidenceRole.GENERAL, index=0, pixels=pixels, view=view),
-                    _Run(models=use_case._models),  # el mismo conjunto de modelos
+        image = EvidenceImage(
+            role=EvidenceRole.GENERAL,
+            index=0,
+            pixels=pixels,
+            view=reduce_for_models(pixels, model_max_side_px),
+        )
+        run = _Run(models=use_case._models)  # el mismo conjunto de modelos
+        for position, sample in items:
+            result = measure_one(use_case, run, image, canonicalize(sample.label), sample.box, thresholds)
+            if result is None:
+                measured.append(
+                    (position, Measure(sample.ident, sample.light, 0, 0, 0.0, 0.0, unavailable=True))
                 )
-        loaded = runs[key]
-        if loaded is None:
-            skipped["foto ilegible"] += 1
-            continue
-        image, run = loaded
-        result = measure_one(use_case, run, image, canonicalize(sample.label), sample.box, thresholds)
-        if result is None:
-            measures.append(Measure(sample.ident, sample.light, 0, 0, 0.0, 0.0, unavailable=True))
-        else:
-            measures.append(Measure(sample.ident, sample.light, *result))
-    return measures, skipped
+            else:
+                measured.append((position, Measure(sample.ident, sample.light, *result)))
+    return [measure for _, measure in sorted(measured, key=lambda item: item[0])], skipped
 
 
 def rate(count: int, total: int) -> float | None:

@@ -192,3 +192,20 @@ def test_la_exportacion_falla_si_faltan_etiquetas_y_no_se_hace_dentro_del_repo(
     assert code == 1 and "dentro del repositorio" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         ocr.parse_args(["--data-dir", str(tmp_path), "--export-mlkit", str(tmp_path / "x")])
+
+
+def test_el_cache_de_fotos_es_acotado_y_no_cambia_las_lecturas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    set_dir, photos = labeled_set(tmp_path)
+    loaded = ocr.load_set_samples(set_dir)
+    samples = [*loaded.samples, loaded.samples[0], *loaded.samples]  # la foto 1 vuelve después de otras
+    full, _ = ocr.read_samples(samples, photos, FixedReader())
+
+    monkeypatch.setattr(ocr, "IMAGE_CACHE", 1)
+    small, skipped = ocr.read_samples(samples, photos, FixedReader())
+
+    assert not skipped and len(small) == len(full) == 7
+    assert [(r.sample.ident, r.text, r.conf) for r, _ in small] == [
+        (r.sample.ident, r.text, r.conf) for r, _ in full
+    ]

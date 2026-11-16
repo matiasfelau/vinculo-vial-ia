@@ -26,7 +26,7 @@ import math
 import os
 import random
 import sys
-from collections import Counter
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -269,7 +269,7 @@ def read_samples(
 ) -> tuple[list[tuple[Reading, Any]], Counter[str]]:
     """Lee cada muestra. Devuelve las lecturas con su recorte y cuántas se descartaron, por motivo."""
     decoder = CvImageDecoder()
-    images: dict[tuple[str, str], EvidenceImage | None] = {}
+    images: OrderedDict[tuple[str, str], EvidenceImage | None] = OrderedDict()
     readings: list[tuple[Reading, Any]] = []
     discarded: Counter[str] = Counter()
     for sample in samples:
@@ -280,6 +280,10 @@ def read_samples(
                 images[key] = EvidenceImage(role=EvidenceRole.PLATE, index=0, pixels=pixels)
             except (OSError, ImageDecodeError):
                 images[key] = None
+            while len(images) > IMAGE_CACHE:  # las fotos de celular decodificadas pesan decenas de MB
+                images.popitem(last=False)
+        else:
+            images.move_to_end(key)
         image = images[key]
         if image is None:
             discarded["foto ilegible"] += 1
@@ -390,6 +394,7 @@ MIN_MISSING_CHARS = 2  # una sola letra de menos es un error de lectura, no un r
 MIN_CHAR_AREA = 20
 DOUBTFUL_MIN_CONF = 0.90  # una lectura tan segura de una patente válida que difiere en ≥2 caracteres
 EDGE_PIXELS = 1  # la caja toca el borde de la foto
+IMAGE_CACHE = 4  # fotos enteras decodificadas que se guardan a la vez (300 fotos de 12 MP no entran en RAM)
 
 
 # Caracteres que el OCR confunde por su forma. Las tablas de `domain/plate.py` solo corrigen las
