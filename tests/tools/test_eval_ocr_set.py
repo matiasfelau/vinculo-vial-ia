@@ -445,3 +445,21 @@ def test_no_pisa_unas_etiquetas_existentes(tmp_path: Path, capsys: pytest.Captur
     assert code == 1
     assert "no se pisa" in capsys.readouterr().out
     assert (out / "etiquetas.csv").read_text(encoding="utf-8") == "id,texto\n001,ABC123\n"
+
+
+def test_la_limpieza_regenera_el_xlsx_si_habia_uno_sin_etiquetas(tmp_path: Path) -> None:
+    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("PIL")
+    src, reference, out, _ = _old_set(tmp_path)
+    ocr_set.ocr_labels.build_xlsx(out, src)
+    before = (out / "etiquetas.xlsx").read_bytes()
+
+    summary = ocr_set.refresh(src, reference, out, count=6, night_min=1, seed=5)
+
+    assert summary["xlsx_regenerado"] is True
+    after = openpyxl.load_workbook(out / "etiquetas.xlsx")["etiquetas"]
+    assert [after.cell(row=r, column=1).value for r in range(2, 8)] == [f"{n:03d}" for n in range(1, 7)]
+    assert len(after._images) == 6  # las miniaturas de los reemplazos también están
+    assert (
+        out.with_name(out.name + "-v1") / "etiquetas.xlsx"
+    ).read_bytes() == before  # el anterior, respaldado
