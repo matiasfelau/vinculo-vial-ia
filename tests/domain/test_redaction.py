@@ -1,5 +1,11 @@
 from vvi_ia.domain.model import Box, BoxLabel
-from vvi_ia.domain.redaction import RedactionThresholds, contained_fraction, expand, plan_redaction
+from vvi_ia.domain.redaction import (
+    RedactionThresholds,
+    contained_fraction,
+    expand,
+    main_plate,
+    plan_redaction,
+)
 
 THRESHOLDS = RedactionThresholds(plate_min_conf=0.20)
 W, H = 1000, 800
@@ -154,3 +160,91 @@ def test_contained_fraction() -> None:
     assert contained_fraction(Box(90, 0, 110, 100), outer) == 0.5
     assert contained_fraction(Box(200, 200, 300, 300), outer) == 0.0
     assert contained_fraction(Box(5, 5, 5, 9), outer) == 0.0  # sin área
+
+
+# --- patente principal de la foto de patente --------------------------------------------------------
+
+CAR = Box(100, 100, 900, 700, 0.95, BoxLabel.CAR)
+
+
+def _plate_at(x1: float, y1: float, x2: float, y2: float, conf: float = 0.9) -> Box:
+    return Box(x1, y1, x2, y2, conf, BoxLabel.PLATE)
+
+
+def test_la_principal_es_la_de_mayor_confianza_dentro_del_vehiculo_dominante() -> None:
+    small_car = Box(0, 0, 50, 50, 0.99, BoxLabel.CAR)  # el dominante es el más grande
+    best_inside = _plate_at(400, 500, 500, 540, conf=0.7)
+    bigger_outside = _plate_at(920, 100, 990, 140, conf=0.95)
+    weaker_inside = _plate_at(200, 500, 300, 540, conf=0.4)
+
+    main = main_plate([small_car, CAR, bigger_outside, best_inside, weaker_inside], 0.10)
+
+    assert main == best_inside
+
+
+def test_si_ninguna_cae_en_el_vehiculo_la_principal_es_la_caja_de_patente_mas_grande() -> None:
+    outside_big = _plate_at(920, 100, 990, 140, conf=0.2)
+    outside_small = _plate_at(920, 300, 950, 320, conf=0.99)
+
+    assert main_plate([CAR, outside_small, outside_big], 0.10) == outside_big
+
+
+def test_sin_vehiculo_la_principal_es_la_caja_de_patente_mas_grande() -> None:
+    big, small = _plate_at(0, 0, 100, 40, conf=0.2), _plate_at(0, 100, 50, 120, conf=0.9)
+
+    assert main_plate([small, big], 0.10) == big
+
+
+def test_la_principal_ignora_las_patentes_bajo_la_confianza_de_redaccion_y_sin_patentes_no_hay() -> None:
+    weak = _plate_at(400, 500, 500, 540, conf=0.05)
+    strong = _plate_at(200, 500, 250, 520, conf=0.3)
+
+    assert main_plate([CAR, weak, strong], 0.10) == strong
+    assert main_plate([CAR, weak], 0.10) is None
+    assert main_plate([CAR], 0.10) is None
+    assert main_plate([], 0.10) is None
+    assert main_plate(None, 0.10) is None
+
+
+def test_estar_dentro_del_vehiculo_es_tener_al_menos_la_mitad_del_area_adentro() -> None:
+    half_in = _plate_at(850, 300, 950, 340, conf=0.5)  # 50 de 100 px adentro
+    less_in = _plate_at(860, 300, 960, 340, conf=0.9)  # 40 %
+    big_outside = _plate_at(920, 100, 1100, 200, conf=0.3)
+
+    assert main_plate([CAR, half_in, less_in, big_outside], 0.10) == half_in
+
+
+def test_la_principal_no_se_tapa_aunque_el_ocr_no_la_lea_y_las_demas_siguen_la_regla() -> None:
+    main, other = _plate_at(400, 500, 500, 540, 0.9), _plate_at(150, 500, 250, 540, 0.5)
+
+    plan = plan_redaction([CAR, main, other], THRESHOLDS, W, H, main_plate=main)
+
+    assert plan is not None and len(plan) == 1
+    assert plan[0].x1 < other.x1 < plan[0].x2  # lo que se tapa es la otra
+
+
+def test_las_cajas_contenidas_en_la_principal_tampoco_se_tapan() -> None:
+    main = _plate_at(400, 500, 500, 540, 0.9)
+    piece = _plate_at(420, 505, 480, 535, 0.5)
+
+    assert plan_redaction([CAR, main, piece], THRESHOLDS, W, H, main_plate=main) == []
+
+
+def test_la_principal_se_suma_a_las_exceptuadas_por_lectura() -> None:
+    read, main, other = (
+        _plate_at(100, 500, 200, 540),
+        _plate_at(400, 500, 500, 540),
+        _plate_at(600, 500, 700, 540),
+    )
+
+    plan = plan_redaction([read, main, other], THRESHOLDS, W, H, exempt_plates=[read], main_plate=main)
+
+    assert plan is not None and len(plan) == 1 and plan[0].x1 < other.x1
+
+
+def test_sin_principal_el_plan_es_el_de_siempre() -> None:
+    main = _plate_at(400, 500, 500, 540, 0.9)
+
+    plan = plan_redaction([CAR, main], THRESHOLDS, W, H)
+
+    assert plan is not None and len(plan) == 1

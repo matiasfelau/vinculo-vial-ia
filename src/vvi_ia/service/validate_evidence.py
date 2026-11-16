@@ -45,7 +45,7 @@ from vvi_ia.domain.ports import (
     PlateReader,
     VehicleDetector,
 )
-from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
+from vvi_ia.domain.redaction import RedactionThresholds, main_plate, plan_redaction
 from vvi_ia.domain.reid import ReidOutcome, same_vehicle
 from vvi_ia.domain.verdict import aggregate
 from vvi_ia.service.payload import EvidenceUploaded
@@ -488,7 +488,13 @@ class ValidateEvidence:
             if detections is None:
                 return None
             exempt = self._matching_plates(run, image, detections, reported)
-            return plan_redaction(detections, thresholds, image.width, image.height, exempt)
+            # En la foto de patente la patente principal nunca se tapa; en las demás no cambia nada.
+            main = (
+                main_plate(detections, thresholds.plate_min_conf)
+                if image.role == EvidenceRole.PLATE
+                else None
+            )
+            return plan_redaction(detections, thresholds, image.width, image.height, exempt, main_plate=main)
 
         workers = min(self._redaction.workers, len(images))
         if workers > 1:

@@ -14,6 +14,8 @@ REDACTION_MARGIN = 0.10
 # denunciada) es la misma patente o un pedazo de ella (el mosaico de patentes chicas la detecta dos veces):
 # tapar esa detección taparía la denunciada.
 EXEMPT_CONTAINED = 0.8
+# Una patente está "dentro" del vehículo dominante si al menos esta parte de su área cae en su caja.
+MAIN_PLATE_INSIDE = 0.5
 
 
 @dataclass(frozen=True)
@@ -49,6 +51,25 @@ def contained_fraction(inner: Box, outer: Box) -> float:
     return overlap.area / inner.area
 
 
+def main_plate(detections: Sequence[Box] | None, plate_min_conf: float) -> Box | None:
+    """La patente principal de una foto de patente: la que nunca se tapa, la lea o no el OCR.
+
+    Es la caja de patente de mayor confianza dentro de la caja del vehículo dominante (la caja `car` más
+    grande); si ninguna cae adentro (o no hay vehículo), la caja de patente más grande de la foto. Solo se
+    consideran las patentes con confianza de redacción (`plate_min_conf`). `None` si no hay ninguna.
+    """
+    plates = [box for box in detections or () if box.label == BoxLabel.PLATE and box.conf >= plate_min_conf]
+    if not plates:
+        return None
+    cars = [box for box in detections or () if box.label == BoxLabel.CAR]
+    if cars:
+        car = max(cars, key=lambda box: box.area)
+        inside = [plate for plate in plates if contained_fraction(plate, car) >= MAIN_PLATE_INSIDE]
+        if inside:
+            return max(inside, key=lambda box: box.conf)
+    return max(plates, key=lambda box: box.area)
+
+
 def plan_redaction(
     detections: Sequence[Box] | None,
     thresholds: RedactionThresholds,
@@ -57,6 +78,7 @@ def plan_redaction(
     exempt_plates: Collection[Box] = (),
     margin: float = REDACTION_MARGIN,
     exempt_contained: float | None = EXEMPT_CONTAINED,
+    main_plate: Box | None = None,
 ) -> list[Box] | None:
     """Cajas a tapar con relleno opaco, o `None` si no se puede redactar (fail-closed).
 
@@ -66,9 +88,15 @@ def plan_redaction(
     las cajas de patente que tienen adentro al menos `exempt_contained` de su área (la misma patente
     detectada otra vez, o un pedazo): taparlas taparía la denunciada. Con `None` solo se exceptúan las cajas
     de `exempt_plates` (el comportamiento anterior, para comparar en las mediciones).
+
+    `main_plate` (solo en la foto de patente, ver `main_plate`) se trata como una exceptuada más: no se tapa,
+    aunque el OCR no la lea, y las cajas contenidas en ella tampoco. Las demás patentes siguen la regla de
+    siempre.
     """
     if detections is None:
         return None
+    if main_plate is not None:
+        exempt_plates = (*exempt_plates, main_plate)
     boxes = [
         plate
         for plate in detections

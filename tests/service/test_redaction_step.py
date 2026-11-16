@@ -556,3 +556,50 @@ def test_una_deteccion_contenida_en_la_patente_denunciada_no_la_tapa() -> None:
     general = _uploaded(writer, scenario, "general-0")
     assert _g(general, 35, 20) > LIGHT  # la patente denunciada queda a la vista, también bajo el pedazo
     assert _g(general, 40, 65) < DARK  # la ajena sigue tapada
+
+
+# --- patente principal de la foto de patente ------------------------------------------------------------
+
+
+def _two_plates_in_the_plate_photo() -> FakeModels:
+    """Dos patentes en la foto de patente y en la general (la de arriba, más confiable); el OCR no lee."""
+    models = happy_models()
+    plate_a = Box(10, 10, 60, 30, 0.9, BoxLabel.PLATE)
+    plate_b = Box(10, 50, 70, 80, 0.5, BoxLabel.PLATE)
+    for marker in (GENERAL, PLATE):
+        models.vehicle.by_marker[marker] = [Box(5, 5, 95, 95, 0.9, BoxLabel.CAR), plate_a, plate_b]
+    models.plate.override = lambda crop: None  # ninguna se lee: no hay excepción por lectura
+    return models
+
+
+def test_en_la_foto_de_patente_la_principal_no_se_tapa_aunque_el_ocr_no_la_lea() -> None:
+    scenario = build_scenario()
+
+    result, writer = _run(scenario, _two_plates_in_the_plate_photo())
+
+    assert result.verdict == Verdict.GREEN
+    plate_photo = _uploaded(writer, scenario, "plate-0")
+    assert _g(plate_photo, 35, 20) > LIGHT  # la principal queda a la vista
+    assert _g(plate_photo, 40, 65) < DARK  # la otra se tapa
+
+
+def test_en_la_foto_general_la_regla_de_la_principal_no_cambia_nada() -> None:
+    scenario = build_scenario()
+
+    _, writer = _run(scenario, _two_plates_in_the_plate_photo())
+
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 35, 20) < DARK and _g(general, 40, 65) < DARK  # sin lectura se tapan las dos
+
+
+def test_la_principal_de_la_foto_de_patente_se_elige_por_confianza_dentro_del_auto() -> None:
+    scenario = build_scenario()
+    models = _two_plates_in_the_plate_photo()
+    other = Box(10, 10, 60, 30, 0.4, BoxLabel.PLATE)
+    stronger = Box(10, 50, 70, 80, 0.95, BoxLabel.PLATE)  # ahora la de abajo es la más confiable
+    models.vehicle.by_marker[PLATE] = [Box(5, 5, 95, 95, 0.9, BoxLabel.CAR), other, stronger]
+
+    _, writer = _run(scenario, models)
+
+    plate_photo = _uploaded(writer, scenario, "plate-0")
+    assert _g(plate_photo, 40, 65) > LIGHT and _g(plate_photo, 35, 20) < DARK
