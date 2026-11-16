@@ -1,7 +1,7 @@
 """Latencia de la cascada completa por alerta, en CPU y con los modelos reales.
 
-Arma alertas con fotos de tus datasets (autos con patente y zonas del vehículo, como las que arma
-`capture_sets.py` con el encuadre de 1-2 m; CarDD no se usa) y corre el
+Arma alertas de dos fotos (GENERAL y PLATE) con fotos de tus datasets (autos con patente, como las que
+arma `capture_sets.py` con el encuadre de 1-2 m; CarDD no se usa) y corre el
 caso de uso `ValidateEvidence` de punta a punta: la misma cascada y los mismos adaptadores que el servicio,
 de a una alerta por vez. La foto GENERAL y la PLATE son la misma (un auto con patente visible) y la patente
 reportada es la que lee el OCR, para que la cascada llegue a todas las etapas, incluida la redacción, en
@@ -39,7 +39,7 @@ from detector import REPO_ROOT
 from vvi_ia.adapters.imaging import CvImageDecoder, JpegRenderer
 from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.config import Settings
-from vvi_ia.domain.model import AlertType, BoxLabel, EvidenceRole, Pixels
+from vvi_ia.domain.model import AlertType, BoxLabel, EvidenceRole
 from vvi_ia.domain.plate import canonicalize
 from vvi_ia.main import adapter_params, build_redaction, build_thresholds
 from vvi_ia.service.payload import EvidenceItem, EvidenceUploaded
@@ -151,15 +151,6 @@ def summarize(values: Sequence[float]) -> dict[str, float]:
     }
 
 
-def has_part(models: Any, image: Pixels, min_area: float) -> bool:
-    """Lo mismo que la presencia del servicio para DETAIL: un auto (la patente sola ya no cuenta)."""
-    minimum = min_area * image.shape[0] * image.shape[1]
-    boxes = models.vehicle.detect(image) or ()
-    if any(b.label == BoxLabel.CAR and b.area >= minimum for b in boxes):
-        return True
-    return any(int(car.mask.sum()) >= minimum for car in models.cars.cars(image) or ())
-
-
 def readable_plates(
     models: Any,
     pool: Sequence[Path],
@@ -230,9 +221,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--general-dir", type=Path, help="autos con patente (por defecto <data-dir>/damage-fp/images)"
     )
-    parser.add_argument(
-        "--detail-dir", type=Path, required=True, help="zonas del vehículo (los `detail` de capture_sets)"
-    )
     args = parser.parse_args(argv)
     for flag, value in (("--out-dir", args.out_dir), ("--models-dir", args.models_dir)):
         if value is None:
@@ -280,7 +268,7 @@ def main(argv: list[str] | None = None) -> int:
     if Path(args.out_dir).resolve().is_relative_to(REPO_ROOT):
         print("La salida no puede estar dentro del repositorio.", file=sys.stderr)
         return 1
-    folders = {"autos": args.general_dir, "detalles": args.detail_dir}
+    folders = {"autos": args.general_dir}
     pools = {name: photos_in(Path(folder)) for name, folder in folders.items()}
     for name, pool in pools.items():
         if not pool or Path(folders[name]).resolve().is_relative_to(REPO_ROOT):
@@ -322,7 +310,6 @@ def main(argv: list[str] | None = None) -> int:
         redaction=build_redaction(settings),
     )
     capture = DurationCapture()
-    decoder = CvImageDecoder()
     logging.getLogger("vvi_ia.service.validate_evidence").addHandler(capture)
     logging.getLogger("vvi_ia.service.validate_evidence").setLevel(logging.INFO)
     rng = random.Random(args.seed)  # noqa: S311 - muestreo de fotos, no criptografía
@@ -333,39 +320,16 @@ def main(argv: list[str] | None = None) -> int:
 
     readable = readable_plates(models, pools["autos"], rng, args.alerts, prepare)
 
-    present: dict[Path, bool] = {}
-
-    def shows_a_part(path: Path) -> bool:
-        """La foto de detalle pasa la presencia de auto (si no, la cascada se cortaría antes de tiempo)."""
-        if path not in present:
-            present[path] = has_part(models, decoder.decode(path.read_bytes()), settings.presence_min_area)
-        return present[path]
-
-    def pick_detail() -> Path:
-        while True:
-            path = prepare(rng.choice(pools["detalles"]))
-            if shows_a_part(path):
-                return path
-
-    def layouts(kind: str, details: int = 1) -> list[Layout]:
+    def layouts() -> list[Layout]:
         out = []
         for _ in range(args.alerts):
             car, plate = rng.choice(readable)
-            photos = {EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car]}
-            if kind == "crashed":
-                photos[EvidenceRole.DETAIL] = [pick_detail() for _ in range(details)]
-            else:
-                photos[EvidenceRole.CONTEXT] = [car]  # el mismo auto: así la re-ID no corta la cascada
-            out.append(Layout(photos, plate))
+            out.append(Layout({EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car]}, plate))
         return out
 
     scenarios = {
-        "CRASHED de 3 fotos (general, patente, 1 detalle)": (AlertType.CRASHED, layouts("crashed", 1)),
-        "CRASHED de 5 fotos (general, patente, 3 detalles)": (AlertType.CRASHED, layouts("crashed", 3)),
-        "PARKED_ON_GARAGE de 3 fotos (general, patente, contexto)": (
-            AlertType.PARKED_ON_GARAGE,
-            layouts("garage"),
-        ),
+        "CRASHED de 2 fotos (general, patente)": (AlertType.CRASHED, layouts()),
+        "PARKED_ON_GARAGE de 2 fotos (general, patente)": (AlertType.PARKED_ON_GARAGE, layouts()),
     }
     report: dict[str, Any] = {
         "modelos": models.versions(),

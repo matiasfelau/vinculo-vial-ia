@@ -24,7 +24,6 @@ def _raw(alert_type: str = "CRASHED", roles: list[tuple[str, int]] | None = None
     alert_id = str(uuid.uuid4())
     if roles is None:
         roles = [("GENERAL", 0), ("PLATE", 0)]
-        roles += [("DETAIL", 0)] if alert_type == "CRASHED" else [("CONTEXT", 0)]
     return {
         "alert_id": alert_id,
         "alert_type": alert_type,
@@ -38,25 +37,23 @@ def _parse(raw: dict[str, Any]) -> None:
     parse_evidence_uploaded(raw, BUCKET)
 
 
-def test_crashed_valido() -> None:
-    payload = parse_evidence_uploaded(_raw("CRASHED"), BUCKET)
+@pytest.mark.parametrize("alert_type", [AlertType.CRASHED, AlertType.PARKED_ON_GARAGE])
+def test_los_dos_tipos_aceptan_exactamente_general_y_plate(alert_type: AlertType) -> None:
+    payload = parse_evidence_uploaded(_raw(alert_type.value), BUCKET)
 
-    assert payload.alert_type == AlertType.CRASHED
-    assert [i.role for i in payload.evidence] == [
-        EvidenceRole.GENERAL,
-        EvidenceRole.PLATE,
-        EvidenceRole.DETAIL,
-    ]
+    assert payload.alert_type == alert_type
+    assert [i.role for i in payload.evidence] == [EvidenceRole.GENERAL, EvidenceRole.PLATE]
+    assert [i.key for i in payload.items(EvidenceRole.PLATE)] == [payload.evidence[1].key]
 
 
-def test_garage_valido() -> None:
-    assert parse_evidence_uploaded(_raw("PARKED_ON_GARAGE"), BUCKET).alert_type == AlertType.PARKED_ON_GARAGE
+def test_el_orden_de_las_partes_no_importa() -> None:
+    payload = parse_evidence_uploaded(_raw("CRASHED", [("PLATE", 0), ("GENERAL", 0)]), BUCKET)
+
+    assert {i.role for i in payload.evidence} == {EvidenceRole.GENERAL, EvidenceRole.PLATE}
 
 
-def test_crashed_acepta_hasta_tres_detalles() -> None:
-    roles = [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0), ("DETAIL", 1), ("DETAIL", 2)]
-
-    assert len(parse_evidence_uploaded(_raw("CRASHED", roles), BUCKET).items(EvidenceRole.DETAIL)) == 3
+def test_los_roles_detail_y_context_ya_no_existen() -> None:
+    assert {role.value for role in EvidenceRole} == {"GENERAL", "PLATE"}
 
 
 def test_los_campos_extra_se_ignoran() -> None:
@@ -67,28 +64,38 @@ def test_los_campos_extra_se_ignoran() -> None:
     _parse(raw)
 
 
+@pytest.mark.parametrize("alert_type", ["CRASHED", "PARKED_ON_GARAGE"])
 @pytest.mark.parametrize(
-    ("alert_type", "roles"),
+    "roles",
     [
-        ("CRASHED", [("GENERAL", 0), ("PLATE", 0)]),  # falta DETAIL
-        (
-            "CRASHED",
-            [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0), ("DETAIL", 1), ("DETAIL", 2), ("DETAIL", 3)],
-        ),
-        ("CRASHED", [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0), ("CONTEXT", 0)]),  # rol ajeno
-        ("PARKED_ON_GARAGE", [("GENERAL", 0), ("PLATE", 0)]),  # falta CONTEXT
-        ("PARKED_ON_GARAGE", [("GENERAL", 0), ("PLATE", 0), ("CONTEXT", 0), ("DETAIL", 0)]),
-        ("PARKED_ON_GARAGE", [("GENERAL", 0), ("PLATE", 0), ("CONTEXT", 0), ("CONTEXT", 1)]),
-        ("CRASHED", [("PLATE", 0), ("DETAIL", 0)]),  # falta GENERAL
-        ("CRASHED", [("GENERAL", 0), ("GENERAL", 1), ("PLATE", 0), ("DETAIL", 0)]),
-        ("CRASHED", [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0), ("DETAIL", 0)]),  # índice repetido
-        ("CRASHED", [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 1)]),  # índice no contiguo
-        ("CRASHED", []),
+        [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0)],  # la app vieja: un detalle de más
+        [("GENERAL", 0), ("PLATE", 0), ("CONTEXT", 0)],  # la app vieja: un contexto de más
+        [("GENERAL", 0), ("DETAIL", 0)],  # un detalle en lugar de la patente
+        [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0), ("DETAIL", 1), ("DETAIL", 2)],
+        [("GENERAL", 0), ("PLATE", 0), ("GENERAL", 1)],  # tres partes
+        [("GENERAL", 0), ("PLATE", 0), ("PLATE", 1)],
+        [("GENERAL", 0), ("GENERAL", 1), ("PLATE", 0)],
+        [("GENERAL", 0)],  # falta PLATE
+        [("PLATE", 0)],  # falta GENERAL
+        [("GENERAL", 1), ("PLATE", 0)],  # índice no contiguo
+        [("GENERAL", 0), ("PLATE", 1)],
+        [],
     ],
 )
-def test_roles_y_cantidades_segun_el_tipo(alert_type: str, roles: list[tuple[str, int]]) -> None:
+def test_cualquier_otra_cosa_que_general_y_plate_es_invalida(
+    alert_type: str, roles: list[tuple[str, int]]
+) -> None:
     with pytest.raises(InvalidPayloadError):
         _parse(_raw(alert_type, roles))
+
+
+def test_el_rechazo_de_una_parte_detail_no_filtra_sus_valores() -> None:
+    raw = _raw("CRASHED", [("GENERAL", 0), ("PLATE", 0), ("DETAIL", 0)])
+
+    with pytest.raises(InvalidPayloadError) as exc:
+        _parse(raw)
+
+    assert raw["evidence"][2]["key"] not in str(exc.value) and raw["alert_id"] not in str(exc.value)
 
 
 def test_tipo_deshabilitado_o_desconocido() -> None:
