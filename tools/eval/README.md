@@ -661,6 +661,108 @@ estos datos no se sabe a cuántas lecturas equivocadas les pasaría.
   que **no se mide con fotos estáticas**: la latencia de la lectura en la app depende de cuántos fotogramas hacen falta para
   estabilizarla, no solo del tiempo de un recorte.
 
+### Alternativa evaluada: PARSeq en el dispositivo (`ocr_parseq_device.py`)
+
+**Decisión (16/11/2026): PARSeq no se usa en la app; el lector es ML Kit v2.** Antes de decidir se evaluó, fuera de línea y
+sin tocar el servicio ni la app, leer la patente con PARSeq-tiny o PARSeq-small corriendo en el celular con ONNX Runtime.
+Esta sección deja la medición y las razones.
+
+**Qué se corrió.** Los pesos del autor en Hugging Face (`baudm/parseq-tiny` y `baudm/parseq-small`, Apache-2.0 según
+sus fichas; `parseq-small` es el mismo checkpoint y el mismo ONNX FP32 que ya usa el servicio) exportados a ONNX con el
+exportador de `tools/export/parseq.py` (logits idénticos a los de PyTorch, diferencia máxima 1,4e-5 en tiny y 9,5e-6 en
+small) y cuantizados a INT8 con la cuantización dinámica de ONNX Runtime. Sobre los 300 recortes etiquetados, en dos
+variantes: **con margen** (el recorte del 15 % de `mlkit\`, que es lo que lee ML Kit en la app, que lee el recuadro de
+encuadre) y **ajustado** (sin margen, `mlkit-sin-margen\`, la caja de la patente tal cual). Con la misma normalización por
+posición y validación de formato que la app, y **sin umbral de confianza**, igual que la tabla de ML Kit.
+
+```powershell
+uv run --frozen --extra dev --extra tools python tools/eval/ocr_parseq_device.py export --weights-dir D:\vv-eval\out\parseq-eval\hf --onnx-dir D:\vv-eval\out\parseq-eval\onnx
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py eval --labeled-set D:\vv-eval\ocr-ar-set --onnx-dir D:\vv-eval\out\parseq-eval\onnx --out-dir D:\vv-eval\out\parseq-eval
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py latency --labeled-set D:\vv-eval\ocr-ar-set --onnx-dir D:\vv-eval\out\parseq-eval\onnx --out-dir D:\vv-eval\out\parseq-eval
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py aar D:\vv-eval\out\parseq-eval\aar\onnxruntime-android-1.31.0.aar
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py report --out-dir D:\vv-eval\out\parseq-eval --onnx-dir D:\vv-eval\out\parseq-eval\onnx
+```
+
+`export` es el único que necesita `torch` (extra `tools`) y red (baja los pesos de Hugging Face y el código de PARSeq). `eval`
+escribe `results.json` (solo cifras, con los umbrales 0, 0,5, 0,78 y 0,9) y un `rows-*.csv` por corrida (id, luz, lectura y
+confianza: tiene patentes de terceros, no va al repo). `latency` mide cada modelo con 1, 4 y todos los hilos, con 20 recortes de
+calentamiento y tres pasadas sobre los 300, y escribe `latency.json`. Los `.aar` de ONNX Runtime para Android se bajan de
+Maven Central (`com.microsoft.onnxruntime:onnxruntime-android` y `onnxruntime-mobile`).
+
+**Resultado sobre las 300** (lectura exacta / sin lectura / lectura equivocada, en %; sin umbral de confianza):
+
+| | Total (300) | Día (246) | Noche (54) |
+|---|---|---|---|
+| **ML Kit v1** (celular, con margen) | 47,0 / 39,0 / 14,0 | 46,7 / 38,6 / 14,6 | 48,1 / 40,7 / 11,1 |
+| **ML Kit v2** (celular, con margen) | 52,0 / 28,3 / 19,7 | 51,2 / 29,7 / 19,1 | 55,6 / 22,2 / 22,2 |
+| **PARSeq con margen** | | | |
+| tiny FP32 | 63,3 / 9,7 / 27,0 | 62,2 / 8,5 / 29,3 | 68,5 / 14,8 / 16,7 |
+| tiny INT8 | 62,0 / 11,0 / 27,0 | 61,0 / 10,2 / 28,9 | 66,7 / 14,8 / 18,5 |
+| small FP32 | 67,3 / 9,7 / 23,0 | 66,7 / 8,9 / 24,4 | 70,4 / 13,0 / 16,7 |
+| small INT8 | 66,7 / 10,0 / 23,3 | 65,4 / 9,8 / 24,8 | 72,2 / 11,1 / 16,7 |
+| **PARSeq ajustado (sin margen)** | | | |
+| tiny FP32 | 81,0 / 4,0 / 15,0 | 81,3 / 3,3 / 15,4 | 79,6 / 7,4 / 13,0 |
+| tiny INT8 | 81,3 / 3,3 / 15,3 | 81,3 / 2,8 / 15,9 | 81,5 / 5,6 / 13,0 |
+| small FP32 | 83,7 / 3,0 / 13,3 | 82,9 / 3,3 / 13,8 | 87,0 / 1,9 / 11,1 |
+| small INT8 | **85,7** / 2,3 / 12,0 | **85,8** / 2,4 / 11,8 | **85,2** / 1,9 / 13,0 |
+
+**Tamaño y latencia por modelo.** El tiempo es de la CPU de esta PC (AMD Ryzen, 12 hilos lógicos; ONNX Runtime 1.31.0),
+solo como referencia: **no se midió en el celular.** Mediana en ms por recorte (p95 con 1 hilo); el preproceso cuesta 0,16 ms y
+la decodificación es despreciable.
+
+| Modelo | ONNX | Comprimido | 1 hilo | 4 hilos | Todos | ML Kit (celular) |
+|---|---|---|---|---|---|---|
+| tiny FP32 | 25,1 MB | 22,4 MB | 28,3 (p95 39) | 23,4 | 25,0 | v1: 118,6 (p95 152,6) |
+| tiny INT8 | 9,9 MB | 6,9 MB | 26,9 (p95 37) | 20,5 | 19,7 | v2: 109,5 (p95 149,5) |
+| small FP32 | 96,7 MB | 88,6 MB | 87,6 (p95 113) | 55,2 | 57,0 | |
+| small INT8 | 34,4 MB | 25,9 MB | 80,6 (p95 97) | 47,3 | 48,2 | |
+
+- **INT8 gana poco en esta CPU:** el beneficio medido es de tamaño, no de velocidad. En el celular (ARM) puede ser distinto
+  y no se midió.
+- **Con umbral 0,78** (`OCR_MIN_CONF`) sobre la confianza, small INT8 ajustado deja 73,0 % exactas, 23,3 % sin lectura y 3,7 %
+  equivocadas; con margen, 53,0 / 41,7 / 5,3. Todos los umbrales están en `results.json`.
+- **FP32 contra INT8 es ruido:** las lecturas difieren en 9 a 19 de 300 recortes; que small INT8 salga 2 puntos sobre FP32
+  está dentro de la variación de 300 muestras.
+- **Solo small INT8 ajustado cumple U5** (85 % de día, 70 % de noche). ML Kit v2 no cumple, y todos los PARSeq con margen
+  tampoco.
+
+**Peso estimado en el APK.** ONNX Runtime para Android (`onnxruntime-android` 1.31.0, la misma versión que se usó en la PC),
+medido en el `.aar` de Maven Central con `ocr_parseq_device.py aar`, más el modelo:
+
+| Componente | Sin comprimir (en disco) | Comprimido (descarga) |
+|---|---|---|
+| ONNX Runtime, solo `arm64-v8a` (el SM-A155M) | 34,3 MB | 12,9 MB |
+| ONNX Runtime, las 4 ABIs (APK universal) | 140,4 MB | 54,8 MB |
+| **tiny INT8 + ORT arm64** | **44,2 MB** | **19,8 MB** |
+| small INT8 + ORT arm64 | 68,8 MB | 38,8 MB |
+| tiny FP32 + ORT arm64 | 59,5 MB | 35,3 MB |
+| small FP32 + ORT arm64 | 131,0 MB | 101,5 MB |
+
+"En disco" es lo que ocupan las bibliotecas nativas sin comprimir (el empaquetado por defecto de un APK); "descarga" es la
+suma con deflate. Con ABI splits o AAB el usuario solo baja la ABI de su celular. Hay dos formas de achicar ONNX Runtime que
+**no se midieron con PARSeq**: `onnxruntime-android` 1.18.0 (17,1 MB sin comprimir y 5,9 MB comprimidos en arm64) y
+`onnxruntime-mobile` 1.18.0, el último publicado (4,5 y 1,7 MB, pero con operadores acotados y modelos en formato `.ort`;
+no se verificó que cubra `MatMulInteger` ni `ConvInteger` de la cuantización INT8).
+
+**Por qué no se usa PARSeq en la app.**
+
+1. **Eficiencia.** La app lee en cada fotograma de la cámara en vivo. La latencia de PARSeq en el celular no se midió (los
+   tiempos de arriba son de una PC), y small cuesta unas tres veces lo que tiny en esa misma CPU.
+2. **El set es un piso para los dos lectores.** Son fotos movidas y lejanas, no encuadradas como las de la app, y un solo
+   recorte sin la estabilización entre fotogramas. Las cifras de ML Kit v2 (52,0 % exactas) y de PARSeq son un piso en las
+   condiciones de la app, no una estimación de cómo leería cada uno en uso real.
+3. **Almacenamiento.** La opción más chica de PARSeq, tiny INT8 con ONNX Runtime arm64, suma unos 20 MB de descarga y 44 MB en
+   disco, que ML Kit no agrega a la app.
+4. **La lectura equivocada es recuperable.** La app pide confirmar la patente leída y permite reingresarla a mano, así que una
+   lectura equivocada se puede corregir. Por eso no se descarta ML Kit por tener 19,7 % de equivocadas, que PARSeq small con
+   el mismo margen no mejora (23,3 %).
+
+**Lo que dejó esta evaluación.** PARSeq lee mucho mejor cuando el recorte está ajustado a la patente (85,7 % exactas contra
+66,7 % con margen), pero la app solo tiene el recuadro de encuadre, que deja margen. **Ajustar el recorte necesitaría la caja de
+línea de ML Kit** (la del texto reconocido), **que no se midió**: no se sabe cuánto de la ventaja del recorte ajustado
+sobreviviría con esa caja en un celular real. Los números de PARSeq tampoco son de fotos de la app, y no se midió en el
+dispositivo.
+
 ### ¿Tapa la redacción la patente denunciada? (`redaction_set.py`)
 
 La excepción de la redacción deja sin tapar la caja que el OCR lee igual que la patente reportada (`MATCH` o `FUZZY`).
