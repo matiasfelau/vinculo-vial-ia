@@ -2,7 +2,7 @@ name: ci
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [main, dev]
   push:
     branches: [dev]
 
@@ -25,17 +25,116 @@ jobs:
     env:
       RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Descargar código fuente
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # diff-cover necesita el historial para comparar con la rama base del PR.
+          fetch-depth: 0
+
+      - name: Configurar Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
+
       - name: Instalar uv
         run: pip install uv==0.12.23
+
       - name: Instalar dependencias
         run: uv sync --frozen --extra dev
+
       - name: Lint
         run: uv run ruff check .
+
       - name: Tipos (dominio y servicio)
         run: uv run mypy src/vvi_ia/domain src/vvi_ia/service
-      - name: Tests
-        run: uv run pytest
+
+      # Un único reporte con todas las pruebas (unitarias y de integración, esta última contra el
+      # RabbitMQ del servicio). La cobertura se mide sobre src/vvi_ia, que es lo que se despliega:
+      # tools/ corre fuera de Docker y queda fuera del reporte (ver el README).
+      - name: Pruebas con cobertura
+        run: uv run pytest --cov --cov-report=xml --cov-report=term-missing:skip-covered
+
+      # Se publica en el resumen del job. El gate sobre el total entra con el PR de cobertura.
+      - name: Publicar la cobertura total
+        if: always()
+        run: |
+          if [ -f coverage.xml ]; then
+            python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import xml.etree.ElementTree as ET
+          r = ET.parse("coverage.xml").getroot()
+          print("## Cobertura total")
+          print()
+          print(f"- Líneas (Cobertura XML): **{float(r.get('line-rate')) * 100:.2f} %** ({r.get('lines-covered')} de {r.get('lines-valid')})")
+          PY
+          fi
+
+      - name: Subir el reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cobertura
+          path: coverage.xml
+          if-no-files-found: ignore
+
+      # Solo en PR: en un push no hay rama contra la que comparar.
+      - name: Cobertura del código nuevo (diff-cover)
+        if: github.event_name == 'pull_request'
+        env:
+          # Por variable de entorno y no interpolado en el script: el nombre de la rama lo
+          # controla quien abre el PR (inyección de shell).
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          pip install diff-cover==11.0.2
+          diff-cover coverage.xml --compare-branch="origin/${BASE_REF}" --fail-under=85 --markdown-report diff-cover.md
+
+      - name: Publicar el resultado de diff-cover
+        if: always() && github.event_name == 'pull_request'
+        run: |
+          if [ -f diff-cover.md ]; then
+            { echo; echo "## Cobertura del código nuevo"; echo; cat diff-cover.md; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configurar Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      # Gate: falla ante HIGH o CRITICAL con corrección disponible. Las excepciones viven solo en
+      # .trivyignore, con el motivo y la fecha de revisión. Lee uv.lock, el Dockerfile y los secretos.
+      - name: Trivy (vulnerabilidades, secretos y configuración)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+
+      # Informativo por ahora: no corta el job. Pasa a gate en v0.14.
+      - name: Semgrep
+        continue-on-error: true
+        run: |
+          pip install semgrep==1.185.0
+          semgrep scan --config p/default --json --output semgrep.json || true
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, collections
+          results = json.load(open("semgrep.json")).get("results", [])
+          por_severidad = collections.Counter(r["extra"]["severity"] for r in results)
+          print("## Semgrep (informativo)")
+          print()
+          if not results:
+              print("Sin hallazgos.")
+          else:
+              print(f"{len(results)} hallazgos: " + ", ".join(f"{n} {s}" for s, n in sorted(por_severidad.items())))
+              print()
+              for r in results[:20]:
+                  print(f"- `{r['path']}:{r['start']['line']}` {r['check_id']}")
+          PY

@@ -22,9 +22,10 @@ dev = [
     "mypy>=1.11,<2",
     "onnx>=1.17,<2",
     "openpyxl>=3.1,<4",
-    "pillow>=10,<13",
+    "pillow>=10,<14",
     "pytest>=8.3,<9",
     "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=6,<8",
     "ruff>=0.6,<1",
 ]
 # Export, etiquetado, entrenamiento y evaluación: corre fuera de Docker y nunca entra en la imagen.
@@ -34,7 +35,7 @@ tools = [
     "nltk>=3.9,<4",
     "onnx>=1.17,<2",
     "openpyxl>=3.1,<4",
-    "pillow>=10,<13",
+    "pillow>=10,<14",
     "pytorch-lightning>=2.6,<3",
     "rfdetr[train,augment]>=1.11,<2",
     "timm>=1.0,<2",
@@ -87,3 +88,8 @@ strict = true
 files = ["src/vvi_ia/domain", "src/vvi_ia/service"]
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
+
+[tool.coverage.run]
+# Solo el servicio que se despliega. tools/ (export, etiquetado, entrenamiento y evaluación) corre
+# fuera de Docker, no entra en la imagen y queda fuera del reporte (ver el README).
+source = ["src/vvi_ia"]
