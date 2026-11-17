@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Perito stateless de evidencia fotográfica de Vínculo Vial"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "aio-pika>=9.4,<10",
+    "aio-pika>=9.4,<11",
     "aiohttp>=3.10,<4",
     "boto3>=1.35,<2",
     "numpy>=2.0,<3",
