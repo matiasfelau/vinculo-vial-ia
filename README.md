@@ -25,8 +25,10 @@ workflow declara `permissions: contents: read`. Dependabot actualiza semanalment
   reporte**. Se configura en `[tool.coverage.run]` de `pyproject.toml`. Es la única exclusión.
 - **Gate sobre el código nuevo:** `diff-cover` exige 85 % o más de las líneas que el PR agrega o
   cambia respecto de la rama base del PR.
-- **Cobertura total:** se publica en el resumen del job y como artefacto `cobertura`
-  (`coverage.xml`), sin cortar. El gate sobre el total entra con el PR de cobertura.
+- **Gate sobre el total:** el job falla si la cobertura de `src/vvi_ia` baja de 85 %
+  (`--cov-fail-under=85`). Hoy mide 96,5 % de las líneas con las pruebas de integración contra
+  RabbitMQ y 95 % sin ellas. Se publica además en el resumen del job y como artefacto `cobertura`
+  (`coverage.xml`).
 
 ### Seguridad
 

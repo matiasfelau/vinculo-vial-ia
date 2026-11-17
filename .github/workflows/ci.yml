@@ -51,10 +51,12 @@ jobs:
       # Un único reporte con todas las pruebas (unitarias y de integración, esta última contra el
       # RabbitMQ del servicio). La cobertura se mide sobre src/vvi_ia, que es lo que se despliega:
       # tools/ corre fuera de Docker y queda fuera del reporte (ver el README).
+      # Segundo gate, sobre el total del repo: --cov-fail-under hace fallar el paso si baja de 85 %,
+      # además del de diff-cover sobre el código nuevo. Ninguna rama puede bajar el total de 85 %.
       - name: Pruebas con cobertura
-        run: uv run pytest --cov --cov-report=xml --cov-report=term-missing:skip-covered
+        run: uv run pytest --cov --cov-report=xml --cov-report=term-missing:skip-covered --cov-fail-under=85
 
-      # Se publica en el resumen del job. El gate sobre el total entra con el PR de cobertura.
+      # Se publica en el resumen del job, aunque el paso anterior haya fallado.
       - name: Publicar la cobertura total
         if: always()
         run: |
