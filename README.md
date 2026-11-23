@@ -143,8 +143,10 @@ El `.dockerignore` deja entrar al contexto solo los cuatro `.onnx` de la cascada
 
 El servicio carga los 4 modelos (verificando su sha256) antes de levantar el servidor de salud y empezar
 a consumir. Medido el 23/11/2026 con la imagen en Docker Desktop (Windows), con el rootfs de solo
-lectura y sin caché: unos 75 s hasta `/ready` (detector ~30 s, segmentador ~30 s, re-ID ~12 s, OCR
-~17 s, y el resto de las dependencias). En un host más lento puede tardar más.
+lectura y sin caché, entre los logs de cada etapa: detector → segmentador 28 s, → re-ID 12 s, → OCR
+16 s, y 17 s más hasta `/ready` (cliente de S3, servidor de salud y consumidor). Son unos 74 s desde que
+carga el primer modelo, sin contar lo que tarda el primero (el arranque total estuvo cerca de 90 s). En
+un host más lento puede tardar más.
 
 Por eso el `healthcheck` de `docker-compose.yml` usa `start_period: 120s`: mientras dura, un fallo no
 cuenta contra los reintentos. El `Dockerfile` no define `HEALTHCHECK`; quien corra la imagen fuera del
