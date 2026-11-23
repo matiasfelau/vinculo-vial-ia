@@ -1,4 +1,4 @@
-# Nada de pesos, datasets ni secretos en el contexto de build
+# Nada de pesos, datasets ni secretos en el contexto de build, salvo los .onnx de la cascada por defecto
 .git
 .venv
 .env
@@ -6,6 +6,12 @@
 !.env.example
 models/*
 !models/manifest.json
+!models/weights
+models/weights/*
+!models/weights/rfdetr_openimages_v2.onnx
+!models/weights/rfdetr_seg_coco.onnx
+!models/weights/dinov2_vits14_reid_v2.onnx
+!models/weights/parseq.onnx
 docs
 tests
 tools
@@ -13,7 +19,6 @@ tools
 .pytest_cache
 .mypy_cache
 .ruff_cache
-*.onnx
 *.pt
 *.pth
 *.safetensors
