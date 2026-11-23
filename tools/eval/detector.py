@@ -9,6 +9,7 @@ y `report.json` tienen solo cifras. Uso: ver `tools/eval/README.md`.
 import argparse
 import json
 import os
+import platform
 import statistics
 import sys
 import time
@@ -25,6 +26,7 @@ from vvi_ia.adapters.models.registry import ModelSetupError, build_models
 from vvi_ia.adapters.models.rfdetr_detector import FACE, LABELS, MODEL_NAME
 from vvi_ia.adapters.models.tiling import DEFAULT_OVERLAP, DEFAULT_TILE_PX
 from vvi_ia.domain.model import Box, BoxLabel
+from vvi_ia.service.validate_evidence import reduce_for_models, to_original
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ANNOTATIONS = "_annotations.coco.json"
@@ -34,6 +36,9 @@ SMALL_SIDE_PX = 32  # un objeto con algún lado menor a esto, en la foto origina
 FLOOR = 0.01
 CLASS_IDS = {name: index + 1 for index, name in enumerate(LABELS[column] for column in sorted(LABELS))}
 DEFAULT_THRESHOLDS = {BoxLabel.CAR: 0.40, BoxLabel.WHEEL: 0.40, BoxLabel.PLATE: 0.20, FACE: 0.30}
+SERVICE_MAX_SIDE_PX = 1024  # MODEL_MAX_SIDE_PX: el servicio reduce cada foto a este lado antes de los modelos
+COMBINED = (str(BoxLabel.CAR), str(BoxLabel.PLATE))  # lo que se presenta: autos y patentes (sin ruedas)
+RECALL_POINTS = 101  # interpolación del AP, igual que COCO
 
 
 def iou(a: Sequence[float], b: Sequence[float]) -> float:
@@ -64,6 +69,120 @@ def match(
             used.add(best)
         hits.append(best >= 0)
     return hits, used
+
+
+def scored_hits(
+    truths: Sequence[Sequence[float]], predictions: Sequence[tuple[float, Sequence[float]]]
+) -> list[tuple[float, bool]]:
+    """`(confianza, acertó)` de cada predicción, de mayor a menor confianza."""
+    hits, _ = match(truths, predictions)
+    return list(zip(sorted((conf for conf, _ in predictions), reverse=True), hits, strict=True))
+
+
+def average_precision(ranked: Sequence[tuple[float, bool]], truth_count: int) -> float:
+    """AP con 101 puntos de recall (como COCO) de una lista `(confianza, acertó)`."""
+    if truth_count == 0 or not ranked:
+        return 0.0
+    ordered = sorted(ranked, key=lambda item: -item[0])
+    hits = np.array([hit for _, hit in ordered], dtype=float)
+    tp = np.cumsum(hits)
+    fp = np.cumsum(1 - hits)
+    recall = tp / truth_count
+    precision = tp / np.maximum(tp + fp, 1e-12)
+    for index in range(len(precision) - 2, -1, -1):  # envolvente: la precisión no sube al avanzar
+        precision[index] = max(precision[index], precision[index + 1])
+    total = 0.0
+    for point in np.linspace(0.0, 1.0, RECALL_POINTS):
+        found = int(np.searchsorted(recall, point, side="left"))
+        total += float(precision[found]) if found < len(precision) else 0.0
+    return total / RECALL_POINTS
+
+
+def truth_boxes(coco_gt: COCO, image_id: int, category_id: int) -> list[tuple[float, float, float, float]]:
+    return [
+        (a["bbox"][0], a["bbox"][1], a["bbox"][0] + a["bbox"][2], a["bbox"][1] + a["bbox"][3])
+        for a in coco_gt.loadAnns(coco_gt.getAnnIds(imgIds=[image_id], catIds=[category_id]))
+    ]
+
+
+def combined(
+    coco_gt: COCO,
+    predictions: dict[int, list[Box]],
+    thresholds: Mapping[str, float],
+    class_ids: Mapping[str, int] = CLASS_IDS,
+    names: Sequence[str] = COMBINED,
+) -> dict[str, Any]:
+    """Micro-promedio de varias clases: las cajas de todas juntas (el acierto sigue siendo por clase).
+
+    Recall y precisión con el umbral de cada clase; el AP50 con todas las cajas (umbral casi en cero)
+    ordenadas por confianza en una sola curva.
+    """
+    tp = fp = truth_count = 0
+    ranked: list[tuple[float, bool]] = []
+    for image_id in coco_gt.getImgIds():
+        for name in names:
+            truths = truth_boxes(coco_gt, image_id, class_ids[name])
+            guesses = [
+                (box.conf, (box.x1, box.y1, box.x2, box.y2))
+                for box in predictions.get(image_id, [])
+                if box.label == name
+            ]
+            truth_count += len(truths)
+            ranked += scored_hits(truths, guesses)
+            hits, _ = match(truths, [g for g in guesses if g[0] >= thresholds[name]])
+            tp += sum(hits)
+            fp += len(hits) - sum(hits)
+    return {
+        "clases": list(names),
+        "cajas_reales": truth_count,
+        "recall": rate(tp, truth_count),
+        "precision": rate(tp, tp + fp),
+        "falsos_positivos": fp,
+        "ap50": round(average_precision(ranked, truth_count), 4),
+    }
+
+
+def false_positives(
+    coco_gt: COCO,
+    predictions: dict[int, list[Box]],
+    thresholds: Mapping[str, float],
+    class_ids: Mapping[str, int] = CLASS_IDS,
+    names: Sequence[str] = COMBINED,
+) -> list[dict[str, Any]]:
+    """Cada falso positivo (con el umbral de su clase): foto, clase, confianza, caja y cajas reales.
+
+    `iou_max` es el mayor IoU con una caja real de la misma clase (alto: duplicada o mal ubicada; 0: no hay
+    nada anotado ahí). Sirve para revisarlos a mano: no cambia ninguna cifra del informe.
+    """
+    out: list[dict[str, Any]] = []
+    for image_id in sorted(coco_gt.getImgIds()):
+        for name in names:
+            truths = truth_boxes(coco_gt, image_id, class_ids[name])
+            guesses = sorted(
+                (
+                    (box.conf, (box.x1, box.y1, box.x2, box.y2))
+                    for box in predictions.get(image_id, [])
+                    if box.label == name and box.conf >= thresholds[name]
+                ),
+                key=lambda item: -item[0],
+            )
+            hits, _ = match(truths, guesses)
+            for (conf, box), hit in zip(guesses, hits, strict=True):
+                if hit:
+                    continue
+                out.append(
+                    {
+                        "id": f"{image_id}-{name}-{len(out)}",
+                        "foto": coco_gt.imgs[image_id]["file_name"],
+                        "clase": name,
+                        "tam": [coco_gt.imgs[image_id]["height"], coco_gt.imgs[image_id]["width"]],
+                        "confianza": round(conf, 3),
+                        "caja": [round(v, 1) for v in box],
+                        "iou_max": round(max((iou(box, t) for t in truths), default=0.0), 3),
+                        "reales": [[round(v, 1) for v in t] for t in truths],
+                    }
+                )
+    return out
 
 
 def ap50(coco_gt: COCO, detections: list[dict[str, Any]], category_id: int) -> float | None:
@@ -139,6 +258,18 @@ def evaluate(
     return report
 
 
+def cpu_name() -> str:
+    """Nombre de la CPU (solo para documentar dónde se midió la latencia)."""
+    try:
+        import winreg
+
+        key_path = r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path) as key:
+            return str(winreg.QueryValueEx(key, "ProcessorNameString")[0]).strip()
+    except (ImportError, OSError):
+        return platform.processor() or platform.machine()
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -162,6 +293,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--plate-tiling", action="store_true", help="patentes también por mosaico (PLATE_TILING)"
+    )
+    parser.add_argument(
+        "--model-max-side",
+        type=int,
+        default=SERVICE_MAX_SIDE_PX,
+        help="lado al que se reduce cada foto antes del detector (MODEL_MAX_SIDE_PX; 0 = sin reducir)",
+    )
+    parser.add_argument(
+        "--dump-fp",
+        action="store_true",
+        help="escribe `falsos_positivos.json` (auto y patente) para revisarlos",
     )
     parser.add_argument("--tile-px", type=int, default=DEFAULT_TILE_PX, help="lado de cada tile")
     parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP, help="solape entre tiles")
@@ -188,8 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Falta {annotations.name} en {args.dataset_dir}.", file=sys.stderr)
         return 1
     try:
+        # v2 no tiene rostro ni rueda: solo sirve al puerto `detector` y se evalúan `car` y `plate`
+        selection = {"detector": args.model} | ({"face": args.model} if args.model == MODEL_NAME else {})
         models = build_models(
-            {"detector": args.model, "face": args.model},
+            selection,
             args.manifest,
             args.models_dir,
             params={
@@ -210,10 +354,18 @@ def main(argv: list[str] | None = None) -> int:
     times: list[float] = []
     for image_id, info in coco_gt.imgs.items():
         pixels = decoder.decode((Path(args.dataset_dir) / info["file_name"]).read_bytes())
+        view = reduce_for_models(pixels, args.model_max_side) if args.model_max_side else None
+        shown = pixels if view is None else view
+        ratio = pixels.shape[1] / shown.shape[1]
         start = time.perf_counter()
-        vehicles, faces = models.vehicle.detect(pixels), models.face.detect(pixels)
+        # Lo que corre el servicio: un pase para decidir la presencia o, con mosaico, el pase más los tiles
+        vehicles = models.vehicle.detect_plates(shown) if args.plate_tiling else models.vehicle.detect(shown)
         times.append((time.perf_counter() - start) * 1000)
-        predictions[image_id] = (vehicles or []) + (faces or [])
+        faces = (  # reutiliza el pase (memoria del adaptador): no cuenta en el tiempo
+            models.face.detect(shown) if "face" in selection else []
+        )
+        predictions[image_id] = to_original((vehicles or []) + (faces or []), ratio) or []
+    class_ids = CLASS_IDS if "face" in selection else {n: i for n, i in CLASS_IDS.items() if n in COMBINED}
     thresholds = {
         BoxLabel.CAR: args.detector_min_conf,
         BoxLabel.WHEEL: args.detector_min_conf,
@@ -227,17 +379,29 @@ def main(argv: list[str] | None = None) -> int:
         "mosaico": {"rostros": args.face_tiling, "patentes": args.plate_tiling, "tile_px": args.tile_px}
         if args.face_tiling or args.plate_tiling
         else None,
+        "cpu": cpu_name(),
+        "lado_maximo_px": args.model_max_side or None,
+        "latencia_ms_media": round(statistics.mean(times)),
         "latencia_ms_mediana": round(statistics.median(times)),
         "latencia_ms_p95": round(sorted(times)[round(0.95 * (len(times) - 1))]),
-        "clases": evaluate(coco_gt, predictions, thresholds),
+        "clases": evaluate(coco_gt, predictions, thresholds, class_ids),
+        "auto_y_patente": combined(coco_gt, predictions, thresholds),
     }
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
+    if args.dump_fp:
+        dump = false_positives(coco_gt, predictions, thresholds)
+        (Path(args.out_dir) / "falsos_positivos.json").write_text(
+            json.dumps({"dataset": str(args.dataset_dir), "falsos_positivos": dump}, indent=1),
+            encoding="utf-8",
+        )
+        print(f"{len(dump)} falsos positivos de auto y patente en falsos_positivos.json")
     (Path(args.out_dir) / "detector_report.json").write_text(
         json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(
         f"Modelo {report['modelo']} · {report['split']} · {report['fotos']} fotos · "
-        f"{report['latencia_ms_mediana']} ms por foto (CPU, p95 {report['latencia_ms_p95']}) · "
+        f"{report['latencia_ms_media']} ms por foto (media; mediana {report['latencia_ms_mediana']}, "
+        f"p95 {report['latencia_ms_p95']}) en {report['cpu']} · "
         f"mosaico {report['mosaico'] or 'apagado'}"
     )
     print(
@@ -248,6 +412,7 @@ def main(argv: list[str] | None = None) -> int:
             f"{name:<8}{row['cajas_reales']:>8}{row['umbral']:>8}{row['recall']!s:>8}{row['precision']!s:>8}"
             f"{row['falsos_positivos']:>6}{row['cajas_chicas']:>8}{row['recall_chicas']!s:>9}{row['ap50']!s:>8}"
         )
+    print(f"auto + patente (micro): {report['auto_y_patente']}")
     return 0
 
 

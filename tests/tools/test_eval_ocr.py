@@ -315,18 +315,21 @@ def test_el_reporte_arma_la_propuesta_sin_los_formatos_fuera_de_alcance() -> Non
     reads = [
         reading("AB123CD", "AB123CD", 0.9),
         reading("ABC123", "ABC124", 0.7),  # FUZZY
-        reading("123ABC", "123", 0.97, split="valid"),  # una moto: lee solo los dígitos
+        reading("123ABC", "XYZ987", 0.97, split="valid"),  # una moto: otra patente leída entera (MISMATCH)
+        reading(
+            "123ABC", "123", 0.97, split="valid"
+        ),  # una moto: lee solo los dígitos (sin estructura: ilegible)
     ]
 
     report = ocr.build_report(reads, 0.6, "parseq@abc", Counter({"marcador de posición": 1}), 4)
 
     assert report["propuesta"]["OCR_MIN_CONF"] == ocr.PROPOSAL_FLOOR
     assert report["propuesta_con_todos_los_formatos"]["OCR_MIN_CONF"] == 0.98
-    assert report["lecturas_fuera_de_alcance"] == 1
+    assert report["lecturas_fuera_de_alcance"] == 2
     assert report["cajas_del_dataset"] == 4 and report["descartadas"] == {"marcador de posición": 1}
     assert set(report["por_formato"]) == {"mercosur", "anterior", "otro"}
     assert set(report["por_split"]) == {"train", "valid"}
-    assert report["total"]["lecturas"] == 3
+    assert report["total"]["lecturas"] == 4
     json.dumps(report)  # serializable
 
 

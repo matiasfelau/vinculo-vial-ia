@@ -23,11 +23,13 @@ from vvi_ia.adapters.models.rfdetr_detector import (
     IMAGENET_STD,
     LABELS,
     MODEL_NAME,
+    MODEL_NAME_V2,
     OUTPUT_NAMES,
     RfDetrDetections,
     RfDetrFaceDetector,
     RfDetrVehicleDetector,
     decode_boxes,
+    detector_columns,
     preprocess,
 )
 from vvi_ia.config import load_settings
@@ -425,16 +427,15 @@ def test_un_archivo_que_no_es_el_detector_no_deja_arrancar(tmp_path: Path, weigh
 # --- configuración -------------------------------------------------------------------------
 
 
-def test_los_umbrales_por_defecto_y_el_de_redaccion_es_el_mas_bajo(base_env: pytest.MonkeyPatch) -> None:
+def test_el_umbral_de_redaccion_por_defecto_es_el_de_las_patentes(base_env: pytest.MonkeyPatch) -> None:
     params = adapter_params(load_settings())
 
-    assert params["detector_min_conf"] == 0.4
-    assert (
-        params["redaction_min_conf"] == 0.2
-    )  # el menor entre FACE_MIN_CONF (0,30) y PLATE_REDACT_MIN_CONF (0,20)
+    assert params["detector_min_conf"] == 0.35
+    assert params["redaction_min_conf"] == 0.1  # PLATE_REDACT_MIN_CONF (0,10, desde el 16/11/2026)
+    assert "face_tiling" not in params  # el producto no redacta rostros
 
     base_env.setenv("DETECTOR_MIN_CONF", "0.6")
-    base_env.setenv("FACE_MIN_CONF", "0.05")
+    base_env.setenv("PLATE_REDACT_MIN_CONF", "0.05")
     params = adapter_params(load_settings())
     assert params["detector_min_conf"] == 0.6 and params["redaction_min_conf"] == 0.05
 
@@ -489,3 +490,181 @@ def test_la_memoria_descarta_la_entrada_mas_vieja_al_llenarse() -> None:
 
     assert memory.get(first) is None
     assert memory.get(second) == [] and memory.get(third) == []
+
+
+# --- v2: clases del manifest, presencia por varias clases y sin confusoras ---------------------------
+
+CLASSES_V2 = ("car", "truck", "van", "bus", "plate", "airplane", "boat", "clock")
+
+
+def outputs_v2(
+    *rows: tuple[str, float, tuple[float, float, float, float]],
+) -> tuple[NDArray[Any], NDArray[Any]]:
+    """Como `outputs`, pero la columna se elige por el nombre de la clase de `CLASSES_V2`."""
+    dets, labels = outputs()
+    labels = np.full((1, QUERIES, len(CLASSES_V2) + 1), OFF, np.float32)
+    for query, (name, confidence, box) in enumerate(rows):
+        dets[0, query] = box
+        labels[0, query, CLASSES_V2.index(name)] = logit(confidence)
+    return dets, labels
+
+
+NAMES_V2 = detector_columns(CLASSES_V2)  # sin las confusoras, que ocupan columna pero no se devuelven
+
+
+def test_v2_camion_y_van_cuentan_como_auto() -> None:
+    dets, labels = outputs_v2(
+        ("truck", 0.9, (0.3, 0.5, 0.3, 0.4)),
+        ("van", 0.8, (0.6, 0.5, 0.3, 0.4)),
+    )
+
+    boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
+
+    assert [(box.label, round(box.conf, 2)) for box in boxes] == [("car", 0.9), ("car", 0.8)]
+
+
+def test_v2_el_colectivo_no_cuenta_como_vehiculo() -> None:
+    """Decisión del 14/11/2026: `bus` es una salida del modelo pero no una presencia (cambia el mapeo)."""
+    dets, labels = outputs_v2(("bus", 0.99, (0.5, 0.5, 0.6, 0.5)))
+
+    assert "bus" not in NAMES_V2.values()
+    assert decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2) == []
+
+
+def test_v2_un_colectivo_no_borra_el_auto_de_otra_consulta() -> None:
+    dets, labels = outputs_v2(("car", 0.9, (0.3, 0.5, 0.3, 0.4)), ("bus", 0.95, (0.7, 0.5, 0.3, 0.4)))
+
+    boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
+
+    assert [(b.label, round(b.conf, 2)) for b in boxes] == [("car", 0.9)]
+
+
+def test_v2_las_confusoras_no_devuelven_cajas() -> None:
+    dets, labels = outputs_v2(
+        ("airplane", 0.99, (0.5, 0.5, 0.4, 0.4)),
+        ("boat", 0.99, (0.2, 0.5, 0.2, 0.2)),
+        ("clock", 0.99, (0.8, 0.5, 0.2, 0.2)),
+    )
+
+    assert decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2) == []
+
+
+def test_v2_una_consulta_en_dos_clases_de_presencia_da_una_sola_caja_con_la_mayor() -> None:
+    dets, labels = outputs_v2(("car", 0.6, (0.5, 0.5, 0.4, 0.4)))
+    labels[0, 0, CLASSES_V2.index("van")] = logit(0.85)
+
+    (box,) = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
+
+    assert box.label == "car" and round(box.conf, 2) == 0.85
+
+
+def test_v2_una_confusora_no_borra_el_auto_de_otra_consulta() -> None:
+    dets, labels = outputs_v2(("car", 0.9, (0.3, 0.5, 0.3, 0.4)), ("airplane", 0.95, (0.7, 0.5, 0.3, 0.4)))
+
+    boxes = decode_boxes(dets, labels, (40, 80), THRESHOLDS, names=NAMES_V2)
+
+    assert [box.label for box in boxes] == ["car"]
+
+
+def test_detect_by_class_separa_camion_van_y_auto_y_no_devuelve_el_colectivo() -> None:
+    dets, labels = outputs_v2(
+        ("car", 0.9, (0.2, 0.5, 0.2, 0.4)),
+        ("truck", 0.8, (0.5, 0.5, 0.2, 0.4)),
+        ("van", 0.7, (0.8, 0.5, 0.2, 0.4)),
+        ("bus", 0.99, (0.5, 0.5, 0.2, 0.2)),
+    )
+    shared = RfDetrDetections(FakeSession((dets, labels)), "input", (16, 24), THRESHOLDS, names=NAMES_V2)
+
+    found = shared.detect_by_class(np.zeros((40, 80, 3), np.uint8))
+
+    assert found is not None and set(found) == {"car", "truck", "van", "plate"}
+    assert [round(b.conf, 2) for b in found["car"]] == [0.9]
+    assert [round(b.conf, 2) for b in found["truck"]] == [0.8]
+    assert [round(b.conf, 2) for b in found["van"]] == [0.7]
+    assert found["plate"] == []
+    assert {b.label for boxes in found.values() for b in boxes} == {"car"}
+
+
+def test_detect_by_class_con_un_modelo_que_falla_devuelve_none() -> None:
+    shared = RfDetrDetections(FakeSession(RuntimeError("x")), "input", (16, 24), THRESHOLDS, names=NAMES_V2)
+
+    assert shared.detect_by_class(np.zeros((40, 80, 3), np.uint8)) is None
+
+
+def _constant_onnx(dets: NDArray[Any], labels: NDArray[Any]) -> bytes:
+    constants = [dets, labels]
+    graph = helper.make_graph(
+        [helper.make_node("Identity", [f"const_{i}"], [name]) for i, name in enumerate(OUTPUT_NAMES)],
+        "tiny_v2",
+        [helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, 3, 32, 32])],
+        [
+            helper.make_tensor_value_info(name, TensorProto.FLOAT, list(value.shape))
+            for name, value in zip(OUTPUT_NAMES, constants, strict=True)
+        ],
+        [numpy_helper.from_array(value, f"const_{i}") for i, value in enumerate(constants)],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 9
+    onnx.checker.check_model(model)
+    return bytes(model.SerializeToString())
+
+
+def write_env_v2(tmp_path: Path, weights: bytes, classes: list[str] | None) -> tuple[Path, Path]:
+    models_dir = tmp_path / "weights"
+    models_dir.mkdir()
+    (models_dir / f"{MODEL_NAME_V2}.onnx").write_bytes(weights)
+    entry: dict[str, Any] = {
+        "name": MODEL_NAME_V2,
+        "version": "de-prueba",
+        "ports": ["detector"],
+        "file": f"{MODEL_NAME_V2}.onnx",
+        "sha256": hashlib.sha256(weights).hexdigest(),
+        "license": "Apache-2.0",
+        "paper": {"title": "Un paper", "venue": "ICLR", "year": 2026},
+        "source": "generado en el test",
+        "commercial": "yes",
+    }
+    if classes is not None:
+        entry["classes"] = classes
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"schema_version": 1, "models": [entry]}), encoding="utf-8")
+    return manifest, models_dir
+
+
+def test_v2_toma_las_clases_del_manifest_y_solo_sirve_al_detector(tmp_path: Path) -> None:
+    dets, labels = outputs_v2(
+        ("truck", 0.9, (0.3, 0.5, 0.3, 0.4)),
+        ("plate", 0.8, (0.7, 0.8, 0.2, 0.1)),
+        ("clock", 0.9, (0.5, 0.2, 0.1, 0.1)),
+    )
+    manifest, models_dir = write_env_v2(tmp_path, _constant_onnx(dets, labels), list(CLASSES_V2))
+
+    models = build_models({"detector": MODEL_NAME_V2}, manifest, models_dir)
+
+    boxes = models.vehicle.detect(photo(40, 80))
+    assert boxes is not None and sorted(box.label for box in boxes) == ["car", "plate"]
+    assert ("face", MODEL_NAME_V2) not in ADAPTERS
+    with pytest.raises(ModelSetupError, match="no sirve al puerto face"):
+        build_models({"face": MODEL_NAME_V2}, manifest, models_dir)
+
+
+def test_v2_sin_clases_de_auto_en_el_manifest_no_arranca(tmp_path: Path) -> None:
+    dets, labels = outputs_v2(("truck", 0.9, (0.3, 0.5, 0.3, 0.4)))
+    manifest, models_dir = write_env_v2(tmp_path, _constant_onnx(dets, labels), ["airplane", "boat", "clock"])
+
+    with pytest.raises(ModelSetupError):
+        build_models({"detector": MODEL_NAME_V2}, manifest, models_dir)
+
+
+def test_el_manifest_del_repo_declara_v2_como_defecto_y_deja_v1_intacto_como_respaldo() -> None:
+    manifest = load_manifest(REPO_ROOT / "models" / "manifest.json")
+    v1, v2 = manifest.get(MODEL_NAME), manifest.get(MODEL_NAME_V2)
+
+    assert v1 is not None and v2 is not None
+    assert v1.sha256 == "85169d8f980dabbeb5d4463dcfa25ed065c9a4b5152b329cc3347a5d11c1f9e2"
+    assert v1.ports == ("detector", "face") and v1.classes is None  # v1 usa las clases de su adaptador
+    assert v2.ports == ("detector",) and v2.sha256 is not None and v2.file == f"{MODEL_NAME_V2}.onnx"
+    assert v2.classes is not None and v2.classes[:5] == ("car", "truck", "van", "bus", "plate")
+    assert not {"face", "wheel"} & set(v2.classes)
+    env = (REPO_ROOT / ".env.example").read_text(encoding="utf-8").splitlines()
+    assert "MODEL_DETECTOR=rfdetr_openimages_v2" in env  # v2 es el detector por defecto (14/11/2026)

@@ -7,8 +7,8 @@ RGB. Por cada stride (8, 16 y 32) el modelo devuelve las confianzas, las distanc
 cuatro bordes de la cara y los puntos; hay dos anclas por posición. Las cajas se decodifican, se pasan a la
 escala de la foto y se les aplica NMS.
 
-Los pesos se entrenaron con WIDER FACE (CC BY-NC-ND) y InsightFace los publica para investigación: el uso
-comercial requiere su licencia (`commercial = "escalable"` en el manifest).
+MÓDULO EXPERIMENTAL, fuera de la cascada: el producto no redacta rostros. InsightFace publica los pesos para
+investigación: el uso comercial requiere su licencia (`commercial = "escalable"` en el manifest).
 
 Mosaico opcional (`tiling.py`) con `face_tiling`: la foto grande se recorre también en tiles, lo que ayuda a
 las caras chicas a cambio de una inferencia más por tile.

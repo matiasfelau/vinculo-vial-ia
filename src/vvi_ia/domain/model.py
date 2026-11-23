@@ -25,8 +25,6 @@ class EvidenceRole(StrEnum):
 
     GENERAL = "GENERAL"
     PLATE = "PLATE"
-    DETAIL = "DETAIL"
-    CONTEXT = "CONTEXT"
 
 
 class Verdict(StrEnum):

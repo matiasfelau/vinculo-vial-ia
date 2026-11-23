@@ -55,6 +55,9 @@ class ModelEntry(BaseModel):
     source: str = Field(min_length=1)
     commercial: Commercial
     notes: str = ""
+    # Clases del modelo, en el orden de las columnas de salida, para los que las declaran (el detector v2).
+    # Un modelo sin `classes` usa las de su adaptador.
+    classes: tuple[str, ...] | None = Field(default=None, min_length=1)
 
     @field_validator("ports")
     @classmethod

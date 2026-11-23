@@ -46,8 +46,8 @@ def test_summarize_da_mediana_media_p95_y_maximo() -> None:
 
 def test_build_alert_sube_las_fotos_con_su_hash(tmp_path: Path) -> None:
     store = cascade.MemoryStore()
-    car, detail = write_photo(tmp_path / "car.jpg"), write_photo(tmp_path / "detail.jpg")
-    photos = {EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car], EvidenceRole.DETAIL: [detail, detail]}
+    car = write_photo(tmp_path / "car.jpg")
+    photos = {EvidenceRole.GENERAL: [car], EvidenceRole.PLATE: [car]}
     layout = cascade.Layout(photos, b"AB123CD")
 
     payload = cascade.build_alert(AlertType.CRASHED, layout, store)
@@ -55,14 +55,9 @@ def test_build_alert_sube_las_fotos_con_su_hash(tmp_path: Path) -> None:
     assert [(i.role, i.index) for i in payload.evidence] == [
         (EvidenceRole.GENERAL, 0),
         (EvidenceRole.PLATE, 0),
-        (EvidenceRole.DETAIL, 0),
-        (EvidenceRole.DETAIL, 1),
     ]
-    assert all(
-        store.get(i.key) == car.read_bytes() or store.get(i.key) == detail.read_bytes()
-        for i in payload.evidence
-    )
-    assert len({i.key for i in payload.evidence}) == 4
+    assert all(store.get(i.key) == car.read_bytes() for i in payload.evidence)
+    assert len({i.key for i in payload.evidence}) == 2
 
 
 def test_photos_in_solo_toma_imagenes(tmp_path: Path) -> None:
@@ -118,7 +113,10 @@ def test_readable_plates_descarta_las_fotos_sin_auto_patente_o_lectura_segura(tm
 
 def test_la_salida_dentro_del_repo_se_rechaza(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = cascade.main(
-        ["--data-dir", str(tmp_path), "--out-dir", str(REPO_ROOT / "salida"), "--models-dir", str(tmp_path)]
+        [
+            *("--data-dir", str(tmp_path), "--out-dir", str(REPO_ROOT / "salida")),
+            *("--models-dir", str(tmp_path)),
+        ]
     )
 
     assert code == 1 and "repositorio" in capsys.readouterr().err
@@ -126,7 +124,10 @@ def test_la_salida_dentro_del_repo_se_rechaza(tmp_path: Path, capsys: pytest.Cap
 
 def test_sin_fotos_no_arranca(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     code = cascade.main(
-        ["--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "o"), "--models-dir", str(tmp_path)]
+        [
+            *("--data-dir", str(tmp_path), "--out-dir", str(tmp_path / "o")),
+            *("--models-dir", str(tmp_path)),
+        ]
     )
 
     assert code == 1 and "No hay fotos" in capsys.readouterr().err
@@ -172,26 +173,6 @@ def test_readable_plates_usa_la_foto_preparada(tmp_path: Path) -> None:
     )
 
     assert seen == [original] and found == [(prepared, b"AB123CD")]
-
-
-def test_has_part_acepta_autos_ruedas_o_patentes_grandes_y_rechaza_el_resto() -> None:
-    image = np.zeros((100, 100, 3), np.uint8)
-
-    def models(boxes: list[Box], seg: list[int]) -> SimpleNamespace:
-        cars = [
-            SimpleNamespace(mask=np.pad(np.ones((s, s), bool), ((0, 100 - s), (0, 100 - s)))) for s in seg
-        ]
-        return SimpleNamespace(
-            vehicle=SimpleNamespace(detect=lambda img: boxes), cars=SimpleNamespace(cars=lambda img: cars)
-        )
-
-    wheel = Box(0, 0, 40, 40, 0.9, BoxLabel.WHEEL)
-    assert cascade.has_part(models([wheel], []), image, 0.05)
-    assert not cascade.has_part(models([Box(0, 0, 10, 10, 0.9, BoxLabel.WHEEL)], []), image, 0.05)  # chica
-    assert not cascade.has_part(
-        models([Box(0, 0, 40, 40, 0.3, BoxLabel.PLATE)], []), image, 0.05
-    )  # poco confiable
-    assert cascade.has_part(models([], [30]), image, 0.05)  # un auto segmentado
 
 
 def test_duration_capture_guarda_tambien_el_veredicto() -> None:

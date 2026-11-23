@@ -8,6 +8,12 @@ __pycache__/
 build/
 dist/
 
+# Reportes de cobertura del CI (ver el README)
+.coverage
+coverage.xml
+htmlcov/
+diff-cover.md
+
 # Secretos y configuración local
 .env
 .env.*
@@ -15,7 +21,9 @@ dist/
 
 # Reglas de plataforma y del repo: no se versionan
 .clauderules
+clauderules
 CLAUDE.md
+CONTRATO-*.md
 
 # Pesos de modelos: nunca en git
 *.onnx

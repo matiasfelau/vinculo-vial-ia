@@ -1,8 +1,10 @@
 """Embedder DINOv2 ViT-S/14 sobre ONNX Runtime: el vector con el que se comparan dos fotos de un auto.
 
 Preproceso: recorte de la caja de la máscara con el fondo en gris, resize a 224×224 y normalización
-ImageNet. De la salida se toma el token CLS y se normaliza L2. El modelo se usa tal como lo publicó
-Meta, sin entrenar; el ONNX lo genera `tools/export/dinov2.py`.
+ImageNet. De la salida se toma el token CLS y se normaliza L2. `dinov2_vits14` se usa tal como lo publicó
+Meta, sin entrenar (el ONNX lo genera `tools/export/dinov2.py`). `dinov2_vits14_reid` es el mismo modelo
+ajustado con 3DRealCar (`tools/training/reid`): tiene la misma entrada y la misma salida, así que usa este
+mismo adaptador. Sin segmentador, la máscara es la caja `car` del detector y el recorte es esa caja.
 """
 
 import logging
@@ -20,6 +22,8 @@ from vvi_ia.domain.reid import GRAY_FILL, masked_crop
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "dinov2_vits14"
+REID_MODEL_NAME = "dinov2_vits14_reid"
+REID_MODEL_NAME_V2 = "dinov2_vits14_reid_v2"
 INPUT_SIDE = 224
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
@@ -77,6 +81,8 @@ class DinoV2Embedder:
 
 
 @register("embedder", MODEL_NAME)
+@register("embedder", REID_MODEL_NAME)
+@register("embedder", REID_MODEL_NAME_V2)
 def build(ctx: ModelContext) -> DinoV2Embedder:
     session = ctx.model.session
     if len(session.input_names) != 1:

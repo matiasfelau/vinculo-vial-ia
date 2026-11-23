@@ -34,20 +34,37 @@
       "notes": "Un solo modelo para los puertos detector (car, wheel, plate) y face. Columnas de labels en el orden car, wheel, plate, face. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels. Nunca XL ni 2XL (PML 1.0). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
     },
     {
+      "name": "rfdetr_openimages_v2",
+      "version": "rf-detr-small@openimages-v7-v2",
+      "ports": ["detector"],
+      "file": "rfdetr_openimages_v2.onnx",
+      "sha256": "6bcad50b33c56c8f8a2dbb54a404688a34e7d68d6c19eba8063dfa9c36c3ee13",
+      "license": "Apache-2.0",
+      "paper": {
+        "title": "RF-DETR: Neural Architecture Search for Real-Time Detection Transformers",
+        "venue": "ICLR",
+        "year": 2026
+      },
+      "source": "RF-DETR Small ajustado con un subconjunto de Open Images V7 (anotaciones CC BY 4.0, imágenes CC BY 2.0), con tools/training/detector_v2/v2_train.py y exportado con v2_export.py. Sin datos de COCO ni de otras fuentes; excluye la prueba de v1 y las negativas de la evaluación (exclusion_check.json).",
+      "commercial": "yes",
+      "notes": "Detector v2, el que usa el servicio por defecto (.env.example, decision del 14/11/2026); v1 (rfdetr_openimages) queda como respaldo y se elige por MODEL_DETECTOR. Solo sirve al puerto detector (no tiene rostro ni rueda). Columnas de labels en el orden de classes: car, truck y van cuentan como car; plate como plate; bus (colectivo) y las confusoras son salidas que no se devuelven. La ambulancia se entreno como van. Open Images anota muchas pickups como Truck, asi que truck cuenta completo. Entrada fija 1x3x512x512, FP32, opset 17; salidas dets y labels. Nunca XL ni 2XL (PML 1.0). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca.",
+      "classes": ["car", "truck", "van", "bus", "plate", "airplane", "boat", "bicycle", "motorcycle", "wheelchair", "traffic_sign", "clock"]
+    },
+    {
       "name": "parseq",
       "version": "parseq-bb5792a6@1902db043c02",
       "ports": ["ocr"],
       "file": "parseq.onnx",
       "sha256": "7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991",
-      "license": "Apache-2.0 (código); los pesos no declaran licencia",
+      "license": "Apache-2.0 (código y pesos: la declara el autor en la ficha de baudm/parseq-small en Hugging Face)",
       "paper": {
         "title": "Scene Text Recognition with Permuted Autoregressive Sequence Models",
         "venue": "ECCV",
         "year": 2022
       },
-      "source": "https://github.com/baudm/parseq (commit 1902db043c029a7e03a3818c616c06600af574be), pesos de la release v1.0.0 (parseq-bb5792a6.pt), exportado a ONNX con tools/export/parseq.py",
-      "commercial": "escalable",
-      "notes": "PARSeq base preentrenado, sin reentrenar. Antes de un uso comercial hay que confirmar con los autores la licencia de los pesos. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
+      "source": "Pesos: https://huggingface.co/baudm/parseq-small (revisión a1526c3d63740e460153987f9aaf6b86aa199dc1), pytorch_model.bin con SHA-256 bb5792a68e367476abca029cbf8699abc805f3d3dc7e57aae45c8ec4f7b7cd00, byte a byte el parseq-bb5792a6.pt de la release v1.0.0 de https://github.com/baudm/parseq (código del commit 1902db043c029a7e03a3818c616c06600af574be). Exportado a ONNX con tools/export/parseq.py: reexportado el 16/11/2026 desde esos pesos da el mismo SHA-256 de este archivo",
+      "commercial": "yes",
+      "notes": "PARSeq preentrenado, sin reentrenar (en Hugging Face se llama parseq-small: ViT-S, 128x32). La licencia Apache-2.0 de los pesos es la que declara el autor; se entrenaron con datasets reales de texto en escena cuyas licencias propias no se auditaron. Entrada fija 1x3x32x128, FP32, opset 17; salida logits 1x26x95 (decodificacion greedy autorregresiva con una iteracion de refinamiento). Una sola linea de texto: las patentes de dos lineas (motos) estan fuera de alcance."
     },
     {
       "name": "rfdetr_seg_coco",
@@ -82,12 +99,44 @@
       "notes": "Pesos de Meta sin entrenar ni ajustar. Entrada fija 1x3x224x224, FP32, opset 17."
     },
     {
+      "name": "dinov2_vits14_reid",
+      "version": "dinov2-small@3drealcar-cosface",
+      "ports": ["embedder"],
+      "file": "dinov2_vits14_reid.onnx",
+      "sha256": "7ff50b8a39e41ac9609c168f858834d013366af79c3b409b825b3c27336d53c8",
+      "license": "Apache-2.0 (modelo y 3DRealCar)",
+      "paper": {
+        "title": "DINOv2: Learning Robust Visual Features without Supervision",
+        "venue": "TMLR",
+        "year": 2024
+      },
+      "source": "facebook/dinov2-small ajustado con 3DRealCar (Du et al., ICCV 2025, Apache-2.0) con tools/training/reid/train.py (CosFace) y exportado con export.py",
+      "commercial": "yes",
+      "notes": "NO ACTIVADO: el servicio sigue con dinov2_vits14 hasta que se apruebe. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero). Se ajusta con recortes de la caja car del detector, sin segmentador; su REID_T se calibra aparte. Ajustado solo con autos de luz estandar y oscura (faltan los reflectivos). El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
+    },
+    {
+      "name": "dinov2_vits14_reid_v2",
+      "version": "dinov2-small@3drealcar-cosface-v2",
+      "ports": ["embedder"],
+      "file": "dinov2_vits14_reid_v2.onnx",
+      "sha256": "39c304b28dee0ca5641fc1df8875d6abe638a998a43096d95045b45c2a26887d",
+      "license": "Apache-2.0 (modelo y 3DRealCar)",
+      "paper": {
+        "title": "DINOv2: Learning Robust Visual Features without Supervision",
+        "venue": "TMLR",
+        "year": 2024
+      },
+      "source": "facebook/dinov2-small ajustado con los 2.009 autos usables de 3DRealCar (Du et al., ICCV 2025, Apache-2.0): 1.401 de entrenamiento, recortes del detector v2 con 0,35 de auto y sin segmentador, con tools/training/reid/train.py (CosFace, FP32, acumulacion de gradiente, parada temprana; mejor epoca 6) y exportado con export.py",
+      "commercial": "yes",
+      "notes": "ACTIVADO el 15/11/2026 (MODEL_EMBEDDER en .env.example) con REID_T 0,2565 (opcion conservadora: 0,0638): R2 compara solo GENERAL contra PLATE, con la caja del vehiculo dominante del detector, sin mascaras. Reemplaza en la practica a dinov2_vits14_reid (primera version, 411 autos, detector v1), que queda registrado sin tocar. Misma entrada y salida que dinov2_vits14 (1x3x224x224, FP32, opset 17, token CLS primero); ONNX contra PyTorch: diferencia maxima 6,7e-7 por componente y coseno minimo 0,9999999. Su REID_T se calibro en validacion con los pares general-patente (tools/eval/reid_parciales.py): 0,2565 es el mayor umbral con la cota de U1 <= 1 %; 0,0638 es el menor con S4 >= 70 %. El entrenamiento no es reproducible bit a bit: el archivo que vale es el registrado aca."
+    },
+    {
       "name": "scrfd_10g",
       "version": "scrfd-10g-bnkps@insightface-buffalo_l",
       "ports": ["face"],
       "file": "scrfd_10g.onnx",
       "sha256": "5838f7fe053675b1c7a08b633df49e7af5495cee0493c7dcf6697200b85b5b91",
-      "license": "InsightFace: pesos para investigación (datos WIDER FACE, CC BY-NC-ND); uso comercial con licencia de InsightFace",
+      "license": "InsightFace: pesos para investigación; uso comercial con licencia de InsightFace",
       "paper": {
         "title": "Sample and Computation Redistribution for Efficient Face Detection",
         "venue": "ICLR",
@@ -95,7 +144,7 @@
       },
       "source": "det_10g.onnx del paquete buffalo_l de InsightFace (SCRFD-10G con puntos de la cara), copiado de https://huggingface.co/public-data/insightface; sin reentrenar ni modificar",
       "commercial": "escalable",
-      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. El uso comercial requiere la licencia de InsightFace; el puerto face admite commercial = no por excepción de privacidad."
+      "notes": "Detector de rostros. Entrada dinámica (el adaptador usa un lienzo de 640x640), FP32, opset 11; 9 salidas (confianzas, cajas y puntos por stride 8, 16 y 32). Su confianza no se compara con la de RF-DETR. MÓDULO EXPERIMENTAL, fuera del producto y de la cascada desde el 16/11/2026 (el producto no redacta rostros). El uso comercial requiere la licencia de InsightFace."
     }
   ]
 }

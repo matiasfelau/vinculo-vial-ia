@@ -48,41 +48,42 @@ class Settings(BaseSettings):
     redaction_required: bool = True
 
     # Umbrales del dominio
-    # coseno bajo el cual la re-ID confirma que es otro auto. SIN CALIBRAR: falta VeRi-776
-    # provisorio: calibrado con VeRi-776 (tools/eval/README.md), que no es el dominio de las fotos de celular
-    reid_t: float = Field(default=0.075, ge=0.0, le=1.0)
+    # coseno bajo el cual la re-ID confirma que es otro auto. Provisorio: calibrado solo con 3DRealCar
+    # (tools/eval/README.md), que no es el dominio de las fotos de celular
+    reid_t: float = Field(default=0.2565, ge=0.0, le=1.0)
     # provisorio: sale del dataset de Roboflow (tools/eval/ocr.py); revisar con fotos propias
     ocr_min_conf: float = Field(default=0.78, ge=0.0, le=1.0)
-    # el daño solo cuenta como presencia de auto en DETAIL; ver tools/eval/presence.py
+    # confianza mínima del adaptador de daño (MODEL_DAMAGE, experimental): el daño ya no cuenta como presencia
     damage_presence_t: float = Field(default=0.97, ge=0.0, le=1.0)
-    # provisorio: barrido con SCRFD sobre WIDER FACE val y Open Images (tools/eval/README.md)
-    face_min_conf: float = Field(default=0.25, ge=0.0, le=1.0)
-    plate_redact_min_conf: float = Field(default=0.20, ge=0.0, le=1.0)
+    # 0,10 (16/11/2026; antes 0,20): con mosaico sube el recall de patentes de terceros de 87,4 % a 91,1 %
+    # en las 204 fotos de prueba, a cambio de tapar ~0,7 cajas más por foto (tools/eval/README.md)
+    plate_redact_min_conf: float = Field(default=0.10, ge=0.0, le=1.0)
     redact_max_side_px: int = Field(default=1600, ge=1)
     redact_workers: int = Field(default=3, ge=1)  # fotos que se planifican a la vez al redactar
     segmenter_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
-    detector_min_conf: float = Field(default=0.40, ge=0.0, le=1.0)
+    detector_min_conf: float = Field(default=0.35, ge=0.0, le=1.0)
     # Presencia de auto en cada foto: ocupa al menos esta fracción de la foto (tools/eval/presence.py)
     presence_min_area: float = Field(default=0.05, ge=0.0, le=1.0)
     # Lado mayor al que se reduce cada foto antes de los modelos; las cajas vuelven a la resolución original
     model_max_side_px: int = Field(default=1024, ge=256)
     curb_min_conf: float = Field(default=0.50, ge=0.0, le=1.0)
-    # Mosaico: además de la foto completa, el detector recorre tiles para encontrar rostros o patentes chicos
-    # provisorio: con la redacción en paralelo y el detector de un solo pase, 5 fotos de celular tardan
-    # menos de 12 s con los dos mosaicos (tools/eval/README.md)
-    face_tiling: bool = True
+    # Mosaico: además de la foto completa, el detector recorre tiles para encontrar patentes chicas
+    # provisorio: con la redacción en paralelo y el detector de un solo pase (tools/eval/README.md)
     plate_tiling: bool = True
     tiling_tile_px: int = Field(default=640, ge=64)
     tiling_overlap: float = Field(default=0.25, ge=0.0, le=0.9)
 
-    # Modelos: `null` (default) o el nombre de un modelo de models/manifest.json
+    # Modelos: `null` o el nombre de un modelo de models/manifest.json (por defecto, solo el OCR es parseq)
     model_detector: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    # EXPERIMENTAL y fuera de la cascada (como MODEL_DAMAGE y MODEL_CURB): el producto no redacta rostros y
+    # nadie llama a este puerto. `null` por defecto; el código queda para retomarlo (SCRFD, que pide licencia)
     model_face: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     model_segmenter: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     # EXPERIMENTAL y fuera de la cascada: vacío (no se cargan pesos) salvo para probar el modelo de rebajes
     model_curb: str = Field(default="", pattern=r"^([a-z0-9][a-z0-9_]*)?$")
     model_embedder: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
-    model_ocr: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
+    # parseq (16/11/2026): sin OCR R3 no compara y la patente reportada no se exceptúa al redactar
+    model_ocr: str = Field(default="parseq", pattern=MODEL_NAME_PATTERN)
     model_damage: str = Field(default=NULL_MODEL, pattern=MODEL_NAME_PATTERN)
     models_dir: Path | None = None
     models_manifest: Path = Path("models/manifest.json")

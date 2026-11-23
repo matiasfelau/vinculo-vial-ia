@@ -1,0 +1,122 @@
+name: publish
+
+# Publica la imagen en Docker Hub al empujar un tag de versión (v1.2.3). Los pesos de la cascada
+# salen del release models-v1 de este repo (su tag no coincide con v*.*.*, así que no dispara esto).
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: felaufernandezbottaro/vinculo-vial-ia
+  # Release con los pesos. Para actualizarlos: publicar models-vN y cambiar este valor (ver el README).
+  MODELS_TAG: models-v1
+  # Modelos que carga la cascada con la configuración por defecto (nombres del manifest). Los
+  # experimentales (daños, rebajes, rostros) y las versiones anteriores no activas no entran.
+  MODELS: rfdetr_openimages_v2 rfdetr_seg_coco dinov2_vits14_reid_v2 parseq
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3.13-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      RABBITMQ_TEST_URL: amqp://guest:guest@localhost:5672/
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Configurar Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Instalar uv
+        run: pip install uv==0.12.23
+
+      - name: Instalar dependencias
+        run: uv sync --frozen --extra dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Tipos (dominio y servicio)
+        run: uv run mypy src/vvi_ia/domain src/vvi_ia/service
+
+      # Mismas pruebas que ci.yml: unitarias y de integración contra el RabbitMQ del servicio,
+      # con el gate de 85 % sobre el total.
+      - name: Pruebas con cobertura
+        run: uv run pytest --cov --cov-report=term-missing:skip-covered --cov-fail-under=85
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar código fuente
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # El nombre del tag lo controla quien lo empuja y `v*.*.*` es un glob laxo: se valida acá y
+      # nunca se interpola en un script.
+      - name: Calcular la versión
+        id: version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::El tag '$REF_NAME' no tiene el formato vX.Y.Z"
+            exit 1
+          fi
+          echo "version=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Los pesos van adentro de la imagen (corre sin acceso a internet). Cada archivo se verifica
+      # contra el sha256 de models/manifest.json antes del build: si uno no coincide, falla.
+      - name: Descargar y verificar los pesos
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p models/weights
+          for name in $MODELS; do
+            file=$(jq -r --arg n "$name" '.models[] | select(.name == $n) | .file' models/manifest.json)
+            expected=$(jq -r --arg n "$name" '.models[] | select(.name == $n) | .sha256' models/manifest.json)
+            if [ -z "$file" ] || [ -z "$expected" ] || [ "$expected" = "null" ]; then
+              echo "::error::El modelo $name no está en models/manifest.json o no tiene sha256"
+              exit 1
+            fi
+            gh release download "$MODELS_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$file" --dir models/weights --clobber
+            actual=$(sha256sum "models/weights/$file" | cut -d' ' -f1)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::El sha256 de $file no coincide con el manifest (esperado $expected, obtenido $actual)"
+              exit 1
+            fi
+            echo "OK $file $actual"
+          done
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Iniciar sesión en Docker Hub
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Construir y publicar la imagen
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE }}:latest

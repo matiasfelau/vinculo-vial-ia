@@ -8,7 +8,6 @@ import pytest
 
 from tests.fakes import (
     BRIGHT,
-    CONTEXT,
     GENERAL,
     PLATE,
     REDACTION,
@@ -19,7 +18,6 @@ from tests.fakes import (
     Scenario,
     build_scenario,
     car_box,
-    detail_marker,
     happy_models,
     plate_box,
 )
@@ -97,16 +95,25 @@ def _by_text(crop: Pixels) -> tuple[str, float] | None:
     return (REPORTED_PLATE, 0.9) if crop.shape[:2] == (20, 50) else (OTHER_TEXT, 0.9)
 
 
-def _models_with_two_plates_and_a_face() -> FakeModels:
+def _models_with_two_plates() -> FakeModels:
     models = happy_models()
     models.vehicle.by_marker[GENERAL] = [
         Box(5, 5, 95, 95, 0.9, BoxLabel.CAR),
         PLATE_A,
         PLATE_B,
     ]
-    models.face.by_marker[GENERAL] = [FACE]
     models.plate.override = _by_text
     return models
+
+
+STRAY = Box(0, 0, 20, 20, 0.5, BoxLabel.PLATE)  # una patente ajena de 20x20 que el OCR no lee
+
+
+def _with_a_stray_plate(models: FakeModels, markers: tuple[int, ...]) -> None:
+    """Agrega a cada foto una patente ajena en (0, 0, 20, 20): se tapa, y se nota en el píxel (10, 10)."""
+    for marker in markers:
+        models.vehicle.by_marker[marker] = [*(models.vehicle.by_marker[marker] or []), STRAY]
+    models.plate.override = lambda crop: None if crop.shape[:2] == (20, 20) else (REPORTED_PLATE, 0.95)
 
 
 def _g(img: Pixels, x: int, y: int) -> int:
@@ -116,23 +123,50 @@ def _g(img: Pixels, x: int, y: int) -> int:
 # --- cobertura -----------------------------------------------------------------------------
 
 
-def test_cubre_rostros_y_patentes_ajenas_pero_no_la_que_coincide() -> None:
+def test_cubre_las_patentes_ajenas_pero_no_la_que_coincide() -> None:
     scenario = build_scenario()
 
-    result, writer = _run(scenario, _models_with_two_plates_and_a_face())
+    result, writer = _run(scenario, _models_with_two_plates())
 
     assert result.verdict == Verdict.GREEN
     general = _uploaded(writer, scenario, "general-0")
-    assert _g(general, 80, 15) < DARK  # rostro
     assert _g(general, 40, 65) < DARK  # patente ajena
     assert _g(general, 35, 20) > LIGHT  # patente que coincide: se deja ver
     assert _g(general, 95, 95) > LIGHT  # el resto de la foto queda intacto
 
 
+def test_los_rostros_no_se_redactan_y_el_detector_de_rostros_no_se_llama() -> None:
+    """Riesgo aceptado (16/11/2026): el producto tapa solo patentes; el modelo de rostros es experimental."""
+    scenario = build_scenario()
+    models = _models_with_two_plates()
+    models.face.by_marker[GENERAL] = [FACE]  # aunque hubiera un detector de rostros que respondiera
+
+    result, writer = _run(scenario, models)
+
+    assert result.verdict == Verdict.GREEN
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 80, 15) > LIGHT  # el rostro queda a la vista
+    assert _g(general, 40, 65) < DARK  # y la patente ajena sigue tapada
+    assert models.face.calls == 0
+
+
+def test_la_redaccion_no_depende_del_modelo_de_rostros() -> None:
+    """Con el detector de rostros nulo (None en todas las fotos) la redacción se genera igual."""
+    models = happy_models()
+    assert models.face.by_marker == {}  # None siempre: como NullFaceDetector
+
+    result, writer = _run(build_scenario(), models)
+
+    assert result.verdict == Verdict.GREEN
+    assert ReasonCode.REDACTION_UNAVAILABLE not in result.reason_codes
+    assert len(result.redacted) == 2 and len(writer.puts) == 2
+    assert models.face.calls == 0
+
+
 def test_el_relleno_incluye_el_margen_del_diez_por_ciento() -> None:
     scenario = build_scenario()
 
-    _, writer = _run(scenario, _models_with_two_plates_and_a_face())
+    _, writer = _run(scenario, _models_with_two_plates())
 
     general = _uploaded(writer, scenario, "general-0")
     # PLATE_B mide 60x30: el margen es 6 px a los lados y 3 px arriba/abajo (x 4..76, y 47..83)
@@ -143,7 +177,7 @@ def test_el_relleno_incluye_el_margen_del_diez_por_ciento() -> None:
 
 def test_patente_con_un_caracter_de_diferencia_tambien_se_considera_la_reportada() -> None:
     scenario = build_scenario()
-    models = _models_with_two_plates_and_a_face()
+    models = _models_with_two_plates()
     models.plate.override = lambda crop: (
         (REPORTED_PLATE[:-1] + "9", 0.9)
         if crop.shape[:2] == (20, 50)
@@ -160,7 +194,7 @@ def test_patente_con_un_caracter_de_diferencia_tambien_se_considera_la_reportada
 
 def test_patente_con_lectura_de_baja_confianza_se_tapa() -> None:
     scenario = build_scenario()
-    models = _models_with_two_plates_and_a_face()
+    models = _models_with_two_plates()
     models.plate.override = lambda crop: (
         (REPORTED_PLATE, 0.2) if crop.shape[:2] == (20, 50) else (OTHER_TEXT, 0.9)
     )
@@ -170,44 +204,29 @@ def test_patente_con_lectura_de_baja_confianza_se_tapa() -> None:
     assert _g(_uploaded(writer, scenario, "general-0"), 35, 20) < DARK
 
 
-def test_se_redactan_todas_las_fotos_de_la_alerta() -> None:
-    scenario = build_scenario(AlertType.CRASHED, details=2)
+@pytest.mark.parametrize("alert_type", [AlertType.CRASHED, AlertType.PARKED_ON_GARAGE])
+def test_se_redactan_las_dos_fotos_de_la_alerta(alert_type: AlertType) -> None:
+    scenario = build_scenario(alert_type)
     models = happy_models()
-    for marker in (GENERAL, PLATE, detail_marker(0), detail_marker(1)):
-        models.face.by_marker[marker] = [Box(0, 0, 20, 20, 0.9)]
-    models.damage.by_marker[detail_marker(1)] = [Box(0, 0, 9, 9, 0.8)]
+    _with_a_stray_plate(models, (GENERAL, PLATE))
 
     result, writer = _run(scenario, models)
 
     assert [(r.role, r.index) for r in result.redacted] == [
         (EvidenceRole.GENERAL, 0),
         (EvidenceRole.PLATE, 0),
-        (EvidenceRole.DETAIL, 0),
-        (EvidenceRole.DETAIL, 1),
     ]
-    for name in ("general-0", "plate-0", "detail-0", "detail-1"):
+    assert sorted(writer.objects) == sorted(
+        f"alerts/{scenario.alert_id}/redacted/{name}.jpg" for name in ("general-0", "plate-0")
+    )
+    for name in ("general-0", "plate-0"):
         assert _g(_uploaded(writer, scenario, name), 10, 10) < DARK
-
-
-def test_garage_redacta_la_foto_de_contexto() -> None:
-    scenario = build_scenario(AlertType.PARKED_ON_GARAGE)
-    models = happy_models()
-    models.face.by_marker[CONTEXT] = [Box(0, 0, 20, 20, 0.9)]
-
-    result, writer = _run(scenario, models)
-
-    assert [r.role for r in result.redacted] == [
-        EvidenceRole.GENERAL,
-        EvidenceRole.PLATE,
-        EvidenceRole.CONTEXT,
-    ]
-    assert _g(_uploaded(writer, scenario, "context-0"), 10, 10) < DARK
 
 
 def test_el_relleno_es_opaco_y_no_un_blur() -> None:
     scenario = build_scenario()
 
-    _, writer = _run(scenario, _models_with_two_plates_and_a_face())
+    _, writer = _run(scenario, _models_with_two_plates())
 
     region = _uploaded(writer, scenario, "general-0")[55:75, 15:65, 1]
     assert region.max() < DARK  # ningún píxel conserva información de la foto original
@@ -229,19 +248,20 @@ def _unavailable(result: ValidationResult, writer: FakeWriter) -> None:
     _nothing_uploaded(result, writer)
 
 
-def test_sin_detector_de_rostros_no_se_genera_ninguna_version() -> None:
+def test_sin_detector_de_patentes_no_se_genera_ninguna_version() -> None:
     models = happy_models()
-    models.face.by_marker[GENERAL] = None
+    models.vehicle.by_marker[GENERAL] = None  # la redacción necesita sus patentes; los rostros no cuentan
 
     result, writer = _run(build_scenario(), models)
 
-    assert result.reason_codes == (ReasonCode.REDACTION_UNAVAILABLE,)  # la cascada sola daba GREEN
+    assert ReasonCode.REDACTION_UNAVAILABLE in result.reason_codes
     _unavailable(result, writer)
+    assert models.face.calls == 0
 
 
 def test_sin_detector_de_vehiculos_en_una_foto_no_se_redacta_ninguna() -> None:
     models = happy_models()
-    models.vehicle.by_marker[detail_marker(0)] = None  # el detector (patentes) falla en una sola foto
+    models.vehicle.by_marker[PLATE] = None  # el detector (patentes) falla en una sola foto
 
     result, writer = _run(build_scenario(), models)
 
@@ -250,36 +270,25 @@ def test_sin_detector_de_vehiculos_en_una_foto_no_se_redacta_ninguna() -> None:
 
 def test_una_patente_que_el_ocr_no_lee_se_tapa_y_la_redaccion_sigue_disponible() -> None:
     scenario = build_scenario()
-    models = _models_with_two_plates_and_a_face()
+    models = _models_with_two_plates()
     models.plate.override = lambda crop: None  # hay cajas de patente en las fotos y el OCR no las lee
 
     result, writer = _run(scenario, models)
 
-    assert len(result.redacted) == 3 and len(writer.puts) == 3
+    assert len(result.redacted) == 2 and len(writer.puts) == 2
     assert ReasonCode.REDACTION_UNAVAILABLE not in result.reason_codes
     general = _uploaded(writer, scenario, "general-0")
     assert _g(general, 40, 15) < DARK  # la patente que no se pudo leer se tapa, aunque sea la reportada
 
 
-def test_si_falla_una_sola_foto_tampoco_se_sube_ninguna_de_las_otras() -> None:
+def test_sin_patentes_cuenta_como_redactada() -> None:
     models = happy_models()
-    models.face.by_marker[detail_marker(0)] = None
-
-    result, writer = _run(build_scenario(), models)
-
-    _unavailable(result, writer)
-
-
-def test_sin_rostros_ni_patentes_cuenta_como_redactada() -> None:
-    models = happy_models()
-    for marker in (GENERAL, PLATE, CONTEXT, *map(detail_marker, range(3))):
-        models.face.by_marker[marker] = []  # ninguna cara
-    models.vehicle.by_marker[GENERAL] = [car_box()]  # ni patentes
+    models.vehicle.by_marker[GENERAL] = [car_box()]  # ninguna patente
     models.vehicle.by_marker[PLATE] = [car_box()]
 
     result, writer = _run(build_scenario(), models)
 
-    assert len(result.redacted) == 3 and len(writer.puts) == 3
+    assert len(result.redacted) == 2 and len(writer.puts) == 2
     assert ReasonCode.REDACTION_UNAVAILABLE not in result.reason_codes
 
 
@@ -350,7 +359,7 @@ def test_una_patente_casi_igual_es_green_y_genera_version_redactada() -> None:
     result, writer = _run(build_scenario(), models)
 
     assert result.verdict == Verdict.GREEN
-    assert len(writer.puts) == 3
+    assert len(writer.puts) == 2
 
 
 # --- salida: claves, JPEG, EXIF, tamaño ---------------------------------------------------
@@ -361,9 +370,7 @@ def test_sube_a_redacted_con_content_type_jpeg_y_devuelve_las_claves() -> None:
 
     result, writer = _run(scenario, happy_models())
 
-    keys = [
-        f"alerts/{scenario.alert_id}/redacted/{name}.jpg" for name in ("general-0", "plate-0", "detail-0")
-    ]
+    keys = [f"alerts/{scenario.alert_id}/redacted/{name}.jpg" for name in ("general-0", "plate-0")]
     assert [r.key for r in result.redacted] == keys
     assert sorted(writer.objects) == sorted(keys)
     for body, content_type in writer.objects.values():
@@ -386,7 +393,7 @@ def test_el_lado_mayor_se_limita_a_redact_max_side_px() -> None:
 
     _, writer = _run(scenario, happy_models(), redaction=replace(REDACTION, max_side_px=50))
 
-    for name in ("general-0", "plate-0", "detail-0"):
+    for name in ("general-0", "plate-0"):
         assert max(_uploaded(writer, scenario, name).shape[:2]) == 50
 
 
@@ -398,8 +405,8 @@ def test_reprocesar_sobrescribe_las_mismas_claves() -> None:
     second = use_case.execute(scenario.payload)
 
     assert first == second
-    assert len(writer.objects) == 3
-    assert len(writer.puts) == 6
+    assert len(writer.objects) == 2
+    assert len(writer.puts) == 4
 
 
 def test_una_falla_transitoria_al_subir_se_propaga_para_reintentar() -> None:
@@ -417,16 +424,15 @@ def test_sin_redaccion_requerida_sube_la_imagen_re_encodeada_sin_tapar(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     scenario = build_scenario()
-    models = _models_with_two_plates_and_a_face()
+    models = _models_with_two_plates()
     detections_before = models.vehicle.calls
 
     with caplog.at_level(logging.WARNING):
         result, writer = _run(scenario, models, redaction=replace(REDACTION, required=False))
 
-    assert len(result.redacted) == 3
+    assert len(result.redacted) == 2
     general = _uploaded(writer, scenario, "general-0")
-    assert _g(general, 80, 15) > LIGHT  # el rostro no se tapa
-    assert _g(general, 40, 65) > LIGHT  # la patente ajena tampoco
+    assert _g(general, 40, 65) > LIGHT  # la patente ajena no se tapa
     assert b"Exif" not in writer.objects[result.redacted[0].key][0]
     warning = next(r for r in caplog.records if "redacción desactivada" in r.getMessage())
     assert warning.levelno == logging.WARNING
@@ -448,8 +454,8 @@ def test_sin_modelos_y_sin_redaccion_requerida_sube_todo_para_probar_el_visor() 
     result, writer = _run(build_scenario(), null_models, redaction=replace(REDACTION, required=False))
 
     assert result.verdict == Verdict.GREEN
-    assert len(result.redacted) == 3
-    assert len(writer.puts) == 3
+    assert len(result.redacted) == 2
+    assert len(writer.puts) == 2
 
 
 def test_sin_redaccion_requerida_un_red_tampoco_sube_nada() -> None:
@@ -470,10 +476,10 @@ def test_los_logs_de_la_redaccion_no_contienen_la_patente_ni_el_texto_del_ocr(
     from vvi_ia.logging_setup import JsonFormatter
 
     with caplog.at_level(logging.DEBUG):
-        _run(build_scenario(), _models_with_two_plates_and_a_face())
+        _run(build_scenario(), _models_with_two_plates())
         _run(
             build_scenario(),
-            _models_with_two_plates_and_a_face(),
+            _models_with_two_plates(),
             redaction=replace(REDACTION, required=False),
         )
 
@@ -495,7 +501,7 @@ def test_la_foto_original_en_memoria_no_se_modifica() -> None:
 
     scenario.decoder.decode = spy  # type: ignore[method-assign]
 
-    _run(scenario, _models_with_two_plates_and_a_face())
+    _run(scenario, _models_with_two_plates())
 
     general = seen[0]
     assert np.all(general[..., 1] == BRIGHT)
@@ -506,18 +512,17 @@ def test_la_foto_original_en_memoria_no_se_modifica() -> None:
 
 
 def _in_parallel(workers: int) -> RedactionSettings:
-    return RedactionSettings(
-        required=True, face_min_conf=0.30, plate_min_conf=0.20, max_side_px=1600, workers=workers
-    )
+    return RedactionSettings(required=True, plate_min_conf=0.20, max_side_px=1600, workers=workers)
 
 
 def test_planificar_en_paralelo_sube_las_mismas_fotos_que_una_por_una() -> None:
     def uploaded(workers: int) -> dict[str, bytes]:
-        scenario = build_scenario(AlertType.CRASHED, details=2)
-        models = _models_with_two_plates_and_a_face()
-        for marker in (PLATE, detail_marker(0), detail_marker(1)):
-            models.face.by_marker[marker] = [Box(0, 0, 20, 20, 0.9)]
-        models.damage.by_marker[detail_marker(1)] = [Box(0, 0, 9, 9, 0.8)]
+        scenario = build_scenario(AlertType.CRASHED)
+        models = _models_with_two_plates()
+        _with_a_stray_plate(models, (PLATE,))
+        models.plate.override = lambda crop: (
+            None if crop.shape[:2] == (20, 20) else _by_text(crop)
+        )  # la ajena de 20x20 no se lee: se tapa
         result, writer = _run(scenario, models, redaction=_in_parallel(workers))
         assert [(r.role, r.index) for r in result.redacted][0] == (EvidenceRole.GENERAL, 0)
         return {key.rsplit("/", 1)[1]: body for key, (body, _) in writer.objects.items()}
@@ -527,8 +532,133 @@ def test_planificar_en_paralelo_sube_las_mismas_fotos_que_una_por_una() -> None:
 
 def test_en_paralelo_si_falla_una_sola_foto_no_se_sube_ninguna() -> None:
     models = happy_models()
-    models.face.by_marker[detail_marker(0)] = None
+    models.vehicle.by_marker[PLATE] = None  # falla el detector de patentes en esa foto
 
     result, writer = _run(build_scenario(), models, redaction=_in_parallel(3))
 
     _unavailable(result, writer)
+
+
+# --- cajas contenidas en la patente exceptuada ------------------------------------------------------
+
+
+NESTED = Box(20, 12, 50, 28, 0.6, BoxLabel.PLATE)  # un pedazo de PLATE_A (la reportada), de 16x30
+
+
+def test_una_deteccion_contenida_en_la_patente_denunciada_no_la_tapa() -> None:
+    """El mosaico detecta dos veces la misma patente: la caja de adentro no es una patente ajena."""
+    scenario = build_scenario()
+    models = _models_with_two_plates()
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), NESTED]
+
+    _, writer = _run(scenario, models)
+
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 35, 20) > LIGHT  # la patente denunciada queda a la vista, también bajo el pedazo
+    assert _g(general, 40, 65) < DARK  # la ajena sigue tapada
+
+
+# --- patente principal de la foto de patente ------------------------------------------------------------
+
+
+def _two_plates_in_the_plate_photo() -> FakeModels:
+    """Dos patentes en la foto de patente y en la general (la de arriba, más confiable); el OCR no lee."""
+    models = happy_models()
+    plate_a = Box(10, 10, 60, 30, 0.9, BoxLabel.PLATE)
+    plate_b = Box(10, 50, 70, 80, 0.5, BoxLabel.PLATE)
+    for marker in (GENERAL, PLATE):
+        models.vehicle.by_marker[marker] = [Box(5, 5, 95, 95, 0.9, BoxLabel.CAR), plate_a, plate_b]
+    models.plate.override = lambda crop: None  # ninguna se lee: no hay excepción por lectura
+    return models
+
+
+def test_en_la_foto_de_patente_la_principal_no_se_tapa_aunque_el_ocr_no_la_lea() -> None:
+    scenario = build_scenario()
+
+    result, writer = _run(scenario, _two_plates_in_the_plate_photo())
+
+    assert result.verdict == Verdict.GREEN
+    plate_photo = _uploaded(writer, scenario, "plate-0")
+    assert _g(plate_photo, 35, 20) > LIGHT  # la principal queda a la vista
+    assert _g(plate_photo, 40, 65) < DARK  # la otra se tapa
+
+
+def test_en_la_foto_general_la_regla_de_la_principal_no_cambia_nada() -> None:
+    scenario = build_scenario()
+
+    _, writer = _run(scenario, _two_plates_in_the_plate_photo())
+
+    general = _uploaded(writer, scenario, "general-0")
+    assert _g(general, 35, 20) < DARK and _g(general, 40, 65) < DARK  # sin lectura se tapan las dos
+
+
+def test_la_principal_de_la_foto_de_patente_se_elige_por_confianza_dentro_del_auto() -> None:
+    scenario = build_scenario()
+    models = _two_plates_in_the_plate_photo()
+    other = Box(10, 10, 60, 30, 0.4, BoxLabel.PLATE)
+    stronger = Box(10, 50, 70, 80, 0.95, BoxLabel.PLATE)  # ahora la de abajo es la más confiable
+    models.vehicle.by_marker[PLATE] = [Box(5, 5, 95, 95, 0.9, BoxLabel.CAR), other, stronger]
+
+    _, writer = _run(scenario, models)
+
+    plate_photo = _uploaded(writer, scenario, "plate-0")
+    assert _g(plate_photo, 40, 65) > LIGHT and _g(plate_photo, 35, 20) < DARK
+
+
+# --- cajas que contienen a la exceptuada y margen recortado ---------------------------------------------
+
+
+class RecordingRenderer:
+    """Registra las cajas que el caso de uso manda tapar en cada foto (sin codificar nada)."""
+
+    def __init__(self) -> None:
+        self.plans: list[list[Box]] = []
+
+    def render(self, pixels: Pixels, boxes: list[Box], max_side: int) -> bytes:
+        self.plans.append(list(boxes))
+        return b"jpeg"
+
+
+def _plan_of_the_general_photo(models: FakeModels) -> list[Box]:
+    scenario = build_scenario()
+    renderer = RecordingRenderer()
+    use_case = ValidateEvidence(
+        store=scenario.store,
+        writer=FakeWriter(),
+        decryptor=scenario.decryptor,
+        decoder=scenario.decoder,
+        renderer=renderer,  # type: ignore[arg-type]
+        models=models.as_models(),
+        thresholds=THRESHOLDS,
+        redaction=REDACTION,
+    )
+    result = use_case.execute(scenario.payload)
+    assert result.verdict == Verdict.GREEN
+    return renderer.plans[0]  # la primera foto del payload es la general
+
+
+def _overlap(a: Box, b: Box) -> float:
+    return max(0.0, min(a.x2, b.x2) - max(a.x1, b.x1)) * max(0.0, min(a.y2, b.y2) - max(a.y1, b.y1))
+
+
+def test_una_caja_que_contiene_a_la_patente_exceptuada_no_se_tapa() -> None:
+    """La reportada (PLATE_A, leída por el OCR) queda a la vista aunque otra detección la contenga entera."""
+    models = _models_with_two_plates()
+    bigger = Box(5, 5, 80, 40, 0.5, BoxLabel.PLATE)  # contiene a PLATE_A, el OCR la lee como otra patente
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), bigger]
+
+    plan = _plan_of_the_general_photo(models)
+
+    assert all(_overlap(box, PLATE_A) == 0 for box in plan)  # nada pisa a la reportada
+    assert any(_overlap(box, PLATE_B) > 0 for box in plan)  # la otra patente sí se tapa
+
+
+def test_el_margen_de_una_patente_vecina_no_pisa_a_la_exceptuada() -> None:
+    models = _models_with_two_plates()
+    neighbour = Box(62, 10, 100, 30, 0.5, BoxLabel.PLATE)  # a 2 px de PLATE_A: su margen del 10 % la pisaría
+    models.vehicle.by_marker[GENERAL] = [*(models.vehicle.by_marker[GENERAL] or []), neighbour]
+
+    plan = _plan_of_the_general_photo(models)
+
+    assert all(_overlap(box, PLATE_A) == 0 for box in plan)
+    assert any(_overlap(box, neighbour) > 0 for box in plan)  # la vecina sí se tapa

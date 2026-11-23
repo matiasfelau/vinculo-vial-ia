@@ -1,16 +1,15 @@
-"""Compara detectores de rostros: RF-DETR (el elegido), SCRFD, RetinaFace-R50 y YuNet.
+"""Módulo experimental de rostros (fuera del producto): compara RF-DETR v1, SCRFD, RetinaFace-R50 y YuNet.
 
-Mide, sobre fotos propias con las caras anotadas, el recall con IoU 0,5 o más, el recall en caras chicas, los
-falsos positivos por foto y la latencia en CPU. Para tapar rostros manda el **recall**: el servicio trabaja en
-modo *fail-closed* y un rostro que no se detecta queda a la vista. El criterio de `docs/modelos.md` es que se
-queda RF-DETR si su recall queda cerca del de RetinaFace-R50.
+El producto no redacta rostros (riesgo aceptado: las fotos se toman a 1-2 m centradas en el vehículo): nada
+de esto entra a la cascada; el script queda para retomar el módulo. Mide, sobre las fotos de Open Images con
+las caras anotadas (`face_sets.py openimages`), el recall con IoU 0,5 o más, el recall en caras chicas, los
+falsos positivos por foto y la latencia en CPU.
 
 Licencias (la columna `commercial` del manifest):
 
-- RF-DETR: `yes`. Es el que entra al servicio.
-- SCRFD: `escalable`. Solo puede entrar al servicio si gana la comparación **y** se confirma con InsightFace
-  que puede usarse comercialmente.
-- RetinaFace-R50 y YuNet: `no` (se entrenaron con WIDER FACE, CC BY-NC-ND). Son solo referencia en `tools/`.
+- RF-DETR v1: `yes`.
+- SCRFD: `escalable`. Los pesos de InsightFace son para investigación: el uso comercial requiere su licencia.
+- RetinaFace-R50 y YuNet: `no`. Son solo referencia en `tools/`.
 
 Los detectores que no son RF-DETR se cargan desde un ONNX que vos tenés: no se bajan ni se redistribuyen. La
 decodificación de SCRFD y RetinaFace sigue el código de sus repositorios y está probada con tensores

@@ -26,6 +26,7 @@ from vvi_ia.adapters.models.parseq import (
     ParseqPlateReader,
     decode_greedy,
     extract_plate,
+    extract_plate_chars,
     preprocess,
 )
 from vvi_ia.adapters.models.registry import ADAPTERS, ModelSetupError, build_models
@@ -424,15 +425,18 @@ def test_un_modelo_con_otras_clases_no_deja_arrancar(tmp_path: Path) -> None:
 # --- manifest versionado -------------------------------------------------------------------
 
 
-def test_el_manifest_del_repo_declara_parseq_como_escalable() -> None:
+def test_el_manifest_del_repo_declara_parseq_con_apache_2_y_la_fuente_de_los_pesos() -> None:
+    """16/11/2026: pesos de baudm/parseq-small (Hugging Face, Apache-2.0), los mismos de la release v1.0.0."""
     entry = load_manifest(REPO_ROOT / "models" / "manifest.json").get(MODEL_NAME)
 
     assert entry is not None
     assert entry.ports == ("ocr",)
-    assert entry.commercial == Commercial.ESCALABLE
+    assert entry.commercial == Commercial.YES
     assert (entry.paper.venue, entry.paper.year) == ("ECCV", 2022)
-    assert entry.sha256 is not None
-    assert "no declaran licencia" in entry.license
+    assert entry.sha256 == "7ff186b1f7433e62980d01d647dce74ab338ebe43eefe6ec5e031a2c06315991"
+    assert entry.license.startswith("Apache-2.0") and "baudm/parseq-small" in entry.license
+    assert "huggingface.co/baudm/parseq-small" in entry.source
+    assert "bb5792a68e367476abca029cbf8699abc805f3d3dc7e57aae45c8ec4f7b7cd00" in entry.source
 
 
 # --- integración con los pesos reales (opt-in: requiere MODELS_DIR) --------------------------
@@ -462,3 +466,16 @@ def test_pesos_reales_leen_texto_sintetico_con_formato_de_patente(text: str) -> 
     assert result[0] == text
     assert result[1] > 0.9
     assert models.versions()["ocr"].startswith(f"{MODEL_NAME}@")
+
+
+def test_extract_plate_chars_devuelve_la_probabilidad_de_cada_caracter_de_la_patente() -> None:
+    probs = [0.99, 0.98, 0.1, 0.97, 0.96, 0.95, 0.1, 0.94, 0.93]  # los espacios valen 0.1
+
+    text, chars = extract_plate_chars("AB 123 CD", probs)
+
+    assert text == "AB123CD"
+    assert chars == [0.99, 0.98, 0.97, 0.96, 0.95, 0.94, 0.93]
+
+
+def test_extract_plate_chars_sin_patente_devuelve_el_texto_crudo_con_todas_sus_probabilidades() -> None:
+    assert extract_plate_chars("HELLO", [0.9, 0.8, 0.95, 0.99, 0.6]) == ("HELLO", [0.9, 0.8, 0.95, 0.99, 0.6])

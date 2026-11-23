@@ -29,7 +29,6 @@ _CONFIG_KEYS = {
     "PRESENCE_MIN_AREA",
     "MODEL_MAX_SIDE_PX",
     "REDACT_WORKERS",
-    "FACE_TILING",
     "PLATE_TILING",
     "TILING_TILE_PX",
     "TILING_OVERLAP",
@@ -60,6 +59,8 @@ def clean_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyP
 def base_env(clean_env: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
     for key, value in BASE_ENV.items():
         clean_env.setenv(key, value)
+    # El OCR es parseq por defecto (exige MODELS_DIR): los tests sin pesos parten de un entorno sin modelos
+    clean_env.setenv("MODEL_OCR", "null")
     return clean_env
 
 

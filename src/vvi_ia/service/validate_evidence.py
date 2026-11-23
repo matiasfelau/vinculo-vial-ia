@@ -45,8 +45,8 @@ from vvi_ia.domain.ports import (
     PlateReader,
     VehicleDetector,
 )
-from vvi_ia.domain.redaction import RedactionThresholds, plan_redaction
-from vvi_ia.domain.reid import ReidOutcome, best_match, same_vehicle
+from vvi_ia.domain.redaction import RedactionThresholds, main_plate, plan_redaction
+from vvi_ia.domain.reid import ReidOutcome, same_vehicle
 from vvi_ia.domain.verdict import aggregate
 from vvi_ia.service.payload import EvidenceUploaded
 from vvi_ia.service.ports import (
@@ -79,7 +79,7 @@ class Models:
     embedder: Embedder
     plate: PlateReader
     damage: DamageDetector
-    face: FaceDetector
+    face: FaceDetector  # EXPERIMENTAL: fuera de la cascada (el producto no redacta rostros); nadie lo llama
 
     def versions(self) -> dict[str, str]:
         """Versiones tal como viajan en `model_versions`."""
@@ -99,14 +99,12 @@ class Thresholds:
 
     reid_t: float  # coseno bajo el cual la re-ID confirma que es otro auto (BURST_MISMATCH)
     ocr_min_conf: float  # lectura segura de patente: con menos confianza no hay veredicto de patente
-    damage_presence_t: float  # confianza de una caja de daño para contar como presencia de auto en DETAIL
     presence_min_area: (
         float  # fracción mínima de la foto que ocupa el auto (o la parte) para contar como presente
     )
     model_max_side_px: (
         int  # lado mayor al que se reduce cada foto antes de los modelos (las cajas vuelven al original)
     )
-    presence_plate_min_conf: float  # confianza mínima de una patente para contar como parte de un auto
 
 
 @dataclass(frozen=True)
@@ -114,7 +112,6 @@ class RedactionSettings:
     """Parámetros de la redacción (paso 8)."""
 
     required: bool
-    face_min_conf: float
     plate_min_conf: float
     max_side_px: int
     workers: int = 1  # fotos que se planifican a la vez (1: una por una)
@@ -137,9 +134,7 @@ class _Run:
     plate_detections: dict[tuple[EvidenceRole, int], list[Box] | None] = field(default_factory=dict)
     cars: dict[tuple[EvidenceRole, int], list[CarInstance] | None] = field(default_factory=dict)
     reads: dict[tuple[EvidenceRole, int, Box], PlateRead | None] = field(default_factory=dict)
-    reference_embeddings: list[Vector] = field(default_factory=list)
-    embeddings: dict[tuple[EvidenceRole, int, int], Vector | None] = field(default_factory=dict)
-    general_embedding: Vector | None = None
+    embeddings: dict[tuple[EvidenceRole, int], Vector | None] = field(default_factory=dict)
 
     def detect(self, image: EvidenceImage) -> list[Box] | None:
         """El único pase del detector sobre la foto reducida (sin mosaico), con las cajas en la original."""
@@ -157,16 +152,51 @@ class _Run:
             )
         return self.plate_detections[key]
 
-    def segment_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
-        """Los autos de la foto reducida (las máscaras son del tamaño de la reducida)."""
+    def car_instances(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Los autos de la foto reducida, cada uno con su máscara (del tamaño de la reducida).
+
+        Con un segmentador (`MODEL_SEGMENTER`, que está en la cascada) son sus instancias. Sin él son las
+        cajas `car` del detector, cada una como una máscara rectangular: el recorte que se le da al embedder
+        es la caja. `None` si ningún modelo respondió.
+        """
         key = (image.role, image.index)
         if key not in self.cars:
-            self.cars[key] = self.models.cars.cars(image.model_pixels)
+            segmented = self.models.cars.cars(image.model_pixels)
+            self.cars[key] = segmented if segmented is not None else self._boxed_cars(image)
         return self.cars[key]
 
-    def embed(self, image: EvidenceImage, car_index: int, car: CarInstance) -> Vector | None:
-        """Embedding de una instancia de auto (con caché: la re-ID y la rampa comparten el trabajo)."""
-        key = (image.role, image.index, car_index)
+    def _boxed_cars(self, image: EvidenceImage) -> list[CarInstance] | None:
+        """Las cajas `car` del detector (con su confianza mínima) como instancias de máscara rectangular."""
+        detections = self.detect(image)
+        if detections is None:
+            return None
+        height, width = image.model_pixels.shape[:2]
+        cars: list[CarInstance] = []
+        for box in detections:
+            if box.label != BoxLabel.CAR:
+                continue
+            x1, y1 = max(0, int(box.x1 / image.ratio)), max(0, int(box.y1 / image.ratio))
+            x2, y2 = min(width, round(box.x2 / image.ratio)), min(height, round(box.y2 / image.ratio))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            mask = np.zeros((height, width), np.bool_)
+            mask[y1:y2, x1:x2] = True
+            cars.append(CarInstance(mask=mask, conf=box.conf))
+        return cars
+
+    def dominant_vehicle(self, image: EvidenceImage) -> CarInstance | None:
+        """El vehículo dominante de la foto según el detector: su caja `car` más grande, como máscara.
+
+        Es el recorte con el que se calibró la re-ID (`tools/training/reid`,
+        `tools/eval/reid_parciales.py`): la caja del detector, **sin la máscara del segmentador** (que
+        sí decide la presencia, R1). `None` si el detector no ve un vehículo o no respondió.
+        """
+        cars = self._boxed_cars(image)
+        return largest_car(cars) if cars else None
+
+    def embed_dominant(self, image: EvidenceImage, car: CarInstance) -> Vector | None:
+        """Embedding del vehículo dominante de una foto (con caché)."""
+        key = (image.role, image.index)
         if key not in self.embeddings:
             self.embeddings[key] = self.models.embedder.embed(image.model_pixels, car.mask)
         return self.embeddings[key]
@@ -278,19 +308,15 @@ class ValidateEvidence:
             reported = self._reported_plate(payload)
 
         run = _Run(models=self._models)
-        by_role = {role: [i for i in images if i.role == role] for role in EvidenceRole}
-        general, plate_img = by_role[EvidenceRole.GENERAL][0], by_role[EvidenceRole.PLATE][0]
+        general = next(i for i in images if i.role == EvidenceRole.GENERAL)
+        plate_img = next(i for i in images if i.role == EvidenceRole.PLATE)
         codes: Codes = []
 
         with _timed(durations, "vehicle"):
-            ordered = [general, plate_img, *by_role[EvidenceRole.DETAIL], *by_role[EvidenceRole.CONTEXT]]
-            if not self._vehicle_present(run, ordered, codes):
+            if not self._vehicle_present(run, [general, plate_img], codes):
                 return self._finish(payload, codes, Scores(), durations)
         with _timed(durations, "burst"):
             similarity = self._burst(run, general, plate_img, codes)
-            self._reid_others(
-                run, general, by_role[EvidenceRole.DETAIL] + by_role[EvidenceRole.CONTEXT], codes
-            )
         with _timed(durations, "plate"):
             ocr_conf = self._plate(run, plate_img, reported, codes)
 
@@ -339,10 +365,12 @@ class ValidateEvidence:
     # --- etapas -------------------------------------------------------------------------
 
     def _vehicle_present(self, run: _Run, images: Sequence[EvidenceImage], codes: Codes) -> bool:
-        """R1. `False` si en alguna foto no hay evidencia de un auto (RED, fraude): se corta la cascada.
+        """R1. `False` si en alguna foto no hay evidencia de un vehículo (RED, fraude): se corta la cascada.
 
-        GENERAL y CONTEXT tienen que mostrar un auto; PLATE y DETAIL, un auto o una parte (rueda o patente) y,
-        en DETAIL, también cuenta una caja de daño con confianza suficiente. Solo hay NO_VEHICLE si todos los
+        La regla es la misma para las dos fotos (GENERAL y PLATE): tiene que haber un vehículo, que es una
+        caja `car` del detector o una instancia del segmentador (det ∨ seg). Ni la patente ni la rueda ni
+        una caja de daño cuentan como presencia: alcanza una patente arrancada o impresa para hacer pasar
+        cualquier imagen. Verificar el daño o la rampa es trabajo futuro. Solo hay NO_VEHICLE si todos los
         modelos consultados respondieron y ninguno encontró nada; si no se pudo decidir, no se penaliza.
         """
         for image in images:
@@ -352,79 +380,44 @@ class ValidateEvidence:
         return True
 
     def _has_car(self, run: _Run, image: EvidenceImage) -> bool | None:
-        """¿Hay un auto (o una parte, en PLATE y DETAIL) que ocupe al menos `presence_min_area` de la foto?
+        """¿Hay un vehículo que ocupe al menos `presence_min_area` de la foto? Igual en las dos fotos.
 
-        Cuenta una caja de `car` del detector, una de `wheel` o `plate` si la foto es de una parte, una
-        instancia de auto del segmentador o, en DETAIL, una caja de daño. `None` si no se pudo decidir (sin
-        hallazgos y algún modelo sin respuesta).
+        Cuenta una caja `car` del detector o una instancia de auto del segmentador. `None` si no se pudo
+        decidir (sin hallazgos y algún modelo sin respuesta).
         """
-        part = image.role in (EvidenceRole.PLATE, EvidenceRole.DETAIL)
-        labels = {BoxLabel.CAR} | ({BoxLabel.WHEEL, BoxLabel.PLATE} if part else set())
         minimum = self._t.presence_min_area * image.width * image.height
         mask_minimum = self._t.presence_min_area * image.model_pixels.shape[0] * image.model_pixels.shape[1]
         detections = run.detect(image)
-        for box in detections or ():
-            if box.label in labels and box.area >= minimum:
-                if box.label != BoxLabel.PLATE or box.conf >= self._t.presence_plate_min_conf:
-                    return True
-        cars = run.segment_cars(image)
+        if any(box.label == BoxLabel.CAR and box.area >= minimum for box in detections or ()):
+            return True
+        cars = run.car_instances(image)
         if any(int(car.mask.sum()) >= mask_minimum for car in cars or ()):
             return True
-        answered = detections is not None and cars is not None
-        if image.role == EvidenceRole.DETAIL:
-            damage = self._models.damage.detect(image.model_pixels)
-            if any(box.conf >= self._t.damage_presence_t for box in damage or ()):
-                return True
-            answered = answered and damage is not None
-        return False if answered else None
+        return False if detections is not None and cars is not None else None
 
     def _burst(
         self, run: _Run, general: EvidenceImage, plate_img: EvidenceImage, codes: Codes
     ) -> float | None:
         """R2: ¿GENERAL y PLATE muestran el mismo auto? Devuelve la similitud si se calculó.
 
-        Solo hay BURST_MISMATCH si la re-ID confirma que es otro auto; si no se puede comparar (falta el auto
-        segmentado o el embedding), no hay código.
+        Es la **única** comparación de re-ID (la de la foto general contra la de patente: la trompa o la
+        cola, cortada entre el capot y el parabrisas). Se compara el recorte de la caja del vehículo
+        dominante del detector, sin máscaras. Solo hay BURST_MISMATCH si
+        la re-ID confirma que es otro auto (coseno menor que `REID_T`); si no se puede comparar (el
+        detector no ve un vehículo o no hay embedding), no hay código.
         """
-        general_cars = run.segment_cars(general)
-        plate_cars = run.segment_cars(plate_img)
-        if not general_cars or not plate_cars:
+        general_car = run.dominant_vehicle(general)
+        plate_car = run.dominant_vehicle(plate_img)
+        if general_car is None or plate_car is None:
             return None
-        emb_general = run.embed(general, 0, largest_car(general_cars))
-        emb_plate = run.embed(plate_img, 0, largest_car(plate_cars))
-        run.general_embedding = emb_general
+        emb_general = run.embed_dominant(general, general_car)
+        emb_plate = run.embed_dominant(plate_img, plate_car)
         if emb_general is None or emb_plate is None:
             return None
-        run.reference_embeddings.extend((emb_general, emb_plate))
         result = same_vehicle(emb_general, emb_plate, self._t.reid_t, self._t.reid_t)
         if result.outcome == ReidOutcome.DIFFERENT:
             _add(codes, ReasonCode.BURST_MISMATCH)
         return result.similarity
-
-    def _reid_others(
-        self, run: _Run, general: EvidenceImage, others: Sequence[EvidenceImage], codes: Codes
-    ) -> None:
-        """R2: cada foto de DETAIL y CONTEXT contra GENERAL (el mismo auto en todas las fotos).
-
-        De las instancias de auto de la foto cuenta la que más se parece a GENERAL. Una foto en la que no se
-        segmenta ningún auto (un primer plano de la carrocería) o sin embedding no se puede comparar.
-        """
-        if run.general_embedding is None:
-            return
-        for image in others:
-            candidates = [
-                embedding
-                for index, car in enumerate(run.segment_cars(image) or ())
-                if (embedding := run.embed(image, index, car)) is not None
-            ]
-            match = best_match(candidates, [run.general_embedding])
-            if match is None:
-                continue
-            outcome = same_vehicle(
-                run.general_embedding, candidates[match[0]], self._t.reid_t, self._t.reid_t
-            ).outcome
-            if outcome == ReidOutcome.DIFFERENT:
-                _add(codes, ReasonCode.BURST_MISMATCH)
 
     def _plate(self, run: _Run, plate_img: EvidenceImage, reported: str, codes: Codes) -> float | None:
         """R3: OCR de la patente de PLATE contra la reportada.
@@ -447,9 +440,11 @@ class ValidateEvidence:
     ) -> tuple[RedactedRef, ...] | None:
         """Genera y sube las versiones redactadas de TODAS las fotos, o `None` si no se puede.
 
-        Fail-closed: si algún modelo de rostros o de patentes no responde (`None`) o falla la reescritura de
-        alguna foto, no se sube ninguna (nunca quedan redactadas parciales). Una foto sin rostros ni patentes
-        (`[]`) cuenta como redactada. Un error al subir a S3 no es un veredicto: se propaga para reintento.
+        Solo se tapan patentes de terceros: los rostros no se redactan y el modelo de rostros no interviene.
+        Fail-closed: si el detector de patentes no responde (`None`) o falla la reescritura de alguna foto,
+        no se sube ninguna (nunca quedan redactadas parciales). Una foto sin patentes (`[]`) cuenta como
+        redactada.
+        Un error al subir a S3 no es un veredicto: se propaga para reintento.
         Con `REDACTION_REQUIRED=false` (solo `ENV=local`) la foto re-encodeada sin tapar cuenta como lista.
         """
         plans: dict[tuple[EvidenceRole, int], list[Box]] | None
@@ -486,15 +481,20 @@ class ValidateEvidence:
         self, run: _Run, images: Sequence[EvidenceImage], reported: str
     ) -> dict[tuple[EvidenceRole, int], list[Box]] | None:
         """Plan de todas las fotos, o `None` si falta algún modelo (no se redacta ninguna)."""
-        thresholds = RedactionThresholds(self._redaction.face_min_conf, self._redaction.plate_min_conf)
+        thresholds = RedactionThresholds(self._redaction.plate_min_conf)
 
         def plan_one(image: EvidenceImage) -> list[Box] | None:
-            faces = to_original(self._models.face.detect(image.model_pixels), image.ratio)
             detections = run.detect_plates(image)
-            exempt = self._matching_plates(run, image, detections, reported)
-            if faces is None or detections is None:
+            if detections is None:
                 return None
-            return plan_redaction(faces, detections, thresholds, image.width, image.height, exempt)
+            exempt = self._matching_plates(run, image, detections, reported)
+            # En la foto de patente la patente principal nunca se tapa; en las demás no cambia nada.
+            main = (
+                main_plate(detections, thresholds.plate_min_conf)
+                if image.role == EvidenceRole.PLATE
+                else None
+            )
+            return plan_redaction(detections, thresholds, image.width, image.height, exempt, main_plate=main)
 
         workers = min(self._redaction.workers, len(images))
         if workers > 1:

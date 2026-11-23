@@ -15,6 +15,12 @@ Todo lo que se evalúa acá usa **fotos con patentes y caras de terceros**. Por 
 Antes de empezar hay que tener hecho "Antes de empezar" de [tools/export/README.md](../export/README.md)
 (dependencias instaladas) y el modelo exportado en `MODELS_DIR`.
 
+> **US-15 (15/11/2026): toda alerta tiene dos fotos, GENERAL (el auto) y PLATE (la patente).** Los roles DETAIL y CONTEXT
+> dejaron de existir en el servicio: una parte `detail` o `context` es evidencia inválida. Las reglas R1, R2 y R3 no
+> cambian; solo desaparece la comparación de DETAIL y CONTEXT, porque esas fotos ya no existen. Las mediciones de abajo
+> que hablan de DETAIL, CONTEXT o de alertas de 3 y 5 fotos son el registro de lo que se midió en su momento y **no se
+> rehicieron**; los conjuntos `detail` de `capture_sets.py` siguen sirviendo para medir primeros planos de partes del auto.
+
 ## OCR de patentes (`ocr.py`)
 
 Mide qué tan bien lee `parseq` las patentes del dataset "patentes" de Roboflow
@@ -175,6 +181,135 @@ formatos en alcance: de 14 835 pares, el **75,2 %** sale `MISMATCH` (RED); el re
 par da `MATCH`. Cuando la lectura es segura, el 99,96 % sale `MISMATCH`. Del otro lado, ninguna patente en alcance que
 coincide con su etiqueta sale `MISMATCH` con 0,78.
 
+### R3 con confusiones de caracteres (`ocr_confusions.py`)
+
+**¿El servicio normaliza por posición según el formato?** Sí, y no hizo falta implementarlo: `plate_check`
+(`domain/plate.py`), con la lectura del mismo largo que la patente reportada, lee cada carácter como dígito o como letra
+según el de la reportada en esa posición (`TO_DIGIT`: O, Q, D → 0; I → 1; Z → 2; S → 5; G → 6; B → 8, y `TO_LETTER` al
+revés). El formato lo da la reportada (`ABC123` o `AB123CD`), así que vale para los dos; el adaptador de PARSeq hace lo
+mismo al buscar la patente dentro del texto. Los tests de `tests/domain/test_plate.py` cubren los seis pares en los dos
+formatos. El límite es que necesita el mismo largo: con un carácter de más o de menos no hay posiciones que comparar y
+la confusión cuenta como otra diferencia.
+
+`ocr_confusions.py` compara tres criterios para declarar `PLATE_MISMATCH` (RED, fraude), con la misma carga y recorte que
+`ocr.py`, y la confianza de cada carácter que ahora devuelve `ParseqPlateReader.read_chars` (solo para `tools/`; el
+servicio sigue usando `read`):
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\ocr-r3"; $env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/ocr_confusions.py
+```
+
+- **V0, la actual**: lectura segura (confianza >= `OCR_MIN_CONF`) y diferencia en 2 o más caracteres; uno solo es duda.
+- **V1, la actual + confusiones**: igual, pero una diferencia entre caracteres que el OCR confunde con frecuencia no
+  cuenta: es duda, no una patente distinta.
+- **V2, solo confusiones y baja confianza**: sin la regla del "un solo carácter" y sin umbral global sobre la lectura.
+  Hay MISMATCH si algún carácter difiere, no es una confusión frecuente y PARSeq lo leyó con confianza >= `t_char`.
+
+**S5** es cuántos de los pares cruzados (la lectura de una foto contra la etiqueta de otra patente: 14 835 pares de las 129
+lecturas en alcance) salen MISMATCH. **U2** es cuántas de las lecturas contra su propia etiqueta salen MISMATCH: patentes
+correctas marcadas como equivocadas. Son **133 lecturas** (las 137 cajas del dataset menos 3 marcadores de posición y 1
+ilegible), con la cota de una cola al 95 %.
+
+**La lista de confusiones sale de los errores reales de PARSeq en este dataset**: las diferencias entre la lectura y la
+etiqueta, después de la normalización por posición, en las lecturas del mismo largo con 3 diferencias o menos (más que
+eso es un recorte roto, no una confusión). Una pareja entra a la lista si aparece en al menos 2 lecturas. Como la lista y
+la evaluación usan las mismas lecturas, **se evalúa dejando una lectura afuera**: para cada una, la lista se arma sin sus
+propios errores, así que U2 no premia memorizar. Se evalúa además la lista a priori del pedido (C/G, O/D/Q, M/N, E/F, P/R,
+U/V, 3/8, 1/7, 5/6), que no depende del dataset.
+
+| Pareja | Lecturas en que aparece |
+|---|---|
+| 0/6 | 4 |
+| M/W | 3 |
+| O/Q | 2 |
+| 0/1, 2/4, 2/7, 3/8, 3/J, 6/8, 7/9, A/Z, D/O, H/M, I/J, J/L, N/W, V/Y | 1 cada una |
+
+Solo **tres parejas se repiten** (0/6, M/W y O/Q); de ellas, la lista a priori solo comparte O/Q. Con 129 lecturas en alcance y 25 sin coincidencia exacta, es una lista corta y poco estable.
+
+| Variante | `OCR_MIN_CONF` o `t_char` | S5 (de 14 835) | U2 (de 133) | Cota 95 % de U2 |
+|---|---|---|---|---|
+| **V0, la actual** | 0,78 (la del servicio) | **75,2 %** (11 151) | **1** | 3,5 % |
+| V0 | 0,60 | 89,9 % (13 336) | 3 | 5,7 % |
+| V1, + confusiones aprendidas | 0,78 | 75,2 % (11 151) | 1 | 3,5 % |
+| V1, + confusiones aprendidas | 0,60 | 89,9 % (13 336) | 3 | 5,7 % |
+| V1, + confusiones a priori | 0,78 | 75,2 % (11 149) | 1 | 3,5 % |
+| V2, aprendidas | `t_char` 0,95 | 99,93 % (14 824) | 6 | 8,7 % |
+| V2, aprendidas | 0,90 | 100 % | 8 | 10,6 % |
+| V2, aprendidas | 0,78 | 100 % | 8 | 10,6 % |
+| V2, aprendidas | 0,70 | 100 % | 10 | 12,4 % |
+| V2, aprendidas | 0,60 | 100 % | 12 | 14,2 % |
+| V2, aprendidas | 0,50 | 100 % | 16 | 17,7 % |
+| V2, a priori | 0,95 / 0,90 / 0,78 / 0,70 | 99,97 % / 100 % / 100 % / 100 % | 6 / 8 / 9 / 12 | 8,7 / 10,6 / 11,5 / 14,2 % |
+| V2, sin lista (solo baja confianza) | 0,95 / 0,90 / 0,78 / 0,70 | 99,99 % / 100 % / 100 % / 100 % | 6 / 8 / 9 / 13 | 8,7 / 10,6 / 11,5 / 15,1 % |
+
+**Lectura.**
+
+- **Las confusiones no cambian nada en V1**: S5 y U2 son idénticos a V0 (con la lista a priori, 2 pares menos de 14 835). Las
+  diferencias de 2 o más caracteres no son, en este dataset, parejas que se repitan, así que la lista no las absorbe
+  (no revisé lectura por lectura de qué son).
+- **V2 detecta casi todo (S5 ≈ 100 %) pero marca como fraude 6 a 16 de 133 patentes correctas** (4,5 % a 12 %), contra 1 de
+  la actual. Una sola diferencia con confianza alta alcanza, y PARSeq se equivoca con seguridad en patentes que son
+  correctas: el costo (una penalización injusta) es el error caro. Con `t_char` de 0,95 baja a 6, que sigue siendo 6 veces
+  la actual.
+- **La lista de confusiones ayuda poco en V2**: a `t_char` 0,78 pasa de 9 (sin lista) a 8 (aprendida, dejando una
+  afuera) o 9 (a priori); a 0,50, de 21 a 16. Con 3 parejas repetidas no hay con qué.
+- **No recomiendo cambiar de variante con estos datos**: V0 y V1 son iguales y V2 cambia una pérdida de 1 patente correcta por 8.
+  La decisión es tuya; el servicio queda como estaba (V0).
+
+**Decisión (14/11/2026): el servicio queda en V0** (`MISMATCH` solo con una lectura segura que difiere en 2 o más caracteres,
+más la normalización por posición de `plate_check`). **La lista de confusiones no aportó**: solo 3 parejas se repiten en las
+lecturas reales de PARSeq (0/6, M/W y O/Q), V1 da lo mismo que V0 y V2 cuesta 8 patentes correctas marcadas como fraude.
+
+**Por qué U2 es "1 de 133" y antes se hablaba de "0 de 137" (no es una regresión).** Son dos denominadores y dos alcances, no dos
+resultados. El dataset tiene 137 cajas; quedan 133 lecturas (se descartan 3 marcadores de posición y 1 ilegible), de las cuales
+129 son de los formatos en alcance (Mercosur y anterior) y 4 de otros formatos (motos, de dos líneas). Con `OCR_MIN_CONF` = 0,78
+y la regla V0, **ninguna de las 129 lecturas en alcance sale `MISMATCH` (0 de 129)**: es lo que dice la sección "R3 con pares
+cruzados" y lo mismo que medía `ocr.py`. La única que sale `MISMATCH` es una **patente de moto de dos líneas fuera de alcance**
+(etiqueta de 6 caracteres, PARSeq lee 3 con confianza 0,98 porque solo ve una línea), y `ocr_confusions.py` cuenta las 133
+lecturas, no solo las 129. A `OCR_MIN_CONF` = 0,60 las marcadas son 3 (las dos motos y una lectura de 6 caracteres con confianza
+0,76), que es el "3 de 133" de la tabla. Código y regla no cambiaron entre las dos mediciones. Que una patente de dos líneas
+leída a medias saliera RED con confianza alta era un riesgo real del criterio (la moto está fuera de alcance, pero el servicio no la
+distingue al recibirla): **lo resuelve la regla de estructura de abajo**.
+
+**Regla de estructura (decisión del 14/11/2026, ya en `plate_check`).** Si la lectura no tiene el largo ni la estructura de ningún
+formato en alcance (`ABC123` o `AB123CD`), se trata como **ilegible (`PLATE_UNREADABLE`, duda, GREEN) y nunca como una patente
+distinta**. Se tolera la confusión letra/dígito de cada posición (en una posición de letra vale un 0, 1, 2, 5, 6 u 8; en una de dígito,
+una O, Q, D, I, Z, S, G o B), así que `A8C1Z3` o `ABO123` siguen teniendo estructura. Consecuencia: una lectura con un carácter de más o
+de menos ya no es `FUZZY` ni `MISMATCH` sino ilegible (antes, un solo carácter de menos daba `FUZZY`). Se midió otra vez con
+`ocr_confusions.py` (ahora cada variante sale con y sin la regla), con las mismas 133 lecturas (129 en alcance), 14 835 pares cruzados
+y las cotas de una cola al 95 %:
+
+| Variante | Regla de estructura | S5 (de 14 835) | U2 en alcance (de 129) | U2 de las 133 |
+|---|---|---|---|---|
+| **V0, la del servicio (`OCR_MIN_CONF` 0,78)** | no | 75,17 % (11 151) | **0** (cota 2,3 %) | 1 (cota 3,5 %) |
+| **V0 (`OCR_MIN_CONF` 0,78)** | **sí** | **74,39 %** (11 036) | **0** (cota 2,3 %) | **0** (cota 2,3 %) |
+| V0 (0,60) | no | 89,9 % (13 336) | 1 | 3 |
+| V0 (0,60) | sí | 89,1 % (13 221) | 1 | 1 |
+| V2 (`t_char` 0,78, lista aprendida) | no / sí | 100 % / 97,7 % | 5 / 2 | 8 / 2 |
+| V2 (`t_char` 0,95, lista aprendida) | no / sí | 99,93 % / 97,7 % | 3 / 2 | 6 / 2 |
+
+- **S5 casi no cambia en V0 con 0,78: 75,17 % → 74,39 %** (115 pares menos de 14 835). Es una sola lectura en alcance de las 129, con
+  confianza >= 0,78 y una estructura que no es ninguna de las dos: contra las 115 etiquetas ajenas salía `MISMATCH` y ahora es ilegible.
+  Las demás 128 no cambian.
+- **U2 sobre las 129 lecturas en alcance sigue en 0 de 129** (cota 2,3 %): la regla no marca ninguna patente correcta.
+- **U2 de las 133 baja de 1 a 0**: la que quedaba era la patente de dos líneas (abajo).
+- **El caso de la patente de dos líneas** (las 4 lecturas de formatos fuera de alcance, motos; solo largos y confianza): una
+  etiqueta de 6 caracteres que PARSeq lee con 3 caracteres y confianza 0,977 **salía `MISMATCH` (RED, fraude) y ahora es ilegible**;
+  las otras 3 no eran `MISMATCH` (una de 5 caracteres leída completa y sin diferencias, con confianza 0,998, tampoco es
+  `ABC123` ni `AB123CD`: pasa a ilegible; una de 6 caracteres leída con 3 y confianza 0,22 y una de 7 leída con 3 y confianza 0,62
+  eran ilegibles por confianza). **Ninguna
+  patente de moto puede dar `MISMATCH` por una lectura a medias.** Es la consecuencia buscada (el riesgo que había quedado como
+  límite en el párrafo anterior); el costo es que una patente de moto leída completa (`DDDLLL` u otro formato) tampoco puede dar
+  `MISMATCH`, que es coherente con que estén fuera de alcance.
+- **V2** mejora con la regla (U2 en alcance de 5 a 2 con 0,78) pero sigue por encima de V0 y marca patentes correctas: la decisión
+  (V0) no cambia.
+
+Límites: 133 lecturas, 25 con errores y una lista aprendida de 3 parejas repetidas; el dataset de Roboflow tiene fotos
+con ángulo y desenfoque que no son las de la app; la confianza de PARSeq por carácter se calibró con este mismo dataset
+solo en el sentido de que se barrió `t_char` sobre él (optimista). No se probó una variante que combine V0 con la baja
+confianza por carácter.
+
 ### Opciones
 
 | Opción | Para qué |
@@ -196,6 +331,571 @@ coincide con su etiqueta sale `MISMATCH` con 0,78.
   está mal escrito. El script te dice cuál.
 - **"No se pudo empezar: ... sha256 ..."**: el archivo de `MODELS_DIR` no es el del manifest; ver
   [tools/export/README.md](../export/README.md).
+
+## Conjunto de evaluación del OCR con "Patentes Argentinas - Master" (`ocr_set.py`)
+
+**Valores de `formato` en `etiquetas.csv`** (los mismos que usa `ocr.py`): `anterior` (LLLDDD), `mercosur` (LLDDDLL),
+`moto` (dos líneas) u `otro`.
+
+Arma 300 patentes recortadas para etiquetar a mano y, después, medir `parseq` con un conjunto que no se usó para
+calibrarlo. Parte del export COCO de "Patentes Argentinas - Master" (Roboflow Universe, `xenon-bo5e9`, Public
+Domain, 656 fotos y 800 cajas de una sola clase; la ficha está en [THIRD_PARTY.md](../../THIRD_PARTY.md)). **No corre
+ningún OCR**: las etiquetas las pone una persona antes de medir nada.
+
+```powershell
+python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+```
+
+`--src` es el export descomprimido (`train/`, `valid/`, `test/`), `--reference` el del dataset "patentes" (el de
+`ocr.py`) y `--out` una carpeta fuera del repo (el script se niega a usar una dentro). Si `--out` ya tiene un
+`etiquetas.csv`, no lo pisa. Opciones: `--n` (300), `--night-min` (50), `--seed` (20261116) y `--night-brightness`
+(90).
+
+### Qué hace
+
+1. **Cajas:** se miraron a ojo 72 cajas al azar del export y 72 de las primeras elegidas (cuatro hojas): son patentes
+   completas, no autos ni caracteres sueltos. Las excepciones son pocas y aisladas: una hoja entera con decenas de
+   patentes anotada como una caja, una pila de patentes, un auto entero con la patente anotada adentro, alguna caja
+   cortada por el borde de la foto y patentes borrosas. Las primeras tres se descartan solas (paso 4); el resto se
+   marca al etiquetar (`estado = ilegible` o `fuera_de_alcance`).
+2. **Recorte:** cada caja con un 15 % de su ancho y alto a cada lado, recortada a la foto, en PNG.
+3. **Descartes**, con motivo en `descartes.csv`:
+   - cajas de menos de 40x24 píxeles (no hay nada que leer);
+   - fotos que ya están en el dataset "patentes" (misma foto, aunque tenga otra resolución) y patentes que también
+     están ahí (la misma patente, aunque sea otra foto);
+   - duplicados y casi duplicados: dos recortes son la misma patente si se parecen en bruto (NCC de 64x32 en gris
+     ≥ 0,6) y en los trazos (NCC de 128x64 sin bajas frecuencias y con corrimiento ≥ 0,75). Mirando pares reales, con
+     esos valores todos los que pasan son la misma patente. Se conserva el de mayor resolución.
+4. **Probables motos y cajas inválidas:** el servicio lee una sola línea y esas cajas no miden nada.
+   - *Probable moto* (`probable_moto`): relación ancho/alto de la caja menor que 1,2. Sale del set.
+   - *A revisar* (`revisar_moto = sí`): relación de 1,2 a menos de 1,5. Se queda en el set y quien etiqueta
+     confirma si es una moto (`formato = moto`). La hoja la marca con `moto?`.
+   - *Caja inválida* (`caja_invalida`): la que tiene adentro otra caja de patente de la misma foto (hojas de
+     patentes, un auto entero, una caja doble) y las vistas a ojo (`KNOWN_INVALID`, una pila de cinco patentes).
+5. **Luz:** noche si el brillo medio de la foto sin la patente (y su entorno) es menor que 90 (gris de 0 a 255). Las
+   fotos donde la patente ocupa el 40 % o más (primeros planos) no tienen escena que juzgar: quedan como `dia` y la
+   hoja las marca `D?`. Es una estimación: mirando las fotos más oscuras, las de noche quedan por debajo de ~90,
+   pero también hay sombras y autos negros de día. Por eso la confirma una persona.
+6. **Elección:** `--n` al azar con semilla fija, al menos `--night-min` de noche y como mucho 2 por foto, numeradas
+   en orden aleatorio.
+
+### Corrida de referencia
+
+| Paso | Cajas |
+|---|---:|
+| Export (656 fotos) | 800 |
+| Cajas chicas | −56 |
+| Foto ya en el dataset "patentes" | −4 |
+| Patente ya en el dataset "patentes" | −2 |
+| Duplicados y casi duplicados | −21 |
+| Candidatas | 717 (90 de noche) |
+| Elegidas con los filtros 1 a 3 (sin tope por foto) | 300 (66 de noche) |
+| Reemplazadas por la limpieza (paso 4 y tope por foto) | 56: 49 probables motos, 1 inválida, 6 por exceso de fotos (20 de las nuevas son de noche) |
+| **Set final** | **300 (77 de noche estimadas, 53 con `revisar_moto`)** |
+
+El set final tiene 208 patentes de `train`, 69 de `valid` y 23 de `test`; 10 no tienen escena para juzgar la luz. Todas
+tienen una relación ancho/alto de 1,2 o más y ninguna foto aporta más de 2.
+
+### Limpiar un set ya armado (`--refresh`)
+
+`--refresh` reconstruye la selección original (mismos filtros y semilla) y la compara con el `etiquetas.csv` del set
+de partida. Después reemplaza las probables motos, las cajas inválidas y el exceso por foto (se conservan las dos de
+menor id de cada foto) por candidatas de auto que no estaban elegidas, con la misma semilla, **primero las estimadas
+de noche** y sin pasar el tope por foto. Cada reemplazo toma el id de la caja que sale; los demás ids no cambian.
+
+- `--original` es el set del que parte (por defecto, `--out`). Para volver a limpiar con otros criterios se parte del
+  primer respaldo: `--original D:\vv-eval\ocr-ar-set-v1`.
+- Si `--out` existe, antes de escribir se copia a `<out>-vN` (el primer número libre). El original no se toca.
+- Si el `etiquetas.csv` del original o el de `--out` tienen `texto`, `formato` o `estado` cargados, no hace nada.
+- Escribe `reemplazos.csv` (qué caja salió, por qué motivo y cuál la reemplazó).
+
+```powershell
+python tools/eval/ocr_set.py --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set --original D:\vv-eval\ocr-ar-set-v1 --refresh
+```
+
+### Una lectura por patente y reposición (`--topup`)
+
+Con las etiquetas cargadas, `--topup` hace dos cosas (no corre ningún OCR):
+
+1. **Agrupa por `texto`** (las filas `legible`) y deja **una sola lectura por patente repetida**: la de noche (la luz
+   más escasa), después la de recorte más grande y, si empatan, la de menor id. Las que salen quedan en `repetidas.csv`
+   (id, caja y a cuál se conservó) y en `descartes.csv` con el motivo `texto_repetido`, así que no vuelven a elegirse.
+2. **Repone hasta `--n` patentes legibles de auto** (formato `anterior` o `mercosur`; no cuentan `ilegible`,
+   `fuera_de_alcance`, las de moto ni las que todavía no tienen estado) con candidatas de auto del resto del export: los
+   mismos filtros y la misma semilla, primero las estimadas de noche y como mucho 2 por foto. Los ids nuevos siguen del
+   mayor que hubo (nunca se reutiliza el de una fila quitada).
+
+```powershell
+python tools/eval/ocr_set.py --topup --dry-run --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+python tools/eval/ocr_set.py --topup           --src D:\vv-eval\ocr-ar --reference D:\vv-eval\ocr-roboflow --out D:\vv-eval\ocr-ar-set
+```
+
+`--dry-run` muestra solo las cifras. Sin él, copia antes `--out` a `<out>-vN`, conserva el id y las etiquetas de las
+filas que quedan, escribe `recortes/NNN.png` y `hojas/reposicion-<primer id>-NN.jpg` de las nuevas y reconstruye
+`etiquetas.xlsx` con las etiquetas cargadas y las filas nuevas vacías (cerrá Excel antes: si lo tiene abierto falla antes
+de tocar nada). Cuando las nuevas ya estén etiquetadas se vuelve a correr: las repuestas pueden salir ilegibles, y cada
+pasada repone lo que falte. El resumen trae `pares_a_un_caracter`: cuántos pares de patentes etiquetadas difieren en un
+solo carácter (¿la misma mal escrita?), para revisarlos a ojo; no se saca nada. Como antes, la misma patente en dos
+fotos muy distintas la agarra el `texto`, y la repuesta puede repetir una patente que ya estaba (se ve al etiquetarla y
+se quita en la pasada siguiente).
+
+### Qué escribe en `--out`
+
+- `recortes/NNN.png`: el recorte de cada patente.
+- `etiquetas.csv`: `id, archivo, recorte, texto, formato, luz, estado, revisar_moto`. `archivo` es `<split>/<foto>`
+  del export. `texto`, `formato` y `estado` salen vacíos; `luz` trae la estimación (`dia` o `noche`) para confirmar y
+  `revisar_moto` trae `sí` en las de relación de 1,2 a menos de 1,5.
+- `hojas/hoja-NN.jpg`: hojas de contacto de 18 casilleros con el número, el recorte grande, la foto entera chica con la
+  caja marcada (para confirmar la luz), `D`/`N` (con `?` si no hay escena) y `moto?` si hay que revisar.
+- `cajas.csv` (la caja de cada id y su relación ancho/alto), `descartes.csv`, `reemplazos.csv` (solo tras `--refresh`),
+  `repetidas.csv` y `hojas/reposicion-*.jpg` (solo tras `--topup`) e `informe.json` (solo cifras).
+
+Todo eso tiene patentes de terceros: queda en tu carpeta, nunca en el repo.
+
+### Etiquetar en Excel (`ocr_labels.py`)
+
+Para etiquetar cómodo hay un `etiquetas.xlsx` que se arma desde `etiquetas.csv` (que no se toca). Necesita `openpyxl` y
+`pillow` (están en los extras `tools` y `dev`: `uv sync --extra tools`).
+
+```powershell
+python tools/eval/ocr_labels.py xlsx --set D:\vv-eval\ocr-ar-set --photos D:\vv-eval\ocr-ar
+```
+
+`--photos` es el export con las fotos enteras (por defecto, `ocr-ar` al lado del set); sin él, la miniatura lleva solo
+el recorte. Una fila por id:
+
+| Columna | Qué es |
+|---|---|
+| `id`, `miniatura`, `revisar_moto` | solo lectura (en gris y bloqueadas). La miniatura trae el recorte grande y, a la derecha, la foto entera con la caja marcada. |
+| `texto` | la patente: **vacío, o 6 a 7 caracteres en mayúsculas** (letras y dígitos, sin espacios ni guiones). Si no cumple, Excel la rechaza con un mensaje que lo explica. |
+| `formato` | desplegable: `anterior` (LLLDDD), `mercosur` (LLDDDLL), `moto` (dos líneas) u `otro` |
+| `luz` | desplegable: `dia`, `noche`. Viene con la estimación: confirmala o corregila. |
+| `estado` | desplegable: `legible`, `ilegible`, `fuera_de_alcance` |
+
+- **Colores:** la fila se pinta de amarillo si `revisar_moto = sí` (confirmá si es una moto con `formato`) y de rojo si
+  el estado es `legible` pero el texto está vacío.
+- **Comodidades:** encabezado congelado, filtros en todas las columnas y anchos de columna cómodos. Las miniaturas se
+  ocultan con la fila al filtrar. La hoja `instrucciones` repite todo esto.
+- **Protección:** la hoja está protegida **sin contraseña** (Revisar > Desproteger hoja) para que `id`, `miniatura` y
+  `revisar_moto` no se cambien por error; se puede filtrar y cambiar el ancho de las columnas. No cambies el orden de
+  las columnas.
+- **Qué hacer con cada fila:** si se lee, `estado = legible` y el `texto`; si no se lee ni a ojo, `ilegible` (se excluye
+  de la evaluación y no cuenta como falla); si no es una patente o no es de las que lee el servicio, `fuera_de_alcance`.
+
+El xlsx es la fuente de `texto`, `formato`, `luz` y `estado`; el csv, de `archivo`, `recorte` y `revisar_moto`. No hay que
+convertir nada a mano:
+
+- **`ocr.py --labeled-set`** y **`ocr_set.py`** leen el xlsx si existe y, si no, el csv.
+- **`ocr_set.py` no pisa** un set con etiquetas cargadas aunque estén solo en el xlsx (`--refresh` incluido). Si hay un
+  xlsx sin etiquetas y se limpia el set, se regenera solo para que las miniaturas de los reemplazos se vean.
+- `python tools/eval/ocr_labels.py xlsx ...` regenera el xlsx, pero **no pisa uno que ya tenga etiquetas**.
+- `python tools/eval/ocr_labels.py check --set ...` muestra el avance (solo cifras, nunca patentes): filas con estado,
+  legibles sin texto, valores no válidos.
+- `python tools/eval/ocr_labels.py to-csv --set ...` escribe en `etiquetas.csv` lo que hay en el xlsx, si hace falta
+  tener el csv al día (por ejemplo para otra herramienta). Antes copia el csv a `etiquetas-previo-N.csv`.
+
+Si Excel tiene abierto el archivo, cerralo antes de correr cualquiera de estos comandos.
+
+### Evaluar el set etiquetado (`ocr.py --labeled-set`)
+
+```powershell
+python tools/eval/ocr.py --data-dir D:\vv-eval --out-dir D:\vv-eval\out\ocr-set --models-dir <MODELS_DIR> --labeled-set D:\vv-eval\ocr-ar-set
+```
+
+Lee `etiquetas.xlsx` (o `etiquetas.csv`), toma la caja de `cajas.csv` y **recorta de la foto original** (`--photos-dir`,
+por defecto `<data-dir>/ocr-ar`) igual que el servicio, sin el margen del recorte del set. Genera el mismo informe que
+con el dataset "patentes" (`report.json`, `audit.csv`, `audit.html`), con estas diferencias:
+
+- solo cuentan las filas con `estado = legible`; `ilegible` va a "ilegibles" (no son fallas) y `fuera_de_alcance`, a
+  "descartadas";
+- el `formato` etiquetado a mano reemplaza al que se deduce de la forma de la patente: `moto` y `otro` quedan fuera de
+  alcance (lecturas que no entran en la propuesta de `OCR_MIN_CONF`);
+- el informe agrega `por_luz` (día y noche, según la `luz` confirmada).
+
+Si falta etiquetar alguna fila, **falla** y dice cuántas y cuáles (ids): completalas o usá `--incomplete` para saltarlas.
+También falla si hay valores no válidos pegados en el xlsx.
+
+**Las legibles de auto (`en_alcance` en `report.json`).** Es el bloque de las patentes legibles de formato `anterior` o
+`mercosur` (sin las motos ni `otro`), con el OCR como lo usa el servicio (`OCR_MIN_CONF`, normalización por posición en
+`plate_check` y regla de estructura), en total y en `por_luz`:
+
+- `coincidencia_exacta`: la lectura canónica es igual a la etiqueta, sin corregir ninguna confusión;
+- `distribucion`: cada lectura contra **su propia** etiqueta: `PLATE_MATCH` (coincide), `PLATE_FUZZY` (difiere en un
+  carácter), `PLATE_UNREADABLE` (ilegible: sin lectura, poco segura o sin la estructura de una patente) y
+  `PLATE_MISMATCH` (patente distinta);
+- `U2`: cuántas patentes **correctas** salen `PLATE_MISMATCH` (RED, fraude), de cuántas lecturas, con la cota de una cola al
+  95 % (3/N con 0 casos; Clopper-Pearson con más);
+- S5 es `pares_cruzados` (la lectura de cada foto contra la etiqueta de **otra** patente): `todos.mismatch_pct` y
+  `con_lectura_segura`.
+
+#### Resultado de referencia: el set de certificación de 300 (16/11/2026)
+
+PARSeq como lo usa el servicio (`OCR_MIN_CONF` 0,78, normalización por posición y estructura válida) sobre las 300
+patentes legibles de auto del set (155 anterior y 145 mercosur, sin repetidas; 4 filas sin estado quedaron afuera):
+
+| | Total | Día | Noche |
+|---|---|---|---|
+| Lecturas | 300 | 246 | 54 |
+| Lectura exacta | 245 (81,7 %) | 198 (80,5 %) | 47 (87,0 %) |
+| Coincide (`PLATE_MATCH`) | 217 (72,3 %) | 179 | 38 |
+| Difiere en un carácter (`PLATE_FUZZY`) | 11 (3,7 %) | 10 | 1 |
+| Ilegible (`PLATE_UNREADABLE`) | 71 (23,7 %) | 56 | 15 |
+| Patente distinta (`PLATE_MISMATCH`) | 1 (0,3 %) | 1 | 0 |
+| **U2** (cota 95 %) | **1 de 300** (1,57 %) | 1 de 246 (1,91 %) | 0 de 54 (5,56 %) |
+| **S5** (pares cruzados) | 76,3 % de 89 700 | 77,2 % de 73 554 | 72,1 % de 16 146 |
+| S5 solo con lectura segura | 99,1 % de 69 069 | 98,9 % | 99,9 % |
+
+**U2: 1 de 300 (cota 1,57 %): válido con tolerancia.** La única patente correcta marcada como distinta es el **id 065**
+(de día): la lectura tiene el mismo largo que la etiqueta (6 caracteres), con confianza **0,7895**, apenas por encima de
+`OCR_MIN_CONF` = 0,78, y el diagnóstico la atribuye al ángulo. Con un umbral de 0,79 no se habría marcado, pero **no se
+cambia `OCR_MIN_CONF`**: este set es de certificación, no de calibración, y el valor del servicio no se ajusta sobre él.
+La tolerancia es esa: un caso, con la cota del 1,57 % (3/N si hubiera 0). Causas de las 55 lecturas sin coincidencia
+exacta: desenfoque o baja resolución 19, confusión de caracteres 17, ángulo 7, otras 8 y recorte cortado 4.
+
+**Exportar los recortes para otro lector (`--export-mlkit`).** No corre ningún modelo:
+
+```powershell
+python tools/eval/ocr.py --data-dir D:\vv-eval --labeled-set D:\vv-eval\ocr-ar-set --export-mlkit D:\vv-eval\ocr-ar-set\mlkit
+```
+
+Guarda `<id>.png` de las patentes legibles de auto y un `indice.csv` con `id, formato, luz`: **nunca el texto de las
+etiquetas**. Para el Frontend se exportó con `--mlkit-crop set` en `ocr-ar-set\mlkit\` (en la app ML Kit lee el
+recuadro de encuadre, que deja margen alrededor de la patente) y la exportación sin margen quedó en `mlkit-sin-margen\`. Por defecto el recorte es el que lee el OCR (la caja sin margen, de la foto original: ambos lectores ven
+lo mismo); con `--mlkit-crop set` copia el recorte con margen del 15 % que se ve en la hoja. Reemplaza lo que una
+exportación anterior dejó en la carpeta. Falla si faltan etiquetas (o con `--incomplete` las salta).
+
+### ML Kit contra PARSeq (`ocr_mlkit.py`)
+
+El Frontend midió ML Kit sobre los 300 recortes exportados (`mlkit\`, con el margen del 15 %) en un Samsung SM-A155M
+(Android 16, API 36; 3 recortes de calentamiento) y dejó `resultados\ocr-results.csv` (**v1**: `id, formato, luz, lectura,
+candidatos` crudos separados por `|`, `confianza, tiempo_ms`). Después generó `resultados\ocr-results-v2.csv` (**v2**: con
+normalización por posición y selección de candidatos; mismos recortes, mismo celular y **los mismos candidatos crudos**, más
+la columna `linea_elegida`). `ocr_mlkit.py` los cruza por id con las etiquetas y con las lecturas de PARSeq, sin correr
+ningún modelo:
+
+```powershell
+python tools/eval/ocr.py --data-dir D:\vv-eval --out-dir D:\vv-eval\out\ocr-set-300 --models-dir models\weights --labeled-set D:\vv-eval\ocr-ar-set --incomplete   # escribe readings.csv
+python tools/eval/ocr_mlkit.py --labeled-set D:\vv-eval\ocr-ar-set --parseq-readings D:\vv-eval\out\ocr-set-300\readings.csv --out-dir D:\vv-eval\out\mlkit-v2 --results v1=D:\vv-eval\ocr-ar-set\resultados\ocr-results.csv v2=D:\vv-eval\ocr-ar-set\resultados\ocr-results-v2.csv
+```
+
+`--results` acepta una o más versiones (`nombre=ruta`, en orden) y avisa si los candidatos no son los mismos. Escribe
+`mlkit.json` (solo cifras) y `mlkit_rows.csv` (id, luz y clases de cada versión, **nunca el texto**). `readings.csv` (lo que
+leyó PARSeq por id) lo escribe `ocr.py --labeled-set` en su carpeta de salida: tiene textos de patentes de terceros y no va
+al repo.
+
+- **Lectura exacta:** la lectura elegida, canónica, es igual a la etiqueta. Aproxima U5: al menos 85 % de día y 70 % de noche.
+- **Sin lectura:** el lector no devolvió ninguna patente; el usuario la tipea.
+- **Lectura equivocada:** devolvió otra patente: error silencioso si el usuario no la corrige. Se detalla con `plate_check`
+  (igual tras normalizar letra/dígito, difiere en un carácter, patente distinta).
+- **Candidatos crudos:** si algún candidato contiene la patente correcta tal cual (`literal`) o, además, tras normalizar
+  letra/dígito por posición (`normalizada`: lo que hace v2). Tampoco depende de la versión: los candidatos son los mismos.
+- **PARSeq, con la regla del servicio:** una lectura con menos de `OCR_MIN_CONF` (0,78) o sin la estructura de una patente es
+  "sin lectura"; una aceptada que no es exacta es "equivocada". El texto exacto sin aplicar el umbral (245, 81,7 %) es el de la
+  sección anterior.
+- **R3 sobre las equivocadas:** para cada lectura equivocada de ML Kit se simula R3 (`plate_check`, `OCR_MIN_CONF` 0,78)
+  tomándola como patente denunciada y la lectura de PARSeq de la misma foto.
+
+**Resultado sobre las 300 (16/11/2026).**
+
+| | ML Kit v1 | ML Kit v2 | PARSeq |
+|---|---|---|---|
+| **Total (300)** | | | |
+| Lectura exacta | 141 (47,0 %) | **156 (52,0 %)** | **214 (71,3 %)** |
+| Sin lectura | 117 (39,0 %) | 85 (28,3 %) | 71 (23,7 %) |
+| Lectura equivocada | 42 (14,0 %) | 59 (19,7 %) | 15 (5,0 %) |
+| De las que devolvieron lectura, exactas | 77,0 % | 72,6 % | 93,4 % |
+| La correcta entre los candidatos (literal / normalizada) | 153 (51,0 %) / 169 (56,3 %) | 153 / 169 | - |
+| R3 de las equivocadas: patente distinta (RED) | 6 | 8 | - |
+| R3: difiere en un carácter (GREEN) | 19 | 24 | - |
+| R3: ilegible (GREEN) | 15 | 24 | - |
+| R3: coincide (GREEN) | 2 | 3 | - |
+| **Día (246)** | | | |
+| Lectura exacta | 115 (46,7 %) | 126 (51,2 %) | 176 (71,5 %) |
+| Sin lectura | 95 (38,6 %) | 73 (29,7 %) | 56 (22,8 %) |
+| Lectura equivocada | 36 (14,6 %) | 47 (19,1 %) | 14 (5,7 %) |
+| La correcta entre los candidatos (literal / normalizada) | 125 (50,8 %) / 137 (55,7 %) | 125 / 137 | - |
+| R3: RED / un carácter / ilegible / coincide | 4 / 19 / 11 / 2 | 5 / 22 / 17 / 3 | - |
+| **Noche (54)** | | | |
+| Lectura exacta | 26 (48,1 %) | 30 (55,6 %) | 38 (70,4 %) |
+| Sin lectura | 22 (40,7 %) | 12 (22,2 %) | 15 (27,8 %) |
+| Lectura equivocada | 6 (11,1 %) | 12 (22,2 %) | 1 (1,9 %) |
+| La correcta entre los candidatos (literal / normalizada) | 28 (51,9 %) / 32 (59,3 %) | 28 / 32 | - |
+| R3: RED / un carácter / ilegible / coincide | 2 / 0 / 4 / 0 | 3 / 2 / 7 / 0 | - |
+| **¿Cumple U5?** (85 % día, 70 % noche) | no (46,7 / 48,1 %) | no (51,2 / 55,6 %) | día no (71,5 %), noche sí (70,4 %) |
+
+- **v2 recupera lecturas, pero también suma errores.** Gana 15 lecturas exactas (+5,0 puntos) y a cambio las equivocadas pasan de
+  42 a 59 (+17): la lectura devuelta es correcta el 72,6 % de las veces, contra el 77,0 % de v1 y el 93,4 % de PARSeq. Ninguna
+  versión de ML Kit llega a U5 ni de día ni de noche.
+- **Equivocadas de ML Kit:** v1, 34 a un carácter y 8 otra patente; v2, 46 a un carácter y 13 otra patente.
+- **Las 32 lecturas nuevas de v2** (recortes que en v1 no tenían lectura; no se perdió ni cambió ninguna de las otras):
+
+  | | Nuevas | Exactas | Equivocadas | De las equivocadas: un carácter / otra patente | R3: RED / un carácter / ilegible / coincide |
+  |---|---|---|---|---|---|
+  | Total | 32 | **15 (46,9 %)** | **17 (53,1 %)** | 12 / 5 | 2 / 5 / 9 / 1 |
+  | Día | 22 | 11 | 11 | 9 / 2 | 1 / 3 / 6 / 1 |
+  | Noche | 10 | 4 | 6 | 3 / 3 | 1 / 2 / 3 / 0 |
+
+  Es decir, de cada dos lecturas nuevas, una es exacta y la otra equivocada. De las 17 equivocadas, PARSeq lee la patente
+  correcta con seguridad en 6.
+- **Candidatos crudos:** la patente correcta aparece tal cual en 153 de 300 (51,0 %) y, normalizando letra/dígito, en 169 (56,3 %).
+  Las 141 exactas de v1 y 12 de las 117 sin lectura están en los 153. v2 llega a 156 exactas: más que las 153 literales,
+  porque la normalización recupera lecturas cuyos candidatos tienen confusiones letra/dígito. Quedan 13 recortes donde la
+  correcta estaba entre los candidatos (normalizada) y v2 no la eligió. **En ninguna de las equivocadas de v1 estaba la
+  correcta tal cual**; 27 recortes no devolvieron ningún candidato.
+
+**Error silencioso.** Con v1, de las 42 lecturas equivocadas 6 (14,3 %) darían patente distinta (RED, penalización a un usuario
+honesto), 19 difieren en un carácter (GREEN), 15 serían ilegibles (GREEN) y 2 "coinciden" (PARSeq repite el error de ML Kit y
+R3 no lo puede detectar); con v2, de 59, son 8 (13,6 %), 24, 24 y 3. **Salvedad:** el error solo llega a R3 si el texto
+equivocado resuelve a una patente de la red (`POST /alerts/attempts` responde 404 `NOT_IN_NETWORK` si no hay dueños); sobre
+estos datos no se sabe a cuántas lecturas equivocadas les pasaría.
+
+**Cómo leer la medición de ML Kit.**
+
+- **Es de un solo recorte, sin la estabilización entre fotogramas de la app**, y por eso es pesimista: en la app ML Kit lee el
+  recuadro de encuadre fotograma tras fotograma y la app estabiliza la lectura entre fotogramas. Un recorte aislado no tiene
+  esa segunda oportunidad: las cifras de arriba son un **piso de U5**, no una estimación. Tampoco son fotos de la app (son las
+  de Roboflow, ver "Limitaciones"), y es un solo dispositivo.
+- **Tiempo por recorte (ML Kit en el SM-A155M, 300 recortes):** v1, mediana 118,55 ms (118,5 en el informe del Frontend) y p95
+  152,6 ms (mínimo 60,2 y máximo 188,3); v2, mediana 109,45 ms y p95 149,5 ms (mínimo 49,8 y máximo 180,3). Son dos corridas
+  del mismo dispositivo: la diferencia entre ellas no se atribuye a la versión. p95 = el valor en la posición `floor(0,95 × n)` de los ordenados. Es un **componente de E2**,
+  que **no se mide con fotos estáticas**: la latencia de la lectura en la app depende de cuántos fotogramas hacen falta para
+  estabilizarla, no solo del tiempo de un recorte.
+
+### Alternativa evaluada: PARSeq en el dispositivo (`ocr_parseq_device.py`)
+
+**Decisión (16/11/2026): PARSeq no se usa en la app; el lector es ML Kit v2.** Antes de decidir se evaluó, fuera de línea y
+sin tocar el servicio ni la app, leer la patente con PARSeq-tiny o PARSeq-small corriendo en el celular con ONNX Runtime.
+Esta sección deja la medición y las razones.
+
+**Qué se corrió.** Los pesos del autor en Hugging Face (`baudm/parseq-tiny` y `baudm/parseq-small`, Apache-2.0 según
+sus fichas; `parseq-small` es el mismo checkpoint y el mismo ONNX FP32 que ya usa el servicio) exportados a ONNX con el
+exportador de `tools/export/parseq.py` (logits idénticos a los de PyTorch, diferencia máxima 1,4e-5 en tiny y 9,5e-6 en
+small) y cuantizados a INT8 con la cuantización dinámica de ONNX Runtime. Sobre los 300 recortes etiquetados, en dos
+variantes: **con margen** (el recorte del 15 % de `mlkit\`, que es lo que lee ML Kit en la app, que lee el recuadro de
+encuadre) y **ajustado** (sin margen, `mlkit-sin-margen\`, la caja de la patente tal cual). Con la misma normalización por
+posición y validación de formato que la app, y **sin umbral de confianza**, igual que la tabla de ML Kit.
+
+```powershell
+uv run --frozen --extra dev --extra tools python tools/eval/ocr_parseq_device.py export --weights-dir D:\vv-eval\out\parseq-eval\hf --onnx-dir D:\vv-eval\out\parseq-eval\onnx
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py eval --labeled-set D:\vv-eval\ocr-ar-set --onnx-dir D:\vv-eval\out\parseq-eval\onnx --out-dir D:\vv-eval\out\parseq-eval
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py latency --labeled-set D:\vv-eval\ocr-ar-set --onnx-dir D:\vv-eval\out\parseq-eval\onnx --out-dir D:\vv-eval\out\parseq-eval
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py aar D:\vv-eval\out\parseq-eval\aar\onnxruntime-android-1.31.0.aar
+uv run --frozen --extra dev python tools/eval/ocr_parseq_device.py report --out-dir D:\vv-eval\out\parseq-eval --onnx-dir D:\vv-eval\out\parseq-eval\onnx
+```
+
+`export` es el único que necesita `torch` (extra `tools`) y red (baja los pesos de Hugging Face y el código de PARSeq). `eval`
+escribe `results.json` (solo cifras, con los umbrales 0, 0,5, 0,78 y 0,9) y un `rows-*.csv` por corrida (id, luz, lectura y
+confianza: tiene patentes de terceros, no va al repo). `latency` mide cada modelo con 1, 4 y todos los hilos, con 20 recortes de
+calentamiento y tres pasadas sobre los 300, y escribe `latency.json`. Los `.aar` de ONNX Runtime para Android se bajan de
+Maven Central (`com.microsoft.onnxruntime:onnxruntime-android` y `onnxruntime-mobile`).
+
+**Resultado sobre las 300** (lectura exacta / sin lectura / lectura equivocada, en %; sin umbral de confianza):
+
+| | Total (300) | Día (246) | Noche (54) |
+|---|---|---|---|
+| **ML Kit v1** (celular, con margen) | 47,0 / 39,0 / 14,0 | 46,7 / 38,6 / 14,6 | 48,1 / 40,7 / 11,1 |
+| **ML Kit v2** (celular, con margen) | 52,0 / 28,3 / 19,7 | 51,2 / 29,7 / 19,1 | 55,6 / 22,2 / 22,2 |
+| **PARSeq con margen** | | | |
+| tiny FP32 | 63,3 / 9,7 / 27,0 | 62,2 / 8,5 / 29,3 | 68,5 / 14,8 / 16,7 |
+| tiny INT8 | 62,0 / 11,0 / 27,0 | 61,0 / 10,2 / 28,9 | 66,7 / 14,8 / 18,5 |
+| small FP32 | 67,3 / 9,7 / 23,0 | 66,7 / 8,9 / 24,4 | 70,4 / 13,0 / 16,7 |
+| small INT8 | 66,7 / 10,0 / 23,3 | 65,4 / 9,8 / 24,8 | 72,2 / 11,1 / 16,7 |
+| **PARSeq ajustado (sin margen)** | | | |
+| tiny FP32 | 81,0 / 4,0 / 15,0 | 81,3 / 3,3 / 15,4 | 79,6 / 7,4 / 13,0 |
+| tiny INT8 | 81,3 / 3,3 / 15,3 | 81,3 / 2,8 / 15,9 | 81,5 / 5,6 / 13,0 |
+| small FP32 | 83,7 / 3,0 / 13,3 | 82,9 / 3,3 / 13,8 | 87,0 / 1,9 / 11,1 |
+| small INT8 | **85,7** / 2,3 / 12,0 | **85,8** / 2,4 / 11,8 | **85,2** / 1,9 / 13,0 |
+
+**Tamaño y latencia por modelo.** El tiempo es de la CPU de esta PC (AMD Ryzen, 12 hilos lógicos; ONNX Runtime 1.31.0),
+solo como referencia: **no se midió en el celular.** Mediana en ms por recorte (p95 con 1 hilo); el preproceso cuesta 0,16 ms y
+la decodificación es despreciable.
+
+| Modelo | ONNX | Comprimido | 1 hilo | 4 hilos | Todos | ML Kit (celular) |
+|---|---|---|---|---|---|---|
+| tiny FP32 | 25,1 MB | 22,4 MB | 28,3 (p95 39) | 23,4 | 25,0 | v1: 118,6 (p95 152,6) |
+| tiny INT8 | 9,9 MB | 6,9 MB | 26,9 (p95 37) | 20,5 | 19,7 | v2: 109,5 (p95 149,5) |
+| small FP32 | 96,7 MB | 88,6 MB | 87,6 (p95 113) | 55,2 | 57,0 | |
+| small INT8 | 34,4 MB | 25,9 MB | 80,6 (p95 97) | 47,3 | 48,2 | |
+
+- **INT8 gana poco en esta CPU:** el beneficio medido es de tamaño, no de velocidad. En el celular (ARM) puede ser distinto
+  y no se midió.
+- **Con umbral 0,78** (`OCR_MIN_CONF`) sobre la confianza, small INT8 ajustado deja 73,0 % exactas, 23,3 % sin lectura y 3,7 %
+  equivocadas; con margen, 53,0 / 41,7 / 5,3. Todos los umbrales están en `results.json`.
+- **FP32 contra INT8 es ruido:** las lecturas difieren en 9 a 19 de 300 recortes; que small INT8 salga 2 puntos sobre FP32
+  está dentro de la variación de 300 muestras.
+- **Solo small INT8 ajustado cumple U5** (85 % de día, 70 % de noche). ML Kit v2 no cumple, y todos los PARSeq con margen
+  tampoco.
+
+**Peso estimado en el APK.** ONNX Runtime para Android (`onnxruntime-android` 1.31.0, la misma versión que se usó en la PC),
+medido en el `.aar` de Maven Central con `ocr_parseq_device.py aar`, más el modelo:
+
+| Componente | Sin comprimir (en disco) | Comprimido (descarga) |
+|---|---|---|
+| ONNX Runtime, solo `arm64-v8a` (el SM-A155M) | 34,3 MB | 12,9 MB |
+| ONNX Runtime, las 4 ABIs (APK universal) | 140,4 MB | 54,8 MB |
+| **tiny INT8 + ORT arm64** | **44,2 MB** | **19,8 MB** |
+| small INT8 + ORT arm64 | 68,8 MB | 38,8 MB |
+| tiny FP32 + ORT arm64 | 59,5 MB | 35,3 MB |
+| small FP32 + ORT arm64 | 131,0 MB | 101,5 MB |
+
+"En disco" es lo que ocupan las bibliotecas nativas sin comprimir (el empaquetado por defecto de un APK); "descarga" es la
+suma con deflate. Con ABI splits o AAB el usuario solo baja la ABI de su celular. Hay dos formas de achicar ONNX Runtime que
+**no se midieron con PARSeq**: `onnxruntime-android` 1.18.0 (17,1 MB sin comprimir y 5,9 MB comprimidos en arm64) y
+`onnxruntime-mobile` 1.18.0, el último publicado (4,5 y 1,7 MB, pero con operadores acotados y modelos en formato `.ort`;
+no se verificó que cubra `MatMulInteger` ni `ConvInteger` de la cuantización INT8).
+
+**Por qué no se usa PARSeq en la app.**
+
+1. **Eficiencia.** La app lee en cada fotograma de la cámara en vivo. La latencia de PARSeq en el celular no se midió (los
+   tiempos de arriba son de una PC), y small cuesta unas tres veces lo que tiny en esa misma CPU.
+2. **El set es un piso para los dos lectores.** Son fotos movidas y lejanas, no encuadradas como las de la app, y un solo
+   recorte sin la estabilización entre fotogramas. Las cifras de ML Kit v2 (52,0 % exactas) y de PARSeq son un piso en las
+   condiciones de la app, no una estimación de cómo leería cada uno en uso real.
+3. **Almacenamiento.** La opción más chica de PARSeq, tiny INT8 con ONNX Runtime arm64, suma unos 20 MB de descarga y 44 MB en
+   disco, que ML Kit no agrega a la app.
+4. **La lectura equivocada es recuperable.** La app pide confirmar la patente leída y permite reingresarla a mano, así que una
+   lectura equivocada se puede corregir. Por eso no se descarta ML Kit por tener 19,7 % de equivocadas, que PARSeq small con
+   el mismo margen no mejora (23,3 %).
+
+**Lo que dejó esta evaluación.** PARSeq lee mucho mejor cuando el recorte está ajustado a la patente (85,7 % exactas contra
+66,7 % con margen), pero la app solo tiene el recuadro de encuadre, que deja margen. **Ajustar el recorte necesitaría la caja de
+línea de ML Kit** (la del texto reconocido), **que no se midió**: no se sabe cuánto de la ventaja del recorte ajustado
+sobreviviría con esa caja en un celular real. Los números de PARSeq tampoco son de fotos de la app, y no se midió en el
+dispositivo.
+
+### ¿Tapa la redacción la patente denunciada? (`redaction_set.py`)
+
+La excepción de la redacción deja sin tapar la caja que el OCR lee igual que la patente reportada (`MATCH` o `FUZZY`).
+Una detección de patente que **cae adentro** de esa caja (la misma patente detectada otra vez, o un pedazo, como pasa con
+el mosaico de patentes chicas) y que el OCR no lee igual se tapaba, y con eso quedaba tapada parte de la denunciada.
+Ahora `plan_redaction` tampoco tapa las cajas de patente con al menos el **80 % de su área** (`EXEMPT_CONTAINED`) dentro de
+una caja exceptuada. Una patente ajena que solo se superpone un poco se sigue tapando, y sin patente exceptuada no cambia
+nada.
+
+**La patente principal de la foto de patente nunca se tapa.** En la foto de patente (rol `PLATE`), la patente principal
+no se tapa aunque el OCR no la lea (`main_plate` en `domain/redaction.py`): es la caja de patente (con confianza de
+redacción, `PLATE_REDACT_MIN_CONF`) de mayor confianza **dentro de la caja del vehículo dominante** (la caja `car` más
+grande; "dentro" es tener al menos la mitad de su área en esa caja) y, si ninguna cae adentro o no hay vehículo, la caja
+de patente más grande de la foto. Las demás patentes siguen la regla de siempre (excepción por lectura del OCR y cajas
+contenidas), y las cajas contenidas en la principal tampoco se tapan. En la foto general (y en las demás) no cambia nada.
+Es una decisión de producto: si la principal no es la denunciada, queda a la vista otra patente.
+
+**Dos reglas más, que solo afectan a una patente exceptuada** (la exceptuada por lectura o la principal; en cualquier
+foto donde haya una):
+
+1. **No se tapan las cajas de patente que contienen entera a una exceptuada** (`EXEMPT_CONTAINING` = 95 % del área de la
+   exceptuada adentro). Es la regla espejo de las contenidas: una detección más grande que la patente (casi siempre de
+   confianza baja, 0,11 a 0,23) que la rodea entera la taparía por completo.
+2. **El margen de redacción de las demás cajas se recorta para que nunca se superponga con una exceptuada.** La caja de la
+   otra patente se tapa entera (es la patente); solo se le quita del margen del 10 % lo que pisaría a la exceptuada
+   (`painted_boxes` parte el relleno en rectángulos que dejan afuera a la exceptuada). Si el margen no toca ninguna
+   exceptuada, el relleno es el de siempre.
+
+Las dos tienen un parámetro (`exempt_containing`, `clip_margin`) que las apaga para poder medir el antes. Los tests de
+servicio (`test_una_caja_que_contiene_a_la_patente_exceptuada_no_se_tapa` y
+`test_el_margen_de_una_patente_vecina_no_pisa_a_la_exceptuada`) fallan si se apaga la regla correspondiente.
+
+`redaction_set.py` mide el efecto sobre este set, con el texto etiquetado como patente denunciada y la caja anotada como
+su ubicación. Para cada patente legible de auto corre el camino real del paso 8 (detector de patentes con mosaico, OCR de
+cada caja detectada, excepción y `plan_redaction`) **dos veces con las mismas detecciones y lecturas**: antes (el servicio
+con la excepción por OCR, las cajas contenidas y la patente principal) y después (además, las dos reglas de arriba: no
+tapar las cajas que contienen entera a una exceptuada y recortar el margen). La primera tanda de mediciones (abajo, "La
+patente principal") se hizo con una versión anterior de la herramienta, que medía la principal como el "después". Corre
+el OCR sobre el set: hacerlo con las etiquetas completas.
+
+```powershell
+$env:EVAL_DATA_DIR = "D:\vv-eval"; $env:EVAL_OUT = "D:\vv-eval\out\redaction-set"; $env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/redaction_set.py --labeled-set D:\vv-eval\ocr-ar-set
+```
+
+- **Qué cuenta como tapar:** la fracción del área de la caja anotada que queda bajo el relleno (con el margen del 10 %).
+  `tapa_algo` es cualquier superposición (como en la medición de S3 de abajo), `tapa_total` cubre al menos el 95 % y
+  `tapa_parcial` entre el 2 % y el 95 %; `cobertura_mayor_que` da los cortes 0, 2, 10, 50 y 95 %.
+- **`con_exencion` y `sin_exencion`:** si el OCR no lee la denunciada no hay excepción y se tapa a propósito (es el costo del
+  fail-closed). Esos casos se informan aparte: la regla nueva actúa solo cuando hay una caja exceptuada.
+- **`principal`:** cuántas veces la patente principal elegida **no es la denunciada** (su caja se parece a la anotada con
+  IoU menor que 0,5): en esos casos queda a la vista otra patente y la denunciada puede quedar tapada. Aparte cuenta
+  cuántas de esas el OCR igual lee como la denunciada (probablemente la misma patente con otra caja).
+- **`ajenas`:** si las dos reglas dejan expuesta alguna **otra patente** de la misma foto. Toma todas las patentes
+  anotadas del export (menos la denunciada y las cajas inválidas) y cuenta cuántas estaban tapadas por completo antes y
+  dejan de estarlo después (`destapadas_por_las_reglas`), y cuántas quedan menos tapadas (caída de más de 5 puntos).
+- **`casos_tapados_con_exencion`:** las fotos donde el OCR leyó la denunciada y el plan igual la tapa, con qué caja la cubre:
+  `mayor que la patente` (contiene a la exceptuada), `vecina (solo llega con el margen)` (su caja cruda no toca la
+  denunciada; la tapa el margen del 10 %) o `solapada`.
+- Escribe `redaction.json` (solo cifras, también `por_luz`) y `redaction_rows.csv` (id, luz y fracciones, sin el texto).
+
+**Resultado sobre el set de 300 (16/11/2026).** Antes: la regla de las cajas contenidas. Después: más la patente principal.
+
+| | Antes | Después |
+|---|---|---|
+| Tapa algo (cualquier superposición) | 68 (22,7 %) | **24 (8,0 %)** |
+| Tapa por completo (≥ 95 %) | 47 | **11** |
+| Tapa parcialmente (2 % a 95 %) | 19 | **10** |
+| Sin tapar | 234 | 279 |
+| Día: tapa algo / total | 58 / 42 | 20 / 10 |
+| Noche: tapa algo / total | 10 / 5 | 4 / 1 |
+
+Cambian de clase 49 fotos y ninguna empeora. De las 58 donde el OCR no leyó la denunciada (se tapaba a propósito), 55 se
+tapaban y ahora 11; de las 242 donde sí, 13 se tapan antes y después.
+
+- **La principal no es la denunciada en 53 de 300 (17,7 %)**: 47 de 246 de día y 6 de 54 de noche; en 1 no hay ninguna
+  caja de patente. En esos 53 queda a la vista otra patente y la denunciada se tapa algo en 9 (por completo en 3). En 20
+  de los 53 el OCR lee la principal como la denunciada: es casi seguro la misma patente con una caja distinta de la
+  anotada (IoU menor que 0,5), así que la cifra de patentes ajenas expuestas está más cerca de 33 que de 53.
+- **Quedan 13 fotos donde el OCR leyó la denunciada y igual se tapa** (las mismas con y sin la regla de la principal, que no
+  las toca): 7 cajas **mayores que la patente** que la contienen entera (009, 073, 138, 212, 287, 317 y 364; confianza 0,11 a
+  0,28, de 1,2 a 66 veces el área anotada; son las que tapan por completo, salvo la 138), 6 **vecinas que solo llegan con el
+  margen del 10 %** (008, 035, 077, 120, 134 y 287; cubren del 1 % al 10 %) y 4 **solapadas** (035, 074 y dos en 138; la 138 es
+  un fragmento de la misma patente y la tapa al 68 %).
+
+**Las dos reglas nuevas sobre el set de 300 (16/11/2026).** Antes: lo anterior (principal incluida). Después: además no
+tapar las cajas que contienen entera a una exceptuada y recortar el margen contra las exceptuadas.
+
+| | Antes | Después |
+|---|---|---|
+| Tapa algo (cualquier superposición) | 24 (8,0 %) | **14 (4,7 %)** |
+| Tapa por completo (≥ 95 %) | 11 | **3** |
+| Tapa parcialmente (2 % a 95 %) | 10 | **8** |
+| Sin tapar | 279 | 289 |
+| Día (246): tapa algo / total / parcial | 20 / 10 / 7 | 11 / 3 / 5 |
+| Noche (54): tapa algo / total / parcial | 4 / 1 / 3 | 3 / 0 / 3 |
+| El OCR leyó la denunciada (242): tapa algo / total | 13 / 6 | **6 / 0** |
+| El OCR no la leyó (58): tapa algo / total | 11 / 5 | 8 / 3 |
+
+Cambian de clase 10 fotos y ninguna empeora: 5 pasan de tapada por completo a sin tapar por la regla de contener (009, 073,
+212, 317 y 364), 287 también (de total a 1,7 %), 224 y 331 (sin lectura del OCR: la principal estaba dentro de una caja
+mayor) y 008 y 077 (el margen de una vecina rozaba la denunciada, del 8 % y el 10 % a 0).
+
+- **Patentes ajenas expuestas por estas reglas: ninguna.** El export tiene 127 patentes anotadas además de la denunciada
+  en estas fotos: 36 estaban tapadas por completo antes y 36 después, y ninguna pasó de tapada a destapada. Una sola queda
+  menos tapada (id 077: del 8,2 % a 0 %; ya estaba visible al 92 %, el margen de otra caja apenas la rozaba). **Alcance:**
+  solo mide patentes anotadas en estas 300 fotos; una caja grande que contenga a la exceptuada y a otra patente que el
+  detector no vea por separado dejaría esa otra patente expuesta, y acá no pasó, pero no está descartado.
+- **Quedan 6 fotos donde el OCR leyó la denunciada y se tapa algo** (antes, 13), todas con menos del 6 % salvo la 138:
+  035, 074, 120, 134 y 287 (de 0,5 % a 5,5 %: vecinas y cajas solapadas de baja confianza, probablemente sobre la parte
+  de la anotada que la exceptuada del detector no cubre) y la 138 (62 %: fragmentos de la misma patente que se superponen a una exceptuada
+  que cubre solo el 55 % de la anotada). Las 3 que se tapan por completo (067, 255 y 261) no tienen exención por lectura.
+
+**Limitación: el set de 300 no está encuadrado como la app.** La patente principal no es la denunciada en **53 de 300
+fotos (17,7 %)**. Son fotos de Roboflow con autos enteros, varios vehículos o patentes de fondo, no la foto de patente de la
+app (la patente en primer plano, centrada, a 1-2 m). En la app la patente principal debería ser casi siempre la
+denunciada, así que este porcentaje y los casos de patente denunciada tapada por una principal ajena (9 de 53 con la
+regla de siempre) son un techo de lo que se vería en producción, no una estimación; hasta tener fotos de la app no se puede
+medir. Las demás cifras de esta sección comparten el límite.
+
+
+### Limitaciones
+
+- **La relación ancho/alto no separa del todo las motos.** En una muestra de 54 de las primeras 135 cajas con menos de
+  1,8, casi todas las de menos de 1,2 eran motos (dos líneas) y casi todas las de 1,2 a 1,8 eran patentes de auto con
+  la caja holgada, inclinada o en primer plano. Por eso el corte es 1,2 y lo que queda hasta 1,5 se revisa a mano. Una
+  moto con la caja ancha (de 1,5 o más) pasa sin marca; ya con las etiquetas, `formato` lo corrige.
+- **Pocas de noche, y estimadas:** las 77 son una estimación por brillo y se confirman al etiquetar.
+- **La misma patente en dos fotos muy distintas** (otro ángulo, otra distancia) no se detecta por la imagen: la
+  firma del recorte no sobrevive a un cambio de perspectiva. Esos repetidos se sacan agrupando por `texto` con las
+  etiquetas cargadas (`--topup`).
+- "Public Domain" lo declara quien subió el dataset; el origen de las fotos no se auditó (ver
+  [THIRD_PARTY.md](../../THIRD_PARTY.md)). Solo se usa para evaluar.
 
 ## Re-identificación de autos (`reid.py`)
 
@@ -305,7 +1005,7 @@ Por cada clase muestra:
 | Columna | Qué significa |
 |---|---|
 | `reales` | Cajas anotadas en las fotos. |
-| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros: son los de `PLATE_REDACT_MIN_CONF` y `FACE_MIN_CONF`). |
+| `umbral` | Confianza mínima con la que el servicio acepta esa clase (`DETECTOR_MIN_CONF` para autos y ruedas, 0,20 para patentes y 0,30 para rostros; el servicio usa hoy 0,10 para patentes en `PLATE_REDACT_MIN_CONF` y ya no tiene umbral de rostros, porque no los redacta). |
 | `recall` | De las cajas reales, qué fracción encontró (IoU 0,5 o más) con ese umbral. |
 | `prec.` | De las cajas que dibujó, qué fracción acertó. |
 | `FP` | Falsos positivos: cajas que no corresponden a nada. |
@@ -316,9 +1016,9 @@ Para tapar rostros y patentes manda el **recall**: una caja de más tapa de más
 rostro a la vista. La precisión importa menos. La salida completa queda en `detector_report.json`, solo
 con cifras. `--detector-min-conf`, `--plate-min-conf` y `--face-min-conf` cambian los umbrales.
 
-### Mosaico para patentes y rostros chicos
+### Mosaico para patentes y rostros chicos (el de rostros, solo experimental)
 
-`--plate-tiling` y `--face-tiling` (los mismos `PLATE_TILING` y `FACE_TILING` del servicio) recorren la foto
+`--plate-tiling` (el mismo `PLATE_TILING` del servicio) y `--face-tiling` (solo para el módulo experimental de rostros) recorren la foto
 también en tiles de `--tile-px` (640 por defecto) con solape `--overlap` (0,25), y fusionan las cajas con NMS.
 Las fotos de más de 1600 px se achican a ese lado antes de cortar los tiles, para acotar el costo. Solo mejora
 los objetos chicos y cuesta **una inferencia más por tile**. Con el split de prueba de Open Images (204 fotos de
@@ -334,43 +1034,44 @@ Con tiles de 640 px el recall de patentes sube 7 puntos y el de las chicas 15, a
 foto y más cajas de más (que, al tapar, cuestan poco). Los tiles de 480 px no mejoran y son más lentos. Autos,
 ruedas y rostros no cambian: el mosaico solo toca las clases pedidas.
 
-## Detectores de rostros (`face.py`)
+## Rostros: módulo experimental fuera del producto (`face.py`)
 
-El servicio tapa los rostros de las fotos con un relleno opaco antes de guardarlas. Si un rostro no se
-detecta, **queda a la vista**: por eso lo que importa es el **recall** (qué fracción de las caras se encuentra),
-más que la precisión. Este script compara detectores sobre fotos con las caras anotadas.
+**S2, riesgo aceptado (16/11/2026).** El producto **no redacta rostros**: solo tapa patentes de terceros. El criterio del
+proyecto es que el producto final use solo componentes y datos con camino comercial, y el mejor detector de rostros
+medido (SCRFD, InsightFace) tiene pesos para investigación: usarlo en el producto exige pagar su licencia. Se acepta el
+riesgo porque las fotos se toman **a 1-2 m, centradas en el vehículo**, así que un rostro en la foto es raro. Los casos
+residuales son **los ocupantes visibles por las ventanillas y los peatones en el fondo**: esos rostros quedan a la vista
+en la evidencia redactada que ve el dueño.
 
-| Detector | Licencia de los pesos (`commercial`) | ¿Puede entrar al servicio? |
+Como el detector de rostros, el de daños y el chequeo de rebajes, queda como **módulo experimental**: el código está
+en el repo (`scrfd_face.py`, el puerto `face`, esta herramienta), el adaptador es el **nulo por defecto** (`MODEL_FACE=null`)
+y **nadie lo llama** en la cascada. La redacción solo depende del detector de patentes: sin él no hay versión redactada
+(fail-closed), pero un modelo de rostros ausente o que no responde no la afecta. Esta herramienta compara detectores de
+rostros sobre fotos con las caras anotadas, para retomarlo el día que haya licencia.
+
+| Detector | Licencia de los pesos (`commercial`) | Estado |
 |---|---|---|
-| RF-DETR (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | Sí. |
-| SCRFD-10G (InsightFace) | `escalable` (InsightFace vende licencias comerciales) | Sí, `scrfd_10g`. |
-| RetinaFace-R50 (biubug6) | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
-| YuNet | `no` (WIDER FACE, CC BY-NC-ND) | Solo por la excepción del puerto `face`. |
+| RF-DETR v1 (clase *Human face* de Open Images) | `yes` (Apache 2.0, datos CC BY 4.0) | Experimental. |
+| SCRFD-10G (InsightFace) | `escalable` (pesos para investigación; InsightFace vende licencias comerciales) | Experimental (`scrfd_10g`). |
+| RetinaFace-R50 (biubug6) | `no` | Solo referencia en `tools/`. |
+| YuNet | `no` | Solo referencia en `tools/`. |
 
-El puerto `face` es el único que puede seleccionar un modelo `commercial = no`, si es el que mejor protege la
-privacidad (el registro lo deja pasar y avisa en el log). Los que no son RF-DETR ni SCRFD **no se incluyen en
-el repo**: los cargás vos desde un ONNX tuyo.
+El puerto `face` es el único que puede seleccionar un modelo `commercial = no` (el registro lo deja pasar y avisa en el
+log). Los que no son RF-DETR ni SCRFD **no se incluyen en el repo**: los cargás vos desde un ONNX tuyo.
 
 ### 1. Armar las fotos
 
-Hay dos conjuntos de referencia, fuera del repo (tienen rostros de terceros):
+El conjunto de referencia sale del split de prueba de Open Images y queda fuera del repo (tiene rostros de terceros):
 
 ```powershell
 $env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"      # ahí está el subset de Open Images del detector
 $env:EVAL_DATA_DIR = "D:\vv-eval"
-uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py wider        # 1000 fotos al azar de WIDER FACE (validación)
 uv run --frozen --extra dev --extra tools python tools/eval/face_sets.py openimages   # el split de prueba de Open Images, solo rostros
 ```
 
-- **WIDER FACE (validación)**: referencia académica. Se baja de Hugging Face y se usa una muestra al azar
-  (semilla 0). Se descartan las caras que WIDER marca como inválidas y las de menos de 8 px. **Nunca para
-  entrenar.** Es un benchmark muy duro (de las 11 896 caras, 8 611 miden menos de 32 px) y muchas caras chicas
-  no están anotadas, así que sus falsos positivos por foto están inflados.
-- **Open Images (prueba)**: fotos que RF-DETR nunca vio. Se parece más a las fotos del servicio, pero tiene
-  solo 135 caras (13 chicas), así que sus recalls por tamaño son ruidosos.
-
-También sirven fotos propias con las caras anotadas en CVAT (una sola etiqueta de tipo *Rectangle*, exportada en
-formato "COCO 1.0") en `EVAL_DATA_DIR\face\`: es lo que mejor predice cómo va a andar el servicio.
+**Open Images (prueba)**: fotos que RF-DETR nunca vio, con 204 fotos y 135 caras (13 chicas), así que sus recalls por
+tamaño son ruidosos. También sirven fotos propias con las caras anotadas en CVAT (una sola etiqueta de tipo *Rectangle*,
+exportada en formato "COCO 1.0") en `EVAL_DATA_DIR\face\`.
 
 ### 2. Conseguir los modelos
 
@@ -387,16 +1088,16 @@ formato "COCO 1.0") en `EVAL_DATA_DIR\face\`: es lo que mejor predice cómo va a
 ```powershell
 $env:EVAL_OUT = "D:\vv-eval\out\face"
 $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/face.py --dataset-dir D:\vv-eval\face-wider --rfdetr-model rfdetr_openimages --scrfd-model D:\modelos\det_10g.onnx --retinaface-model D:\modelos\retinaface_r50.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx --tiling rfdetr scrfd retinaface_r50
+uv run --frozen --extra dev --extra tools python tools/eval/face.py --dataset-dir D:\vv-eval\face-oi-test --rfdetr-model rfdetr_openimages --scrfd-model D:\modelos\det_10g.onnx --retinaface-model D:\modelos\retinaface_r50.onnx --yunet-model D:\modelos\face_detection_yunet_2023mar.onnx --tiling rfdetr scrfd retinaface_r50
 ```
 
 Pasá solo los que tengas. `--size` es el lado de la entrada de SCRFD y RetinaFace (640 por defecto).
 `--tiling NOMBRE...` suma una versión `NOMBRE+mosaico` de esos detectores (`--tile-px`, `--overlap`).
 Esa versión no aplica el tope de 1600 px del servicio (corta la foto tal cual está), así que es el peor caso de
 latencia.
-`--service-model scrfd_10g` corre un modelo del manifest a través del **adaptador del servicio** (y
-`--service-tiling` suma el adaptador con `FACE_TILING=true`): da lo mismo que `--scrfd-model` y sirve para
-comprobar el adaptador con los pesos reales.
+`--service-model scrfd_10g` corre un modelo del manifest a través del **adaptador** (y `--service-tiling` suma el
+adaptador con el mosaico de rostros activo): da lo mismo que `--scrfd-model` y sirve para comprobar el adaptador con
+los pesos reales.
 
 ### 4. Cómo leer el resultado
 
@@ -407,24 +1108,11 @@ porque cada uno tiene su propia escala de confianza. Después, por cada tope, el
 (lado menor: chicas < 32 px, medianas de 32 a 96 px, grandes > 96 px), los falsos positivos reales y la latencia
 (mediana y p95). `face_report.json` tiene además la curva completa y el umbral de cada punto.
 
-### 5. Resultados de referencia
+### 5. Resultados de referencia (Open Images, prueba)
 
-Recall con a lo sumo **0,5 falsos positivos por foto**; latencia por foto en una CPU de 6 núcleos
-(AMD Ryzen 5 3600; la máquina no estaba del todo libre, tomalas como orden de magnitud).
-
-**WIDER FACE, 998 fotos de validación y 11 896 caras** (8 611 chicas, 2 701 medianas, 584 grandes):
-
-| Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana / p95) |
-|---|---|---|---|---|---|---|
-| RF-DETR | 0,47 | 0,33 | 0,14 | 0,77 | 0,96 | 304 / 410 |
-| **SCRFD-10G** | **0,80** | **0,66** | **0,55** | **0,92** | **0,97** | **118 / 200** |
-| RetinaFace-R50 | 0,63 | 0,51 | 0,35 | 0,90 | 0,97 | 317 / 410 |
-| YuNet | 0,75 | 0,57 | 0,46 | 0,83 | 0,90 | 64 / 127 |
-| RF-DETR + mosaico | 0,58 | 0,39 | 0,21 | 0,83 | 0,96 | 1239 / 2266 |
-| SCRFD-10G + mosaico | 0,87 | 0,69 | 0,61 | 0,91 | 0,96 | 762 / 7421 |
-| RetinaFace-R50 + mosaico | 0,82 | 0,65 | 0,54 | 0,92 | 0,98 | 1561 / 2471 |
-
-**Open Images (prueba), 204 fotos y 135 caras** (13 chicas, 57 medianas, 65 grandes):
+Recall con a lo sumo **0,5 falsos positivos por foto**; **204 fotos y 135 caras** (13 chicas, 57 medianas, 65 grandes).
+Latencia por foto en una CPU de 6 núcleos (AMD Ryzen 5 3600; la máquina no estaba del todo libre, tomalas como orden
+de magnitud).
 
 | Detector | AP50 | Recall | Chicas | Medianas | Grandes | ms (mediana) |
 |---|---|---|---|---|---|---|
@@ -435,69 +1123,23 @@ Recall con a lo sumo **0,5 falsos positivos por foto**; latencia por foto en una
 | RF-DETR + mosaico | 0,85 | 0,90 | 0,38 | 0,95 | 0,95 | 1589 |
 | SCRFD-10G + mosaico | 0,68 | 0,86 | 0,62 | 0,89 | 0,88 | 563 |
 
+Con el adaptador de `scrfd_10g` y el barrido de su confianza mínima (recall con IoU 0,5 o más):
+
+| Confianza mínima | Recall | Falsos positivos por foto | Con mosaico: recall | chicas (13) |
+|---|---|---|---|---|
+| 0,20 | 0,867 | 1,18 | 0,882 | 0,769 |
+| 0,25 | 0,867 | 0,81 | 0,882 | 0,769 |
+| 0,30 | 0,859 | 0,61 | 0,874 | 0,769 |
+| 0,40 | 0,859 | 0,37 | 0,859 | 0,615 |
+
 Cómo leerlo:
 
-- **Las caras chicas son el punto débil de RF-DETR**: en WIDER encuentra 14 de cada 100 (SCRFD, 55). Se entrenó
-  con Open Images, que anota poco las caras chicas, y achica la foto a 512 px.
-- **SCRFD-10G** gana en WIDER por mucho y en Open Images queda empatado con RF-DETR a 0,5 falsos positivos por
-  foto, siendo **unas tres veces más rápido** (105 contra 294 ms). Ojo: SCRFD y RetinaFace se entrenaron con WIDER
-  FACE, así que ahí juegan de local; Open Images es el árbitro más neutral y no los contradice.
-- Con el tope de **0,1** falsos positivos por foto SCRFD parece peor en Open Images (0,50 contra 0,79 de recall):
-  es la forma de su confianza (pone alta confianza a caras que Open Images no anotó). En un servicio que tapa de
-  más antes que de menos, importa más el punto de 0,5 a 1,0.
-- **El mosaico ayuda a las caras chicas con SCRFD en WIDER** (de 0,55 a 0,61 con 0,5 falsos positivos y de 0,34 a
-  0,45 con 0,1) pero **no en Open Images**, donde las caras no son tan chicas, y cuesta 5 a 6 veces la latencia
-  (con picos de varios segundos en fotos grandes). Con RF-DETR ayuda poco: en WIDER las chicas pasan de 0,14 a 0,21.
-- Las cifras de Open Images se apoyan en pocas caras chicas: confirmalas con fotos propias antes de decidir.
-
-El criterio de [docs/modelos.md](../../docs/modelos.md) (que RF-DETR quede cerca de RetinaFace-R50) dio
-`rfdetr_queda: false` en WIDER (RF-DETR pierde 14 puntos a 0,1 falsos positivos) y `true` en Open Images.
-
-### 5b. Validación de `scrfd_10g` con el adaptador del servicio
-
-WIDER FACE val **completo** (`face_sets.py wider --sample 4000`: 3220 fotos con caras válidas y 32 596 caras de al
-menos 8 px; 23 000 chicas, 7 753 medianas y 1 843 grandes) y Open Images (prueba), con `--service-model scrfd_10g
---service-tiling` y el barrido de `FACE_MIN_CONF` (`--sweep-from 0.20 --sweep-to 0.50`). Recall con IoU 0,5 o más:
-
-| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | falsos positivos por foto |
-|---|---|---|---|---|---|---|---|
-| 0,20 | 0,809 | 0,746 | 0,956 | 0,983 | 4,48 | 0,867 | 1,18 |
-| 0,25 | 0,787 | 0,716 | 0,951 | 0,983 | 2,67 | 0,867 | 0,81 |
-| **0,30** | 0,760 | 0,680 | 0,947 | 0,981 | 1,66 | 0,859 | 0,61 |
-| 0,35 | 0,728 | 0,637 | 0,941 | 0,978 | 1,03 | 0,859 | 0,49 |
-| 0,40 | 0,693 | 0,590 | 0,930 | 0,974 | 0,64 | 0,859 | 0,37 |
-| 0,50 | 0,615 | 0,486 | 0,914 | 0,967 | 0,25 | 0,852 | 0,29 |
-
-Con `FACE_TILING=true` (tiles de 640 px):
-
-| `FACE_MIN_CONF` | WIDER: recall | chicas | medianas | grandes | falsos positivos por foto | Open Images: recall | chicas (13) |
-|---|---|---|---|---|---|---|---|
-| 0,25 | 0,885 | 0,849 | 0,966 | 0,986 | 5,93 | 0,882 | 0,769 |
-| **0,30** | 0,869 | 0,829 | 0,961 | 0,984 | 3,88 | 0,874 | 0,769 |
-| 0,40 | 0,830 | 0,777 | 0,949 | 0,979 | 1,78 | 0,859 | 0,615 |
-
-Latencia por foto en CPU (Ryzen 5 3600): 105 ms en Open Images y 164 ms (p95 262) en WIDER sin mosaico;
-575 ms (p95 1,2 s) y 1 084 ms (p95 7,0 s) con mosaico. Las caras chicas son el punto débil (0,68 en WIDER y 0,62 en
-Open Images con 0,30), y el mosaico las sube unos 15 puntos a cambio de 5 a 6 veces la latencia y del doble de
-falsos positivos (que al tapar cuestan poco). Los falsos positivos de WIDER están inflados por caras sin anotar.
-
-### 6. Configuración de redacción (provisoria)
-
-Con estos datos quedó como configuración de `.env.example` (y `PLATE_TILING=true` como default del código),
-**provisoria hasta validar con fotos propias**. `REDACTION_REQUIRED` no se tocó (sigue en `false` solo en local):
-
-```dotenv
-MODEL_DETECTOR=rfdetr_openimages   # autos, ruedas y patentes
-MODEL_FACE=scrfd_10g               # rostros: mejor recall, sobre todo en caras chicas, y 3 veces más rápido
-FACE_MIN_CONF=0.30                 # con SCRFD son unos 0,8 falsos positivos por foto en Open Images
-PLATE_REDACT_MIN_CONF=0.20
-FACE_TILING=true                   # +15 puntos de recall en caras chicas; entra en los 12 s solo porque la redacción va en paralelo (ver la cascada)
-PLATE_TILING=true                  # +7 puntos de recall de patentes; cuesta ~3,5 s más por alerta de 3 fotos (ver la tabla de la cascada)
-```
-
-Con `MODEL_FACE=scrfd_10g` el detector de rostros ya no comparte la inferencia con el de patentes (RF-DETR
-resuelve los dos con una sola pasada): son unos 105 ms más por foto. La confianza de SCRFD no es la de
-RF-DETR: `FACE_MIN_CONF` se eligió mirando la curva de SCRFD, no copiando el valor viejo.
+- **Las caras chicas son el punto débil de RF-DETR** (se entrenó con Open Images, que anota poco las caras chicas, y
+  achica la foto a 512 px). SCRFD-10G queda empatado con RF-DETR a 0,5 falsos positivos por foto y es **unas tres veces
+  más rápido** (105 contra 294 ms).
+- Con el tope de **0,1** falsos positivos por foto SCRFD parece peor (0,50 contra 0,79 de recall): es la forma de su
+  confianza (pone alta confianza a caras que Open Images no anotó).
+- Las cifras se apoyan en pocas caras chicas: confirmalas con fotos propias antes de retomar el módulo.
 
 ## Daños de la carrocería (`damage.py`)
 
@@ -562,35 +1204,44 @@ detalles; con fotos propias de detalle sin daño la tasa puede ser distinta.
 
 ## Latencia de la cascada completa (`cascade.py`)
 
+> **Nota del 16/11/2026: las latencias de esta sección incluyen la detección de rostros.** Hasta esa fecha la redacción
+> corría SCRFD (con mosaico) sobre cada foto, que era la parte más cara de la etapa `redaction`. El producto ya no redacta
+> rostros (ver "Rostros: módulo experimental fuera del producto"), así que esa parte no corre y **estas cifras son una cota
+> superior** de la latencia actual. No se volvieron a medir. En `cascade.py` el puerto de rostros queda en `null`.
+
 Mide cuánto tarda **una alerta entera** en CPU con los modelos reales: el mismo caso de uso, los mismos
 adaptadores y el mismo ONNX que el servicio, de a una alerta por vez. Se arma con autos de Open Images (la
 foto GENERAL y la PLATE son la misma, con la patente que lee el OCR como patente reportada, para que la
-cascada llegue a todas las etapas en lugar de cortarse en un RED) y daños de CarDD.
+cascada llegue a todas las etapas en lugar de cortarse en un RED). Desde US-15 las alertas son de dos fotos.
+**CarDD no se usa** (decisión del 12/11/2026): las fotos salen de `capture_sets.py` (ver "R1 con el encuadre de 1-2 m").
+El detector por defecto es v2 (`--detector` elige otro) y el daño no está en la cascada.
 
 ```powershell
-$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
 $env:EVAL_OUT = "D:\vv-eval\out\cascade"
 $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/damage_fp.py select   # una vez: junta las fotos de autos
-uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --curb-proxy
+uv run --frozen --extra dev --extra tools python tools/eval/cascade.py --general-dir D:\vv-eval\capture-12m\plate --alerts 40
 ```
 
 | Opción | Para qué |
 |---|---|
 | `--alerts N` | Alertas por escenario (20 por defecto), más una de calentamiento que no cuenta. |
-| `--curb-proxy` | Mientras no haya modelo de rebajes, simula su costo corriendo el segmentador de autos (misma arquitectura). Sin esto `curb` es `null` y los escenarios de rebaje cortan antes. |
+| `--general-dir CARPETA` | Autos con patente (por defecto `<TRAIN_DATA_DIR>\damage-fp\images`; la serie `plate` de `capture_sets.py` sirve). |
+| `--detector NOMBRE` | `MODEL_DETECTOR` (por defecto `rfdetr_openimages_v2`). |
 | `--no-redaction` | `REDACTION_REQUIRED=false`, como en local. |
 | `--plate-tiling on\|off` | `PLATE_TILING` (por defecto `on`, como el servicio). |
-| `--face-tiling on\|off` | `FACE_TILING` (por defecto `on`, como el servicio). |
 | `--redact-workers N` | `REDACT_WORKERS`: fotos que se planifican a la vez al redactar (por defecto el del servicio, 3). |
 | `--model-max-side N` | `MODEL_MAX_SIDE_PX`: lado mayor al que se reduce la foto antes de los modelos (1024). |
 | `--long-side N` | Reescala las fotos a ese lado mayor en px (4000 simula una foto de celular de 4000 × 3000). Las copias quedan en `EVAL_OUT\cascade-photos`. |
 | `--threads N` | Hilos de ONNX Runtime (0: los que elija). |
 
-Mide tres escenarios (CRASHED de 3 fotos, CRASHED de 5 y PARKED_ON_GARAGE de 3) y muestra la mediana, el p95 y el
+Mide dos escenarios (CRASHED y PARKED_ON_GARAGE, de dos fotos cada uno: general y patente) y muestra la mediana, el p95 y el
 máximo de cada alerta, y la mediana de cada etapa (`load`, `vehicle`, `burst`, `plate`, `context`, `redaction`).
 
 ### Resultados de referencia
+
+> Las tablas de esta sección y de las siguientes son **anteriores a US-15** y miden alertas de 3 y 5 fotos (con
+> detalle o contexto); no se repitieron con dos fotos. Una alerta de dos fotos hace menos trabajo que la de 3, así que su
+> latencia es menor que la de la fila de 3 fotos; hay que medirla de nuevo con `cascade.py` en el hardware real.
 
 Medianas por alerta en un AMD Ryzen 5 3600 (6 núcleos), con los modelos de la configuración de redacción
 (`rfdetr_openimages` para autos y patentes, `scrfd_10g` para rostros, redacción activa, rebajes simulados),
@@ -634,7 +1285,7 @@ esa etapa baja a unos 0,3 s por foto. La re-ID suma una segmentación y un embed
 
 Cambios que bajan la latencia sin tocar el veredicto: el detector corre **un pase por foto** (sobre la foto
 reducida a `MODEL_MAX_SIDE_PX`=1024) y lo reutiliza la presencia, la lectura de la patente y la redacción; el
-mosaico (`FACE_TILING`, `PLATE_TILING`) solo corre al redactar, es decir, nunca si el veredicto ya es RED; y la
+mosaico de patentes (`PLATE_TILING`) solo corre al redactar, es decir, nunca si el veredicto ya es RED; y la
 redacción planifica hasta `REDACT_WORKERS`=3 fotos a la vez (con la memoria del detector compartida entre hilos).
 Las cajas vuelven a las coordenadas de la foto original antes de tapar.
 
@@ -667,6 +1318,30 @@ alertas a la vez (`WORKERS` > 1) cada una usa hasta `REDACT_WORKERS` hilos más,
 **Lo que no mide:** la red (descarga y subida a S3) ni el descifrado HPKE, que acá son en memoria. Las fotos de
 Open Images miden unos 1000 px; las del celular pueden ser más grandes y sumar tiempo de decodificación.
 También es una alerta por vez: con varios workers en la misma CPU cada una va a tardar más.
+
+### Latencia por alerta sin segmentador (3 y 5 fotos)
+
+Mismas condiciones de arriba (**AMD Ryzen 5 3600**, una alerta por vez, fotos de 4000 × 3000 px, `REDACT_WORKERS` 3,
+mosaicos de patentes y rostros, umbrales aflojados para recorrer todas las etapas), pero **20 alertas por escenario**
+para que el p95 sea una medida y no el máximo de ocho. Antes de medir se terminaron los procesos sobrantes de
+corridas anteriores y se corrió una sola medición a la vez. En ms:
+
+| Configuración | Escenario | Mediana | **p95** | Máximo |
+|---|---|---|---|---|
+| **Oficial: sin segmentador ni daño** | **3 fotos** (general, patente, detalle) | 5 680 | **6 522** | 6 705 |
+| | **5 fotos** (general, patente, 3 detalles) | 9 103 | **10 339** | 10 427 |
+| | 3 fotos, PARKED_ON_GARAGE (general, patente, contexto) | 5 613 | 6 274 | 6 327 |
+| Comparación: sin segmentador, con daño | 3 fotos | 5 517 | 6 052 | 6 065 |
+| | 5 fotos | 9 247 | 9 631 | 9 921 |
+| | 3 fotos, PARKED_ON_GARAGE | 6 540 | 7 439 | 7 894 |
+| Comparación: con segmentador y daño (antes) | 3 fotos | 7 888 | 8 924 | 9 196 |
+| | 5 fotos | 12 872 | 13 551 | 14 462 |
+| | 3 fotos, PARKED_ON_GARAGE | 7 974 | 9 009 | 9 947 |
+
+Etapas medianas de la configuración oficial (ms): 3 fotos, carga 194, presencia 1 070, re-ID 310, patente 70,
+redacción 4 040; 5 fotos, carga 302, presencia 1 664, re-ID 489, patente 64, redacción 6 576. Sacar el segmentador
+baja la re-ID de unos 2 000-3 000 ms a 300-500 ms. Los dos escenarios quedan bajo los 12 s del objetivo (p95 de 6,5 s con
+3 fotos y de 10,3 s con 5). La diferencia entre "con daño" y "sin daño" está dentro del ruido de la medición.
 
 ### Producción: hilos por alerta y concurrencia del consumer
 
@@ -714,6 +1389,363 @@ validarlos con `tools/eval/cascade.py --redact-workers N --threads M` en el hard
 - Si la cola crece, es preferible agregar réplicas (cada una con su propio `prefetch`) y repartir los núcleos entre
   ellas, no subir `WORKERS` por encima de los núcleos disponibles.
 
+### Autos y patentes: precisión, recall y mAP50 (micro-promedio)
+
+Lo que se presenta del detector son **autos y patentes**: la clase rueda no se presenta (aunque la regla de presencia
+R1 la usa; ver abajo) y los rostros los cubre otro modelo. Mismos datos y umbrales del servicio (autos 0,40, patentes
+0,20, el de redacción), sobre las 204 fotos del split `test` de Open Images que el detector nunca vio, con cada foto
+reducida a `MODEL_MAX_SIDE_PX` = 1024 como hace el servicio. El micro-promedio junta las cajas de las dos clases
+(el acierto sigue siendo por clase, con IoU 0,5); el AP50 combinado ordena todas por confianza en una sola curva.
+
+| Clase | Cajas reales | Precisión | Recall | AP50 | Falsos positivos |
+|---|---|---|---|---|---|
+| Auto | 244 | 0,747 | 0,898 | 0,897 | 74 |
+| Patente, sin mosaico | 135 | 0,737 | 0,830 | 0,787 | 40 |
+| Patente, con mosaico (`PLATE_TILING`) | 135 | 0,632 | 0,904 | 0,831 | 71 |
+| **Auto + patente (micro), sin mosaico** | 379 | **0,744** | **0,873** | **0,851** | 114 |
+| **Auto + patente (micro), con mosaico** | 379 | **0,702** | **0,900** | **0,866** | 145 |
+
+El mosaico sube el recall de las patentes (y de las chicas, de 0,61 a 0,76) a costa de más cajas de más, que al tapar
+cuestan poco. Las cifras anteriores (precisión 0,81, recall 0,79, mAP50 0,83) eran promedios de las cuatro clases:
+con la rueda (recall 0,54 con el umbral de 0,40) y los rostros (0,76) el promedio no describe a autos y patentes.
+
+**Latencia del detector por foto** (CPU, ONNX Runtime; **AMD Ryzen 5 3600**, 6 núcleos, la PC sin otras cargas
+significativas, sin contar la decodificación ni la reducción de la foto):
+
+| Configuración | Media | p95 |
+|---|---|---|
+| Un pase (autos y patentes; lo que decide la presencia) | 381 ms | 468 ms |
+| Un pase y el mosaico de patentes (lo que corre al redactar) | 1 808 ms | 2 174 ms |
+
+Se descartaron dos mediciones anteriores (695 y 2 137 ms de media): se hicieron con otros procesos consumiendo la CPU y
+la memoria de la PC y salían casi al doble de lo que cuesta el modelo.
+
+**R1 usa la clase rueda.** En PLATE y DETAIL cuenta como presencia de un auto una caja `car`, `wheel` o `plate` del
+detector; en GENERAL y CONTEXT hace falta una caja `car`. Por eso el recall de la rueda importa para esos dos roles
+(ver "R1 sin segmentador").
+
+## R1 con el encuadre de 1-2 m (`capture_sets.py` y `capture_r1.py`): la medición vigente
+
+> **Esta es la medición de R1 que vale** (decisiones del 12/11 y del 14/11/2026). Las secciones siguientes ("Presencia de auto en todas
+> las fotos" y todo lo que sigue hasta "Precisión corregida") son **históricas**: se hicieron con otras reglas de presencia
+> (la patente o la rueda contaban, DETAIL tenía una regla propia con el daño), con una foto de detalle de CarDD (que ya no se
+> usa para evaluar la cascada) y con **dos criterios de exclusión manual de negativas distintos**: "sin las 3" (v1: las 3 con un
+> auto real al fondo) y "sin las excluidas" (v2: 11 fotos con un vehículo real). **Se unifican en uno solo: no hay exclusiones
+> manuales.** Los números viejos no se comparan con los de esta sección. La medición del 12/11 de esta misma sección (con otra
+> definición de negativa y con el colectivo como vehículo) fue **reemplazada** por la del 14/11; queda en el historial de git.
+
+### La regla
+
+R1 es **la misma para todas las fotos** (GENERAL, PLATE, DETAIL y CONTEXT): tiene que haber un vehículo, que es una caja
+`car` del detector con confianza `DETECTOR_MIN_CONF` o una instancia del segmentador con confianza `SEGMENTER_MIN_CONF`
+(**det ∨ seg**), y ocupa al menos `PRESENCE_MIN_AREA` (5 %) de la foto. **La patente no cuenta como presencia en ninguna foto**
+(alcanza una patente arrancada o impresa para hacer pasar cualquier imagen), tampoco la rueda ni el daño. DETAIL no tiene
+ninguna regla propia: no hay un área mínima ni una confianza distintas, y verificar el daño o la rampa es trabajo futuro. El
+segmentador (`rfdetr_seg_coco`) está en la cascada y `.env.example` lo deja activo (`MODEL_SEGMENTER=rfdetr_seg_coco`).
+
+**Umbrales del servicio (decisión del 14/11/2026): `DETECTOR_MIN_CONF` = 0,35 y `SEGMENTER_MIN_CONF` = 0,50** (antes 0,40 y 0,50), en `config.py` y en `.env.example`. **S1 con 0,35 se considera "válido con tolerancia"** (abajo): cota del 95 % de 1,2 % sin las ambiguas y de 2,1 % con ellas; **la certificación queda para el set de aceptación propio**.
+
+**Qué clases cuentan como vehículo (decisión del 14/11/2026): auto (incluido el taxi), van y camión.** Es el mapeo del adaptador de
+v2 (`ROLES`): `car`, `truck` y `van` se devuelven como una caja `car`; **`bus` (colectivo) es una salida del modelo que el adaptador
+ya no devuelve**, así que un colectivo no cuenta (cambió solo el mapeo, no hubo reentrenamiento). El segmentador es COCO sin
+entrenar y solo devuelve la clase `car` de COCO (no camión ni colectivo). **v2 es el detector por defecto** (`.env.example`);
+v1 queda en el manifest como respaldo y ya no se mide. **Limitaciones:**
+
+- **La ambulancia se entrenó como `van`** (`Ambulance` → `van` en `v2_classes.py`), no es una salida propia: sigue contando como
+  vehículo. Que no cuente exige reentrenar (por ejemplo, mandarla a las fotos de fondo o a una confusora): **decisión del 14/11/2026: no se
+  reentrena; queda documentado como limitación**. Hay muy pocas fotos de ambulancias: **5 en toda la partición de prueba** de
+  Open Images (1 entró a los conjuntos), así que ni siquiera se puede medir cuánto afecta.
+- **Open Images no distingue un flete de un camión pesado y anota muchas pickups como `Truck`**, así que `truck` se mantiene
+  completo: cuenta una pickup válida y también un camión pesado que nadie fotografiaría como un auto.
+
+### Supuesto de captura
+
+El usuario fotografía **a 1-2 m del vehículo**: en la foto de patente se ve la trompa o la cola completa (corta entre el capot
+y el parabrisas); en la general, el auto casi entero; en la de detalle, una zona del auto con el auto alrededor. Tres
+fotos de referencia en `D:\vv-eval\ref\` se usaron **solo para medir el encuadre**: no calibran ningún umbral, no están en el
+repo y no entran a ningún conjunto de evaluación. (La carpeta tiene 8 archivos, no 3: `1.jpg` y `3.jpg` son la misma foto, así que
+son 7 distintas, y las clasifiqué a ojo: 2 de patente, 1 de patente más lejana, 3 generales y 1 de detalle.)
+
+`capture_sets.py ref` mide, con el detector v2 (confianza >= 0,30; solo como regla de medir, no de decidir), el ancho de la
+patente y el ancho y el área de la caja del vehículo sobre la foto de 1280 × 720:
+
+| Foto de referencia | Tipo | Ancho del vehículo | Área del vehículo | Ancho de la patente |
+|---|---|---|---|---|
+| `5.jpg` | patente (trompa completa) | 0,654 | 0,503 | 0,132 |
+| `7.jpg` | patente (trompa completa) | 0,625 | 0,411 | 0,115 |
+| `4.jpg` | patente, más lejos | 0,655 | 0,380 | 0,062 |
+| `1.jpg` (= `3.jpg`) | general (cola, tres cuartos) | 0,818 | 0,468 | no se detecta |
+| `6.jpg` | general | 0,980 | 0,808 | — |
+| `8.jpg` | general | 0,914 | 0,747 | — |
+| `2.jpg` | detalle (esquina trasera con rueda) | 0,892 | 0,889 | — |
+
+De ahí salen las proporciones de los conjuntos: vehículo de 0,82 a 0,98 del ancho en general; patente de 0,08 a 0,15 del ancho (lo
+pedido; las de referencia dan 0,115 y 0,132) y vehículo de ~0,62 a 0,66 en patente; en detalle el vehículo cubre ~0,89 de la foto.
+
+### Resolución
+
+La app genera JPEG de **lado mayor <= 1600 px y <= 900 KB** (límite de 1 MiB por parte, `EVIDENCE_MAX_PART_BYTES`, y de 5 MB de
+Kong). Cada recorte se lleva a **1600 px de lado mayor (1600 × 900) y a JPEG de <= 900 KB**, y después pasa por el mismo camino
+que una foto real: el servicio la reduce a `MODEL_MAX_SIDE_PX` = 1024 antes de los modelos. Las fotos de origen de Open
+Images tienen a lo sumo 1024 px, así que **el recorte se agranda**: tiene menos detalle real que una foto de celular de 1600 px.
+Los modelos ven la foto a 512 px (el detector) y a la resolución del segmentador, así que el efecto en la presencia es chico,
+pero es un límite (abajo).
+
+### Cómo se armaron los conjuntos
+
+Fotos de la **partición de prueba de Open Images V7** (anotaciones de `test/labels/detections.csv`), nunca usadas para entrenar
+v1 ni v2, bajadas del bucket público. Una foto no entra a más de un conjunto. Semilla 0. `capture_sets.py build` arma los
+válidos y `capture_sets.py extras` las negativas por principio, los colectivos, las ambulancias y las pickups.
+
+| Conjunto | Cantidad | Cómo se recorta (ventana 16:9 sobre la foto de origen) |
+|---|---|---|
+| **general** | 400 | Foto con una caja `Car` (o `Limousine`, `Taxi`; sin cajas de grupo, de dibujo ni tomadas desde adentro). Ventana centrada en el vehículo, con su ancho al 0,80-0,98 de la foto, de al menos 480 px. |
+| **plate** | 300 | Foto con una caja de `Vehicle registration plate` dentro de un vehículo, con la patente al 10-30 % del ancho del vehículo (referencias: 0,18 y 0,20). Ventana con la **patente al 8-15 % del ancho**, el centro de la patente al 0,40-0,70 del ancho y 0,50-0,70 del alto, el vehículo entero a lo ancho y la base del vehículo dentro de la foto (se corta entre el capot y el parabrisas). |
+| **detail** | 400 | Foto con una caja `Car`. Ventana de ancho 0,30-0,55 del vehículo, de al menos 320 px, con **al menos el 85 % de la foto dentro de la caja del vehículo** (referencia: 0,89). |
+| **heavy** (camiones y vans) | 150 + 85 | Fotos con `Truck` o `Van` anotado y **sin `Car` ni subclases** anotado (cualquier caja). Misma ventana que general sobre el vehículo pesado más grande. Además, la **foto entera** (`heavy_*_whole`). Salieron menos de 150 vans (85): son todas las de la partición que cumplen esas condiciones y admiten una ventana. |
+| **pickup** | 126 | Ver abajo. |
+| **colectivo** y **ambulancia** | 65 y 1 | Fotos con `Bus` o `Ambulance` anotado (caja que no sea de grupo, de dibujo ni desde adentro) y **sin ningún vehículo excluido** (abajo). Misma ventana que general sobre el vehículo, y la foto entera. Son **negativas**: se mide cuántas se rechazan. |
+| **sinvehiculo** | 2 000 | Fotos al azar (semilla) de la partición de prueba con alguna caja anotada y **sin ningún vehículo válido** (abajo). Se usan como están (sin recortar; a lo sumo 1 024 px). **Sin exclusiones manuales.** |
+
+**Una foto sin auto es una foto sin ningún vehículo válido (decisión del 14/11/2026).** Son vehículos válidos `Car` (y su subclase
+`Limousine`), `Taxi`, `Van` y `Truck`: una foto con alguno de ellos anotado (cualquier caja, también de grupo o de dibujo) **no es
+una negativa**. **Siguen siendo negativas** las fotos con colectivo, ambulancia, moto, bicicleta, tren, barco, avión o silla de
+ruedas (y sus parientes: aeronave, helicóptero, tanque, moto de nieve, etc.; la lista completa está en `OTHER_VEHICLES`). Las que
+tienen como **única** señal de vehículo una rueda, un neumático, una patente o un `Vehicle` / `Land vehicle` genérico son
+**ambiguas**: están dentro de las negativas y se reportan aparte (S1 con ellas dentro y sin ellas).
+
+Cuántas fotos se excluyen por etiqueta (partición de prueba: 112 194 fotos con alguna caja y no usadas en ningún entrenamiento;
+`negativas_conteos` en `specs.json`; se imprimen antes de medir):
+
+| Etiqueta | Fotos que la tienen | Excluidas atribuidas a su primera etiqueta |
+|---|---|---|
+| `Car` | 15 288 | 15 288 |
+| `Limousine` | 68 | 38 |
+| `Taxi` | 85 | 1 |
+| `Van` | 526 | 297 |
+| `Truck` | 909 | 465 |
+| **Total excluidas** | | **16 089** |
+
+Quedan **96 105 fotos**: 86 664 sin ningún vehículo anotado, 6 987 con otro vehículo (aviones 2 407, barcos 1 710, bicicletas 648,
+motos 351, trenes 266, colectivos 173, ambulancias 5, sillas de ruedas 107, y otros) y **2 454 ambiguas** (rueda 1 004, neumático 647,
+`Vehicle` 1 045, `Land vehicle` 1 258, patente 30; una foto puede tener más de una). Hay muy pocas ambulancias: **solo 5 fotos de
+la partición de prueba** tienen una ambulancia anotada, y 1 entró al conjunto (las otras estaban en el entrenamiento o no admiten
+una ventana): su cifra es una anécdota, no una medición.
+
+**Pickups.** Open Images V7 **tiene** la etiqueta de imagen "Pickup truck" (`/m/0cvq3`, de las 20 931 clases del archivo de descripciones
+verificada por personas; **no es una clase con cajas**, no está entre las 600 de detección). La partición de prueba tiene **532
+fotos** con la etiqueta confirmada. Como no hay cajas de pickup, se toma la caja de vehículo de la foto (`Truck`, `Car`, `Van`)
+solo si **domina**: la mayor tiene al menos 2 veces el área de la segunda (si no, no se sabe cuál es la pickup y no se elige a
+mano). Candidatas no usadas en ningún entrenamiento ni en otro conjunto: 400; con una caja dominante y una ventana válida: 126.
+Cómo las anota Open Images: `Truck` 107, `Car` 17 y `Van` 2: **la mayoría como `Truck`**, que es justo lo que decide la limitación de arriba.
+Misma ventana que general sobre esa caja, y la foto entera.
+
+**Verificación de que ninguna foto se usó para entrenar** (`exclusion_check.json`): las 5 498 fotos elegidas (todos los conjuntos,
+incluidos los de la medición anterior) contra las **3 689 fotos de entrenamiento y validación de v1 y v2** (v1: 1 057 + 201; v2:
+2 139 + 435), por **identificador** (nombre de archivo), por **SHA-256 del contenido** (los 3 689 archivos comparados) y por
+**`OriginalMD5`** de Open Images: **0 coincidencias** en las tres. (La partición de prueba es disjunta de las de entrenamiento y
+validación de Open Images por construcción; esto lo verifica sobre los archivos.)
+
+### Protocolo
+
+- **Mitades con semilla fija.** Cada conjunto se parte en A y B con la misma semilla (`halves`, semilla 0). Los umbrales se
+  **eligen en A** y los números se **reportan en B**.
+- **Barrido:** `t_car` y `t_seg` de 0,30 a 0,95 de a 0,05 (14 valores cada uno), con `PRESENCE_MIN_AREA` = 5 % fijo.
+- **"La mejor combinación"**: det ∨ seg con la **menor U3 en las mitades A de las válidas** entre las que dejan la **cota
+  del 95 % de S1 en la mitad A de las negativas en <= 1 %** (con 1 000 negativas, a lo sumo 4 aceptadas). Se elige con las
+  ambiguas dentro de las negativas; aparte, la que se elegiría exigiendo ese S1 solo sobre las negativas sin las ambiguas. Se
+  reporta también con el **segmentador fijo en 0,50** (el del servicio), barriendo solo el detector.
+- **Configuraciones que se reportan:** `car` 0,35 y 0,40 (la actual), ambas con el segmentador en 0,50, y la mejor.
+- **S1**: negativas aceptadas (cota de una cola al 95 %: 3/N sin fallas, Clopper-Pearson si hay), con las ambiguas dentro y sin ellas.
+- **U3 por alerta de 3 fotos** (general + patente + un detalle) = 1 − (1 − pG)(1 − pP)(1 − pD), **suponiendo que los rechazos de
+  las tres fotos son independientes**. Es una estimación: no hay alertas reales, y el mismo auto o la misma luz correlacionan los
+  rechazos, lo que haría la unión real más chica; la cota que se reporta usa las cotas de cada tipo y es conservadora. Las
+  alertas de `PARKED_ON_GARAGE` llevan una foto de contexto (de la vereda) que este conjunto no tiene.
+- **Quién la dejó pasar**: de cada negativa aceptada en B se guarda qué señal alcanzó (detector o segmentador), con qué
+  clase del detector, confianza y área.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:MODELS_DIR = "models\weights"
+$env:EVAL_OUT = "D:\vv-eval\capture-12m"
+python tools/eval/capture_sets.py build      # válidos y heavy (baja ~6 900 fotos)
+python tools/eval/capture_sets.py extras     # negativas por principio, colectivos, ambulancias y pickups (~3 000 fotos)
+python tools/eval/capture_sets.py verify     # exclusion_check.json
+$env:EVAL_OUT = "D:\vv-eval\out\capture-v3"
+python tools/eval/capture_r1.py measure --sets-dir D:\vv-eval\capture-12m --detector rfdetr_openimages_v2   # ~1 h; --resume sigue
+python tools/eval/capture_r1.py report --sets-dir D:\vv-eval\capture-12m
+```
+
+(`build` también genera `neg` y `heavy_Bus`, de la medición del 12/11: ya no se miden; quedan para que la semilla reproduzca
+los conjuntos válidos.)
+
+### Resultados con v2 y el segmentador (det ∨ seg)
+
+Detector `rfdetr_openimages_v2@6bcad50b33c5` y `rfdetr_seg_coco`, con el área mínima del servicio (5 %), con las clases que
+cuentan (auto, van y camión). Cifras: fallas sobre el tamaño de la mitad y, entre paréntesis, la tasa y la cota superior del 95 % (una
+cola). **Todo es la mitad B**: los umbrales de las filas "mejor" se eligieron en la mitad A. Señales y análisis en
+`D:\vv-eval\out\capture-v3` (se midieron las 3 954 fotos sin una sola señal faltante). `car` / `seg` son las confianzas mínimas del
+detector y del segmentador.
+
+| Configuración | `car` / `seg` | S1 en B, con las ambiguas | S1 en B, sin las ambiguas | GENERAL rechazadas | PLATE rechazadas | DETAIL rechazadas | U3 por alerta | Camión y van rechazados | Pickups rechazadas | Colectivos rechazados | Ambulancias rechazadas |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la anterior)** | 0,40 / 0,50 | 12/1000 (1,2 %; ≤ 1,9 %) | 5/975 (0,5 %; ≤ 1,1 %) | 1/200 (0,5 %; ≤ 2,4 %) | 1/150 (0,7 %; ≤ 3,1 %) | 9/200 (4,5 %; ≤ 7,7 %) | 5,6 % (≤ 12,7 %) | 4/118 (3,4 %; ≤ 7,6 %) | 2/63 (3,2 %; ≤ 9,7 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| **`car` 0,35 (la del servicio)** | 0,35 / 0,50 | 13/1000 (1,3 %; ≤ 2,1 %) | 6/975 (0,6 %; ≤ 1,2 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 9/200 (4,5 %; ≤ 7,7 %) | 4,5 % (≤ 10,9 %) | 3/118 (2,5 %; ≤ 6,4 %) | 0/63 (0,0 %; ≤ 4,8 %) | 31/33 (93,9 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 8/1000 (0,8 %; ≤ 1,4 %) | 3/975 (0,3 %; ≤ 0,8 %) | 9/200 (4,5 %; ≤ 7,7 %) | 1/150 (0,7 %; ≤ 3,1 %) | 23/200 (11,5 %; ≤ 15,9 %) | 16,1 % (≤ 24,8 %) | 23/118 (19,5 %; ≤ 26,5 %) | 32/63 (50,8 %; ≤ 61,7 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 7/1000 (0,7 %; ≤ 1,3 %) | 3/975 (0,3 %; ≤ 0,8 %) | 11/200 (5,5 %; ≤ 8,9 %) | 1/150 (0,7 %; ≤ 3,1 %) | 34/200 (17,0 %; ≤ 22,0 %) | 22,1 % (≤ 31,2 %) | 32/118 (27,1 %; ≤ 34,7 %) | 46/63 (73,0 %; ≤ 82,0 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 13/1000 (1,3 %; ≤ 2,1 %) | 6/975 (0,6 %; ≤ 1,2 %) | 0/200 (0,0 %; ≤ 1,5 %) | 0/150 (0,0 %; ≤ 2,0 %) | 9/200 (4,5 %; ≤ 7,7 %) | 4,5 % (≤ 10,9 %) | 3/118 (2,5 %; ≤ 6,4 %) | 0/63 (0,0 %; ≤ 4,8 %) | 31/33 (93,9 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 10/1000 (1,0 %; ≤ 1,7 %) | 4/975 (0,4 %; ≤ 0,9 %) | 3/200 (1,5 %; ≤ 3,8 %) | 1/150 (0,7 %; ≤ 3,1 %) | 16/200 (8,0 %; ≤ 11,9 %) | 10,0 % (≤ 17,9 %) | 7/118 (5,9 %; ≤ 10,8 %) | 12/63 (19,1 %; ≤ 29,0 %) | 33/33 (100,0 %) | 0/1 (0,0 %) |
+
+(S1 son las negativas aceptadas, de 1 000 en B o 975 sin las ambiguas. "Camión y van" son los 118 válidos pesados de B; las
+pickups son 63; los colectivos 33 y la ambulancia 1: para ellos la tabla cuenta las **rechazadas**, que es lo que se espera, y entre
+paréntesis va solo la tasa.)
+
+**S1 con más detalle** (negativas de A, de B, de las 2 000, y sin las ambiguas):
+
+| Configuración | `car` / `seg` | S1 en A | S1 en B | S1 en todas | A sin las ambiguas | B sin las ambiguas |
+|---|---|---|---|---|---|---|
+| **`car` 0,40 (la anterior)** | 0,40 / 0,50 | 8/1000 (0,8 %; ≤ 1,4 %) | 12/1000 (1,2 %; ≤ 1,9 %) | 20/2000 (1,0 %; ≤ 1,5 %) | 5/983 (0,5 %; ≤ 1,1 %) | 5/975 (0,5 %; ≤ 1,1 %) |
+| **`car` 0,35 (la del servicio)** | 0,35 / 0,50 | 8/1000 (0,8 %; ≤ 1,4 %) | 13/1000 (1,3 %; ≤ 2,1 %) | 21/2000 (1,1 %; ≤ 1,5 %) | 5/983 (0,5 %; ≤ 1,1 %) | 6/975 (0,6 %; ≤ 1,2 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 4/1000 (0,4 %; ≤ 0,9 %) | 8/1000 (0,8 %; ≤ 1,4 %) | 12/2000 (0,6 %; ≤ 1,0 %) | 1/983 (0,1 %; ≤ 0,5 %) | 3/975 (0,3 %; ≤ 0,8 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 3/1000 (0,3 %; ≤ 0,8 %) | 7/1000 (0,7 %; ≤ 1,3 %) | 10/2000 (0,5 %; ≤ 0,9 %) | 2/983 (0,2 %; ≤ 0,6 %) | 3/975 (0,3 %; ≤ 0,8 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 7/1000 (0,7 %; ≤ 1,3 %) | 13/1000 (1,3 %; ≤ 2,1 %) | 20/2000 (1,0 %; ≤ 1,5 %) | 4/983 (0,4 %; ≤ 0,9 %) | 6/975 (0,6 %; ≤ 1,2 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 7/1000 (0,7 %; ≤ 1,3 %) | 10/1000 (1,0 %; ≤ 1,7 %) | 17/2000 (0,9 %; ≤ 1,3 %) | 4/983 (0,4 %; ≤ 0,9 %) | 4/975 (0,4 %; ≤ 0,9 %) |
+
+**Vehículos pesados válidos y pickups** (rechazados; `Truck` o `Van` anotado y sin `Car`, recortados con el encuadre de general; las
+pickups son las fotos con la etiqueta de imagen "Pickup truck", ver arriba):
+
+| Configuración | `car` / `seg` | camiones en B | vans en B | camión y van en B | camión y van, todos | pickups en B | pickups, todas | pickups, foto entera, en B |
+|---|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la anterior)** | 0,40 / 0,50 | 4/75 (5,3 %; ≤ 11,8 %) | 0/43 (0,0 %; ≤ 7,0 %) | 4/118 (3,4 %; ≤ 7,6 %) | 5/235 (2,1 %; ≤ 4,4 %) | 2/63 (3,2 %; ≤ 9,7 %) | 3/126 (2,4 %; ≤ 6,0 %) | 2/63 (3,2 %; ≤ 9,7 %) |
+| **`car` 0,35 (la del servicio)** | 0,35 / 0,50 | 3/75 (4,0 %; ≤ 10,0 %) | 0/43 (0,0 %; ≤ 7,0 %) | 3/118 (2,5 %; ≤ 6,4 %) | 3/235 (1,3 %; ≤ 3,3 %) | 0/63 (0,0 %; ≤ 4,8 %) | 1/126 (0,8 %; ≤ 3,7 %) | 0/63 (0,0 %; ≤ 4,8 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 21/75 (28,0 %; ≤ 37,8 %) | 2/43 (4,7 %; ≤ 13,9 %) | 23/118 (19,5 %; ≤ 26,5 %) | 49/235 (20,8 %; ≤ 25,7 %) | 32/63 (50,8 %; ≤ 61,7 %) | 54/126 (42,9 %; ≤ 50,6 %) | 29/63 (46,0 %; ≤ 57,1 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 29/75 (38,7 %; ≤ 48,8 %) | 3/43 (7,0 %; ≤ 17,1 %) | 32/118 (27,1 %; ≤ 34,7 %) | 69/235 (29,4 %; ≤ 34,6 %) | 46/63 (73,0 %; ≤ 82,0 %) | 79/126 (62,7 %; ≤ 69,9 %) | 34/63 (54,0 %; ≤ 64,8 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 3/75 (4,0 %; ≤ 10,0 %) | 0/43 (0,0 %; ≤ 7,0 %) | 3/118 (2,5 %; ≤ 6,4 %) | 3/235 (1,3 %; ≤ 3,3 %) | 0/63 (0,0 %; ≤ 4,8 %) | 1/126 (0,8 %; ≤ 3,7 %) | 0/63 (0,0 %; ≤ 4,8 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 7/75 (9,3 %; ≤ 16,8 %) | 0/43 (0,0 %; ≤ 7,0 %) | 7/118 (5,9 %; ≤ 10,8 %) | 14/235 (6,0 %; ≤ 9,2 %) | 12/63 (19,1 %; ≤ 29,0 %) | 19/126 (15,1 %; ≤ 21,3 %) | 9/63 (14,3 %; ≤ 23,6 %) |
+
+**Colectivos y ambulancias** (negativas: se espera que se rechacen; la tabla cuenta las **rechazadas**):
+
+| Configuración | `car` / `seg` | colectivos rechazados en B | todos | foto entera | ambulancias rechazadas en B | todas | foto entera |
+|---|---|---|---|---|---|---|---|
+| **`car` 0,40 (la anterior)** | 0,40 / 0,50 | 33/33 (100,0 %) | 64/65 (98,5 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **`car` 0,35 (la del servicio)** | 0,35 / 0,50 | 31/33 (93,9 %) | 61/65 (93,8 %) | 64/65 (98,5 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador barrido | 0,65 / 0,55 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| **Mejor en A**, segmentador fijo en 0,50 | 0,75 / 0,50 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador barrido | 0,35 / 0,95 | 31/33 (93,9 %) | 61/65 (93,8 %) | 64/65 (98,5 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 0,50 / 0,50 | 33/33 (100,0 %) | 65/65 (100,0 %) | 65/65 (100,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) | 0/1 (0,0 %) |
+
+**Quién dejó pasar a las negativas aceptadas en B** (`negativas_aceptadas_en_B` en `r1_capture.json`; "clases del detector" cuenta
+detecciones que pasan, no fotos):
+
+| Configuración | aceptadas en B | solo detector | solo segmentador | ambos | clases del detector | ambiguas |
+|---|---|---|---|---|---|---|
+| **`car` 0,40 (la anterior)** | 12 | 10 | 0 | 2 | car 8, truck 5 | 7 |
+| **`car` 0,35 (la del servicio)** | 13 | 11 | 0 | 2 | car 9, truck 5 | 7 |
+| **Mejor en A**, segmentador barrido | 8 | 6 | 2 | 0 | car 3, truck 3 | 5 |
+| **Mejor en A**, segmentador fijo en 0,50 | 7 | 5 | 2 | 0 | car 2, truck 3 | 4 |
+| Mejor en A sin las ambiguas, segmentador barrido | 13 | 13 | 0 | 0 | car 9, truck 5 | 7 |
+| Mejor en A sin las ambiguas, segmentador en 0,50 | 10 | 8 | 0 | 2 | car 7, truck 4 | 6 |
+
+**Qué dejó pasar a cada negativa aceptada en B con los umbrales del servicio (`car` 0,35 / `seg` 0,50): 13 fotos de 1 000.**
+Por categoría de la foto (etiquetas de Open Images, no una descripción mía):
+
+| Categoría | Fotos | Cuáles (# en `sinvehiculo`) | Qué la dejó pasar |
+|---|---|---|---|
+| **Aviones** (`Airplane` anotado) | 2 | 207, 292 | el detector: `truck` 0,76 (13 % de la foto) y `car` 0,62 (98 %) |
+| **Ambiguas** (rueda, neumático, `Vehicle` o `Land vehicle`, sin vehículo concreto) | 7 | 421, 659, 946, 1116, 1300, 1600, 1878 | el detector: 4 con `car` y 3 con `truck` (los 3 de `truck` son 659, 1600 y 1878) |
+| **Sin ninguna etiqueta de vehículo** | 4 | 594, 883, 1705, 1969 | el detector (`car` 0,36 / 0,53 / 0,56 / 0,42); en 883 y 1705 también el segmentador |
+
+**Por señal:** el detector en las 13; **el segmentador solo, en ninguna**; los dos juntos en 2 (883 y 1705). **Por clase del detector:** `car`
+9 detecciones y `truck` 5 (en 4 fotos: el avión 207 y las ambiguas 659, 1600 y 1878). Ninguna entró por `van`. Con 0,40 la
+única que no pasa es la 594 (`car` 0,36 sobre el 6 % de la foto): **12 aceptadas, 7 ambiguas, 2 aviones y 3 sin etiquetas**.
+
+| # | Tipo | Etiquetas de Open Images | Lo dejó pasar | Detector (clase, confianza, área) | Segmentador (confianza, área) |
+|---|---|---|---|---|---|
+| 207 | otro_vehiculo | Airplane | detector | truck 0,76 / 0,13 | — |
+| 292 | otro_vehiculo | Airplane | detector | car 0,62 / 0,98 | — |
+| 421 | ambigua | Tire, Vehicle, Wheel | detector | car 0,75 / 0,99 | — |
+| 594 | sin vehículo | — | detector | car 0,36 / 0,06 | — |
+| 659 | ambigua | Tire, Vehicle, Wheel | detector | truck 0,77 / 0,05; truck 0,64 / 0,43 | — |
+| 883 | sin vehículo | — | ambos | car 0,53 / 0,33 | 0,85 / 0,11 |
+| 946 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,85 / 0,42 | — |
+| 1116 | ambigua | Land vehicle | detector | car 0,66 / 0,99 | — |
+| 1300 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,54 / 0,44 | — |
+| 1600 | ambigua | Land vehicle, Tire, Vehicle, Wheel | detector | truck 0,41 / 0,51 | — |
+| 1705 | sin vehículo | — | ambos | car 0,56 / 0,52 | 0,73 / 0,17 |
+| 1878 | ambigua | Vehicle, Wheel | detector | truck 0,90 / 0,35 | — |
+| 1969 | sin vehículo | — | detector | car 0,42 / 0,85 | — |
+
+Con la mejor combinación en A (0,65 / 0,55):
+
+| # | Tipo | Etiquetas de Open Images | Lo dejó pasar | Detector (clase, confianza, área) | Segmentador (confianza, área) |
+|---|---|---|---|---|---|
+| 207 | otro_vehiculo | Airplane | detector | truck 0,76 / 0,13 | — |
+| 421 | ambigua | Tire, Vehicle, Wheel | detector | car 0,75 / 0,99 | — |
+| 659 | ambigua | Tire, Vehicle, Wheel | detector | truck 0,77 / 0,05 | — |
+| 883 | sin vehículo | — | segmentador | — | 0,85 / 0,11 |
+| 946 | ambigua | Land vehicle, Tire, Wheel | detector | car 0,85 / 0,42 | — |
+| 1116 | ambigua | Land vehicle | detector | car 0,66 / 0,99 | — |
+| 1705 | sin vehículo | — | segmentador | — | 0,73 / 0,17 |
+| 1878 | ambigua | Vehicle, Wheel | detector | truck 0,90 / 0,35 | — |
+
+#### Lectura
+
+- **Con los umbrales anteriores (0,40 / 0,50) S1 en B es 12 de 1 000 (1,2 %; cota 1,9 %) y no cumple el 1 %.** Sin las ambiguas es
+  5 de 975 (0,5 %; cota 1,1 %), apenas por encima del 1 %. **Con 0,35, los del servicio desde el 14/11, son 13 (cota 2,1 %) y 6 de 975 (cota 1,2 %)**: bajar `car` de 0,40 a
+  0,35 suma una negativa aceptada y baja el rechazo de válidas (GENERAL 1 → 0 de 200, PLATE 1 → 0 de 150, pickups 2 → 0 de 63, camión
+  y van 4 → 3 de 118), pero **U3 por alerta pasa de 5,6 % a 4,5 %** (cota 12,7 % → 10,9 %). DETAIL no cambia (9 de 200, 4,5 %).
+- **De las 12 aceptadas en B (0,40 / 0,50), 7 son ambiguas**: fotos con rueda, neumático, `Vehicle` o `Land vehicle` anotados, que
+  son casi seguro vehículos que Open Images no marcó como auto (la lista está arriba; no excluí ninguna). Otras 2 tienen un avión
+  anotado (el detector ve un `car` o un `truck` en el avión) y 3 no tienen ninguna etiqueta. **La dejó pasar el detector en las 12**
+  (en 2, también el segmentador); **el segmentador solo no dejó pasar ninguna** con 0,50. Las clases son `car` (8 detecciones) y
+  `truck` (5): **4 de las 12 fotos entran por `truck`**, incluidas 3 ambiguas y el avión. Es el costo de mantener `truck` completo.
+- **La mejor combinación en A deja S1 ≤ 1 % de cota en A, pero no en B con las ambiguas dentro**: con el segmentador barrido es
+  `car` 0,65 / `seg` 0,55 (S1 en B 8 de 1 000, cota 1,4 %; sin ambiguas 3 de 975, cota 0,8 %) y con el segmentador fijo en 0,50 es
+  `car` 0,75 (7 de 1 000, cota 1,3 %; sin ambiguas 3 de 975, cota 0,8 %). **Sin las ambiguas sí queda bajo el 1 %.** El costo es alto:
+  **U3 por alerta de 16,1 % (cota 24,8 %) con el segmentador barrido y de 22,1 % (cota 31,2 %) con el segmentador en 0,50**, contra
+  5,6 % hoy; DETAIL rechaza 23 y 34 de 200 y GENERAL 9 y 11 de 200.
+- **Lo que paga ese S1 son los camiones y las pickups**: con 0,65 / 0,55 se rechazan 21 de 75 camiones válidos (28 %), 32 de 63
+  pickups (51 %) y 54 de 126 pickups en total (43 %); con 0,75, **46 de 63 pickups (73 %)** y 29 de 75 camiones (39 %). v2 detecta
+  las pickups y los camiones con menos confianza que a un auto, y como Open Images anota la mayoría de las pickups como `Truck`
+  (107 de 126), un umbral alto para limpiar S1 deja afuera justo las camionetas que la gente fotografía. Con los umbrales anteriores (0,40)
+  las pickups se rechazan poco: 2 de 63 en B (3,2 %; cota 9,7 %) y 3 de 126 en total; con 0,35, 0 de 63 y 1 de 126. Las vans no
+  son el problema (0 de 43 con 0,40; 3 de 43 con 0,75).
+- **Si el S1 ≤ 1 % se exige solo sobre las negativas sin las ambiguas** (lectura aparte), la mejor en A con el segmentador
+  barrido es `car` 0,35 (con el segmentador casi apagado, 0,95: da lo mismo que 0,35 / 0,50, lo da todo el detector; U3 4,5 %) y con
+  el segmentador fijo en 0,50 es `car` 0,50 (U3 10,0 %; rechaza 12 de 63 pickups). Bajar `car` de 0,40 a 0,35 es lo único que
+  cambia respecto de hoy en la primera.
+- **Colectivos: ya no cuentan.** Con 0,40, **64 de 65 se rechazan (98,5 %)**, 33 de 33 en B; con 0,35, 61 de 65 (93,8 %; 31 de 33 en
+  B); con la foto entera, 65 de 65 (0,40) y 64 de 65 (0,35). Los que se escapan los deja pasar el detector con otra clase: con 0,40
+  es 1 foto (`van` 0,47 sobre el 62 % de la foto); con 0,35 son 4 (`van` 2, `truck` y `car`). Es el efecto de sacar `bus` del mapeo.
+- **Ambulancias: sin conclusión, y no se rechaza.** Solo hay 5 fotos con una ambulancia anotada en toda la partición de prueba
+  y 1 admitió una ventana y no estaba en el entrenamiento: **0 de 1 rechazada**. Coincide con lo esperado (la ambulancia se
+  entrenó como `van`: el detector la ve como `van` con 0,92), pero con n = 1 no se mide nada. Que dejen de contar exige reentrenar: **no lo hice**.
+- **DETAIL es lo que más se rechaza** con cualquier umbral: 4,5 % con los actuales (9 de 200 en B) y 11 a 17 % con los altos. Son
+  zonas del vehículo sin una parte reconocible y, con la regla de que DETAIL sigue a GENERAL, se rechazan como `NO_VEHICLE`.
+
+#### Límites
+
+- **Las negativas de Open Images no son exhaustivas**: son fotos sin una clase anotada y varias muestran un vehículo (7 de las 12
+  aceptadas en B tienen una rueda, un neumático o un `Vehicle` anotados). La definición del 14/11/2026 las deja dentro, y es la
+  pedida (sin exclusiones manuales), así que S1 es pesimista. En el otro sentido son fotos al azar (aviones, barcos, gente,
+  comida), no las escenas difíciles que alguien sacaría para engañar al sistema (una calle sin autos, un estacionamiento vacío): S1
+  podría ser optimista para esas.
+- **Las pickups se identifican por una etiqueta de imagen, no por una caja**: la caja de vehículo que se recorta es la dominante de
+  la foto y casi siempre `Truck` (107 de 126). Solo 126 de las 532 fotos con la etiqueta quedaron (las otras estaban en el
+  entrenamiento, ya en otro conjunto, o sin una caja dominante que se pueda recortar). Son pocas y las cotas son anchas (63 en B).
+- **Las fotos de referencia son de noche y con poca luz**; las de Open Images son sobre todo de día. El rechazo de válidas
+  probablemente es **optimista para fotos nocturnas**. No se calibró nada con las de referencia.
+- **Los recortes se agrandan** de ≤ 1024 px a 1600 px, así que tienen menos detalle real que una foto de celular; los modelos las ven a
+  512 px (detector), pero es un límite.
+- **U3 supone independencia** entre las tres fotos y su cota usa las cotas de cada tipo (es conservadora). La alerta de
+  `PARKED_ON_GARAGE` tiene una foto de contexto que no está en estos conjuntos.
+- **Una sola partición A/B**: otra semilla movería los números (con la misma configuración, A y B ya difieren en 4 a 5
+  aceptadas), y la elección en A es optimista.
+- **Vans (43 en B), colectivos (33), ambulancias (1) y pickups (63) son pocos**: las cotas son anchas.
+- La **ambulancia se entrenó como `van`** y el **camión se mantiene completo** (Open Images anota pickups como `Truck`): son
+  limitaciones del mapeo, no medibles con estos conjuntos más allá de lo de arriba.
+- No se repitió la latencia: el modelo y el mapeo son los mismos que en la medición del 12/11/2026 (p95 de 4 943 ms por alerta de
+  3 fotos), y quitar `bus` no cambia el costo.
+
 ## Presencia de auto en todas las fotos (`presence.py`)
 
 Mide qué regla decide bien que en una foto hay un auto (o, en PLATE y DETAIL, una parte). Corre el detector, el
@@ -754,7 +1786,8 @@ la regla A gana sobre la C.
 
 `presence.py` también mide la regla que corre en `_has_car`, con el área mínima de 5 % y `DAMAGE_PRESENCE_T` = 0,97
 (el daño solo cuenta en DETAIL y no pide área): GENERAL y CONTEXT piden un auto (detector o segmentador); PLATE y DETAIL
-también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y negativas que pasan (regla A):
+también aceptaban una rueda o una patente (**la rueda salió de la regla el 11/11/2026**; ver "R1 sin la clase rueda").
+Fotos válidas rechazadas (regla C) y negativas que pasan (regla A), medidas todavía con la rueda:
 
 | Rol | Conjunto | Válidas rechazadas | Antes (R2 sin daño) | Negativas que pasan (de 489) |
 |---|---|---|---|---|
@@ -765,77 +1798,916 @@ también aceptan una rueda o una patente. Fotos válidas rechazadas (regla C) y 
 Con 0 negativas que pasan, la cota del 95 % es 3/489 = 0,6 %. El daño recupera 5 de los 21 primeros planos de
 CarDD que se rechazaban sin él. Las rechazadas siguen siendo fotos sin ninguna parte reconocible.
 
-## Calibración de `REID_T` con VeRi-776 (`reid_veri.py`)
+### R1 sin segmentador (configuración oficial)
 
-R2 (`BURST_MISMATCH`) pide **0 pares del mismo auto por debajo de `REID_T`** (cota del 95 % = 3/N). Se calibra con
-VeRi-776, solo para **validar**: no se entrena nada y no se copia nada al repo (su licencia es solo de investigación,
-sin uso comercial). Para cada recorte de `image_test` (los 1 678 de `image_query` están dentro) corre lo mismo que la
-cascada: segmenta los autos, toma el más grande y embebe su máscara (`rfdetr_seg_coco` + `dinov2_vits14`).
+El segmentador (`rfdetr_seg_coco`) salió de la cascada, como el detector de daños y el chequeo de rebajes: con
+`MODEL_SEGMENTER=null` (y `MODEL_DAMAGE=null`) la presencia la decide **solo el detector** (`car`; en PLATE y DETAIL
+también `plate`, con el área mínima de 5 % de la foto; las cifras de esta sección son de cuando también contaba `wheel`) y la re-ID compara el recorte de la caja `car`. El
+código del segmentador queda como experimental. Se midió todo de nuevo, con la foto reducida a 1024 px como hace el
+servicio y comprobando que ningún modelo dejara de responder (0 fotos con señales faltantes en los cinco conjuntos).
+
+**Fotos válidas rechazadas** (regla C; los mismos 417, 137 y 374 conjuntos de arriba):
+
+| Rol | Con segmentador y daño (antes) | Sin segmentador, con daño | **Sin segmentador ni daño (oficial)** |
+|---|---|---|---|
+| GENERAL (y CONTEXT), de 417 | 2 (0,5 %) | 5 (1,2 %) | **5 (1,2 %)** |
+| PLATE, de 137 | 1 (0,7 %) | 1 (0,7 %) | **1 (0,7 %)** |
+| DETAIL, de 374 | 16 (4,3 %) | 21 (5,6 %) | **28 (7,5 %)** |
+
+Sacar el segmentador cuesta 3 fotos de GENERAL (autos que el detector no marca con 0,40) y 5 de DETAIL, y sacar además
+el daño cuesta 7 primeros planos de DETAIL más: el daño, con `DAMAGE_PRESENCE_T` = 0,97, recuperaba 7 de los primeros planos de carrocería
+que el detector no reconocía. La medición con segmentador y con daño queda solo como comparación.
+
+**Fotos sin auto aceptadas** (regla A), con dos tandas de negativas de Open Images (sin `Car`, `Vehicle registration
+plate` ni `Wheel` anotados):
+
+- **Vistas:** 489 fotos de las tres particiones del subconjunto del detector, **incluida la de entrenamiento**.
+- **Nuevas:** 1 200 fotos que el detector nunca vio (`negatives.py`: partición `test` de Open Images V7, otras clases
+  —rostros, personas, edificios, perros, árboles, flores— y ninguna foto del subconjunto).
+
+| Rol | Vistas (de 489) | Cota 95 % | **Nuevas (de 1 200)** | Cota 95 % |
+|---|---|---|---|---|
+| GENERAL (y CONTEXT), sin segmentador | 0 | 0,6 % (3/N) | **15 (1,25 %)** | **1,9 %** |
+| PLATE y DETAIL, sin segmentador | 0 | 0,6 % (3/N) | **21 (1,75 %)** | **2,5 %** |
+
+Las dos cifras son las mismas con y sin segmentador y con y sin daño: el segmentador no filtraba estas fotos. **La
+cifra de 0 sobre las vistas era optimista**: el detector se entrenó con esas fotos. Sobre fotos nuevas pasan 1,3 a
+1,8 %. Se miraron las 21 que pasan: casi todas son otros objetos con forma de vehículo (aviones y planeadores, lanchas,
+un camión, una topadora, una quitanieves, sillas de ruedas, bicicletas) o un objeto con una patente o una rueda parecidas
+(un reloj, una historieta), y 3 tienen un auto real al fondo sin anotar. Son fallos reales de R1 sobre cosas parecidas a
+un auto, no errores de etiquetas. Con 0 aceptadas la cota sería 3/1 200 = 0,25 %; con 15 a 21, es la de Clopper-Pearson.
+
+### R1 en tres configuraciones (`presence_configs.py`)
+
+Con las señales que guardó `presence.py` (sin volver a inferir) evalúa R1, por rol, en las configuraciones de abajo, todas
+**sin la caja de daño**. **S1** es la cantidad de fotos sin auto que la regla acepta (cota del 95 %); **U3** es la de
+primeros planos válidos (PLATE y DETAIL) que rechaza. `--verify` vuelve a medir las fotos aceptadas y comprueba que los
+nombres corresponden a las señales (21 re-medidas, 0 diferencias); `--sheets` arma hojas de contacto para mirarlas.
 
 ```powershell
-$env:VERI_DIR = "D:\vv-eval\veri\VeRi"; $env:EVAL_OUT = "D:\vv-eval\out\reid-veri"; $env:MODELS_DIR = "models\weights"
-uv run --frozen --extra dev --extra tools python tools/eval/reid_veri.py
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\presence-configs"
+$env:MODELS_DIR = "models\weights"
+uv run --frozen --extra dev --extra tools python tools/eval/presence_configs.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas --verify --sheets
 ```
 
-Opciones: `--per-track N` (recortes por auto y cámara, 3), `--workers N` (recortes embebidos a la vez, 4), `--limit N`
-(para probar) y `--max-false-red` (tasa de pares del mismo auto debajo del umbral propuesto, 0,1 %).
+La mejor de **a** y **b** se elige por S1 (fotos sin auto nuevas aceptadas, sumadas por rol) y, si empatan, por U3.
 
-- **Mismo auto**: mismo ID y cámaras distintas. **Autos distintos**: IDs distintos; aparte los **difíciles**, con el
-  mismo color y el mismo tipo según `test_label.xml`.
-- Un recorte donde el segmentador no encuentra ningún auto **no es comparable** (en la cascada R2 no decide: GREEN).
+| Configuración | Reglas (PLATE y DETAIL; GENERAL: `car`, y `seg` en b y c) | U3 de 511 (tasa; cota 95 %) | S1 nuevas, de 1 200 (cota 95 %): GENERAL / PLATE y DETAIL | S1 vistas, de 489 (cota) |
+|---|---|---|---|---|
+| **a** sin segmentador (la oficial) | `car`, `wheel`, `plate` | 29 (5,7 %; 7,7 %) | 15 (1,9 %) / 21 (2,5 %) | 0 (0,6 %) |
+| **b** con segmentador | + `seg` | **22 (4,3 %; 6,1 %)** | 15 (1,9 %) / 21 (2,5 %) | 0 (0,6 %) |
+| **c1** b sin la clase rueda | `car`, `plate`, `seg` | 22 (4,3 %; 6,1 %) | 15 (1,9 %) / **20 (2,4 %)** | 0 (0,6 %) |
+| **c2** b con la rueda a confianza ≥ 0,60 | `car`, `wheel ≥ 0,60`, `plate`, `seg` | 22 (4,3 %; 6,1 %) | 15 (1,9 %) / **20 (2,4 %)** | 0 (0,6 %) |
+| referencia: a sin la clase rueda | `car`, `plate` | 30 (5,9 %; 7,9 %) | 15 (1,9 %) / 20 (2,4 %) | 0 (0,6 %) |
 
-Resultado (5 011 recortes elegidos, 198 autos y 19 cámaras):
+Rechazos por rol (de 417, 137 y 374): a, 5 / 1 / 28; b, c1 y c2, 2 / 1 / 21; a sin rueda, 5 / 1 / 29. El barrido de la
+rueda (0,50 a 0,90) da lo mismo que c2 desde 0,60: con 0,50 sigue pasando la foto de la rueda (0,52).
 
-| Dato | Valor |
-|---|---|
-| Recortes comparables | 4 010 de 5 011; 1 001 (20 %) sin auto segmentado |
-| Pares del mismo auto (N) | 48 437 |
-| Pares de autos distintos / difíciles | 7 985 843 / 902 906 |
-| Coseno medio: mismo auto / distintos / difíciles | 0,654 / 0,557 / 0,632 |
-| AUC (1,0 = se separan del todo): todos / difíciles | 0,664 / 0,548 |
-| **Umbral exacto** (0 pares del mismo auto debajo) | **−0,037**, cota del 95 % = 3/48 437 = 0,006 % |
-| Autos distintos que detecta con el exacto (todos / difíciles) | 0,004 % / 0 % (**inútil**) |
-| **`REID_T` propuesto** | **0,075**: 48 pares del mismo auto debajo (0,10 %), repartidos en 12 de 198 autos |
-| Autos distintos que salen `BURST_MISMATCH` con 0,075 (todos / difíciles) | 0,55 % / 0,03 % |
+**Qué dejó pasar a cada foto sin auto** (las mismas 21 en a, b y c; ninguna configuración acepta una distinta):
 
-Curva (falso rojo = par del mismo auto por debajo del umbral; detectados = autos distintos que salen `BURST_MISMATCH`):
+| Señal | Fotos | Qué son |
+|---|---|---|
+| detector, clase `car` | 15 | aviones y un planeador, una lancha y una lancha rápida, una quitanieves, una cabina de avión y una cápsula espacial, una escalera de caracol, un camión (cabina), una topadora; 3 con un auto real al fondo sin anotar (y 1 dudosa) |
+| detector, clase `plate` | 5 | un reloj con letras, una historieta con un rótulo, un equipo de radio, un cartel de velocidad y ciclistas |
+| detector, clase `wheel` | 1 | sillas de ruedas de básquet |
+| segmentador | 0 | nunca dejó pasar una foto sin auto por sí solo (solo suma `seg` donde el detector ya había marcado un auto) |
 
-| `REID_T` | Pares del mismo auto debajo (falsos rojos) | Autos distintos detectados | Difíciles detectados |
+El segmentador **no suma falsas aceptaciones** y recupera 7 primeros planos (DETAIL 28 → 21, GENERAL 5 → 2). La rueda aporta
+casi nada en b: quitarla no rechaza ninguna foto válida más y saca la única negativa que pasaba solo por rueda (21 → 20).
+En a, la rueda salva 1 primer plano (30 → 29 rechazados).
+
+**Latencia por alerta** (`cascade.py --long-side 4000`, 20 alertas por escenario, redacción y mosaico activos, una corrida a
+la vez, nada más corriendo; AMD Ryzen 5 3600). c1 y c2 usan los mismos modelos que b, así que cuestan lo mismo:
+
+| Escenario | a: mediana / p95 | b: mediana / p95 |
+|---|---|---|
+| CRASHED de 3 fotos | 5 316 / 6 139 ms | 6 491 / 6 755 ms |
+| PARKED_ON_GARAGE de 3 fotos | 5 490 / 6 020 ms | 6 611 / 7 348 ms |
+| CRASHED de 5 fotos | 9 526 / 11 355 ms | 11 700 / 12 712 ms |
+
+El segmentador suma unos 1,2 s por alerta en la mediana (la etapa `burst` pasa de ~0,3 a ~1,5 s). Con 20 alertas el p95 es
+casi el máximo y varía de una corrida limpia a otra (a, CRASHED de 3 fotos: 6 522 ms en la corrida anterior, 6 139 ms en esta):
+conviene mirar la mediana. Una corrida de a hecha mientras corrían otras herramientas salió con p95 8 018 ms y se descartó.
+Los 330 y 1 615 ms de media del detector (un pase y con mosaico) de una repetición posterior salen ~13 % por debajo de los 381 y
+1 808 ms de arriba: la latencia de esta PC tiene un ruido de ese orden.
+
+### R1 sin la clase rueda: decisor, patente y umbrales (`presence_grid.py`)
+
+**Decisión (11/11/2026): la clase `wheel` salió de la regla R1.** `_has_car` cuenta ahora un `car` del detector (y, en
+PLATE y DETAIL, una `plate`), una instancia del segmentador si lo hay y, en DETAIL, el daño si lo hay. Los helpers de
+`tools/eval` (`presence.SERVICE_RULE`) siguen la misma regla; `presence.service_rules(wheel=True)`
+reconstruye la anterior para comparar. Las tablas de arriba (a, b, c1, c2) son de antes de esa decisión y se dejan tal cual.
+Sin la rueda, la regla oficial (sin segmentador ni daño) rechaza 5 / 1 / 29 válidas (GENERAL / PLATE / DETAIL) y acepta
+15 / 20 / 20 de las 1 200 fotos sin auto nuevas.
+
+`presence_grid.py` evalúa, **sin volver a inferir**, todas las combinaciones de tres dimensiones sobre las señales
+guardadas (9 694 configuraciones, 20 s):
+
+- **Decisor de "hay un auto":** `det` (solo la clase `car` del detector), `seg` (solo el segmentador), `det ∨ seg`
+  (cualquiera de los dos) y `det ∧ seg` (los dos, en la misma foto).
+- **Patente como señal de presencia** (la clase `plate` del detector, que se suma al decisor con un OR): `todas` las
+  fotos, `PLATE y DETAIL` (la regla del servicio), `solo PLATE` o `ninguna`. No hay un modo "GENERAL solamente".
+- **Umbrales solo de R1** (separados de los de redacción): `car` y `plate` del detector de 0,40 a 0,95 de a 0,05, y
+  `seg` del segmentador de 0,50 a 0,95. El área mínima sigue en 5 %. Estos umbrales no están en el servicio: es una
+  medición, y cambiarlos pide tu aprobación.
+- **Mosaico: no es una dimensión.** R1 llama a `VehicleDetector.detect` (un solo pase, `_Run.detect`); el mosaico
+  (`detect_plates`) solo se usa al redactar. Se comprobó además sobre las 5 negativas que R1 acepta por la clase patente:
+  salen **las 5 sin mosaico** (0,50 a 0,76) y también con mosaico (0,60 a 0,78); ninguna es "solo de mosaico". Con el
+  mosaico solo suben algunas confianzas (2e57…: 0,50 → 0,60; a6cf…: 0,74 → 0,78) y aparecen más cajas chicas.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"
+$env:EVAL_OUT = "D:\vv-eval\out\r1-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/presence_grid.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas
+```
+
+Deja `r1_grid.json` (resumen), `r1_grid.csv` (las 9 694 filas) y `registro_por_foto.json` (qué se encendió en cada foto,
+con su confianza), todo fuera del repo.
+
+#### Qué son S1 y U3 (mi interpretación, una estimación)
+
+El repo no define S1 ni U3; esta es la lectura que se usa acá, y las cifras son **estimaciones** que dependen de ella:
+
+- **S1:** de las fotos sin auto, cuántas acepta la regla. Cada foto se evalúa en cada rol (GENERAL, PLATE, DETAIL) como si
+  se hubiera enviado con ese rol; sale una cuenta por rol. Cota superior del 95 % de Clopper-Pearson (3/N con 0 aceptadas).
+  La **marca de cumplimiento** es "como máximo 5 de 1 200 en cada uno de los tres roles", que deja la cota en 0,9 %. "Sin
+  auto" quiere decir "sin `Car`, `Vehicle registration plate` ni `Wheel` anotados en Open Images", y Open Images no anota
+  todo: 3 de las 1 200 nuevas (381d…, 5249…, 6aea…) tienen un auto real al fondo. Por eso se da también la cuenta **sin
+  esas 3** (de 1 197).
+- **U3:** de los primeros planos válidos (137 recortes de PLATE y 374 fotos de DETAIL de CarDD, 511 en total), cuántos
+  rechaza. "Válido" quiere decir que se toma como foto bien tomada del rol; no se revisó una por una.
+- El rechazo de GENERAL (de 417) se da aparte. "Total rechazado" suma los tres roles (928 fotos).
+
+#### Punto actual (umbrales 0,40 / 0,40 / 0,50)
+
+| Decisor | Patente como señal | Rechazo de válidas G / P / D (de 417 / 137 / 374) | Cota 95 % | U3 de 511 | S1 nuevas G / P / D (de 1 200) | Cota 95 % | sin las 3 con auto al fondo (de 1 197) | S1 vistas (de 489) | ≤ 5 de 1 200 |
+|---|---|---|---|---|---|---|---|---|---|
+| det | todas | 4 (1,0 %) / 1 (0,7 %) / 29 (7,8 %) | 2,2 % / 3,4 % / 10,4 % | 30 (5,9 %) | 20 / 20 / 20 | 2,4 % / 2,4 % / 2,4 % | 17 / 17 / 17 | 0 / 0 / 0 | no |
+| det | PLATE y DETAIL (actual) | 5 (1,2 %) / 1 (0,7 %) / 29 (7,8 %) | 2,5 % / 3,4 % / 10,4 % | 30 (5,9 %) | 15 / 20 / 20 | 1,9 % / 2,4 % / 2,4 % | 12 / 17 / 17 | 0 / 0 / 0 | no |
+| det | solo PLATE | 5 (1,2 %) / 1 (0,7 %) / 30 (8,0 %) | 2,5 % / 3,4 % / 10,7 % | 31 (6,1 %) | 15 / 20 / 15 | 1,9 % / 2,4 % / 1,9 % | 12 / 17 / 12 | 0 / 0 / 0 | no |
+| det | ninguna | 5 (1,2 %) / 109 (79,6 %) / 30 (8,0 %) | 2,5 % / 85,1 % / 10,7 % | 139 (27,2 %) | 15 / 15 / 15 | 1,9 % / 1,9 % / 1,9 % | 12 / 12 / 12 | 0 / 0 / 0 | no |
+| seg | todas | 27 (6,5 %) / 1 (0,7 %) / 79 (21,1 %) | 8,8 % / 3,4 % / 24,9 % | 80 (15,7 %) | 7 / 7 / 7 | 1,1 % / 1,1 % / 1,1 % | 5 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | PLATE y DETAIL (actual) | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 80 (15,7 %) | 2 / 7 / 7 | 0,5 % / 1,1 % / 1,1 % | 0 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | solo PLATE | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 80 (15,7 %) | 2 / 7 / 2 | 0,5 % / 1,1 % / 0,5 % | 0 / 5 / 0 | 0 / 0 / 0 | no (sí sin las 3) |
+| seg | ninguna | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 185 (36,2 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 | 0 / 0 / 0 | sí |
+| det ∨ seg | todas | 1 (0,2 %) / 1 (0,7 %) / 21 (5,6 %) | 1,1 % / 3,4 % / 8,0 % | 22 (4,3 %) | 20 / 20 / 20 | 2,4 % / 2,4 % / 2,4 % | 17 / 17 / 17 | 0 / 0 / 0 | no |
+| det ∨ seg | PLATE y DETAIL (actual) | 2 (0,5 %) / 1 (0,7 %) / 21 (5,6 %) | 1,5 % / 3,4 % / 8,0 % | 22 (4,3 %) | 15 / 20 / 20 | 1,9 % / 2,4 % / 2,4 % | 12 / 17 / 17 | 0 / 0 / 0 | no |
+| det ∨ seg | solo PLATE | 2 (0,5 %) / 1 (0,7 %) / 21 (5,6 %) | 1,5 % / 3,4 % / 8,0 % | 22 (4,3 %) | 15 / 20 / 15 | 1,9 % / 2,4 % / 1,9 % | 12 / 17 / 12 | 0 / 0 / 0 | no |
+| det ∨ seg | ninguna | 2 (0,5 %) / 96 (70,1 %) / 21 (5,6 %) | 1,5 % / 76,5 % / 8,0 % | 117 (22,9 %) | 15 / 15 / 15 | 1,9 % / 1,9 % / 1,9 % | 12 / 12 / 12 | 0 / 0 / 0 | no |
+| det ∧ seg | todas | 30 (7,2 %) / 1 (0,7 %) / 87 (23,3 %) | 9,6 % / 3,4 % / 27,1 % | 88 (17,2 %) | 7 / 7 / 7 | 1,1 % / 1,1 % / 1,1 % | 5 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | PLATE y DETAIL (actual) | 35 (8,4 %) / 1 (0,7 %) / 87 (23,3 %) | 11,0 % / 3,4 % / 27,1 % | 88 (17,2 %) | 2 / 7 / 7 | 0,5 % / 1,1 % / 1,1 % | 0 / 5 / 5 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | solo PLATE | 35 (8,4 %) / 1 (0,7 %) / 88 (23,5 %) | 11,0 % / 3,4 % / 27,4 % | 89 (17,4 %) | 2 / 7 / 2 | 0,5 % / 1,1 % / 0,5 % | 0 / 5 / 0 | 0 / 0 / 0 | no (sí sin las 3) |
+| det ∧ seg | ninguna | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 207 (40,5 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 | 0 / 0 / 0 | sí |
+
+- Con la patente en `ninguna`, PLATE se rechaza en 96 a 119 de 137: los recortes de patente solo se reconocen por la
+  clase `plate`, y el decisor de autos casi no ve nada en ellos. Sin esa señal la regla no sirve.
+- `seg` solo y `det ∧ seg` bajan S1 pero rechazan 80 a 89 primeros planos, casi todos de DETAIL.
+- `det ∨ seg` es la que menos rechaza (22 de 511) con el mismo S1 que el detector solo.
+- Con la patente en `todas`, S1 en GENERAL sube de 15 a 20: la patente falsa de un reloj o de un cartel pasa en una foto
+  que debería mostrar el auto entero.
+
+#### Mejor punto que cumple S1 ≤ 5 de 1 200
+
+Entre todos los umbrales del barrido, el de menos válidas rechazadas (empate: menos aceptadas):
+
+| Decisor | Patente | Umbrales `car` / `plate` / `seg` | Rechazo de válidas G / P / D | Cota 95 % | Total rechazado (de 928) | S1 nuevas G / P / D | Cota 95 % | S1 vistas |
+|---|---|---|---|---|---|---|---|---|
+| det | todas | 0,55 / 0,80 / 0,50 | 15 (3,6 %) / 14 (10,2 %) / 52 (13,9 %) | 5,5 % / 15,5 % / 17,2 % | 81 (8,7 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | PLATE y DETAIL (actual) | 0,55 / 0,80 / 0,50 | 19 (4,6 %) / 14 (10,2 %) / 52 (13,9 %) | 6,6 % / 15,5 % / 17,2 % | 85 (9,2 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | solo PLATE | 0,55 / 0,80 / 0,50 | 19 (4,6 %) / 14 (10,2 %) / 53 (14,2 %) | 6,6 % / 15,5 % / 17,5 % | 86 (9,3 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | ninguna | 0,55 / 0,40 / 0,50 | 19 (4,6 %) / 119 (86,9 %) / 53 (14,2 %) | 6,6 % / 91,3 % / 17,5 % | 191 (20,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | todas | 0,40 / 0,65 / 0,50 | 27 (6,5 %) / 5 (3,6 %) / 79 (21,1 %) | 8,8 % / 7,5 % / 24,9 % | 111 (12,0 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | PLATE y DETAIL (actual) | 0,40 / 0,65 / 0,50 | 32 (7,7 %) / 5 (3,6 %) / 79 (21,1 %) | 10,2 % / 7,5 % / 24,9 % | 116 (12,5 %) | 2 / 4 / 4 | 0,5 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | solo PLATE | 0,40 / 0,65 / 0,50 | 32 (7,7 %) / 5 (3,6 %) / 79 (21,1 %) | 10,2 % / 7,5 % / 24,9 % | 116 (12,5 %) | 2 / 4 / 2 | 0,5 % / 0,8 % / 0,5 % | 0 / 0 / 0 |
+| seg | ninguna | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 217 (23,4 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 |
+| det ∨ seg | todas | 0,55 / 0,80 / 0,50 | 5 (1,2 %) / 13 (9,5 %) / 34 (9,1 %) | 2,5 % / 14,7 % / 11,9 % | 52 (5,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | PLATE y DETAIL (actual) | 0,55 / 0,80 / 0,50 | 8 (1,9 %) / 13 (9,5 %) / 34 (9,1 %) | 3,4 % / 14,7 % / 11,9 % | 55 (5,9 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | solo PLATE | 0,55 / 0,80 / 0,50 | 8 (1,9 %) / 13 (9,5 %) / 34 (9,1 %) | 3,4 % / 14,7 % / 11,9 % | 55 (5,9 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | ninguna | 0,55 / 0,40 / 0,50 | 8 (1,9 %) / 102 (74,5 %) / 34 (9,1 %) | 3,4 % / 80,5 % / 11,9 % | 144 (15,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | todas | 0,40 / 0,65 / 0,50 | 30 (7,2 %) / 5 (3,6 %) / 87 (23,3 %) | 9,6 % / 7,5 % / 27,1 % | 122 (13,1 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | PLATE y DETAIL (actual) | 0,40 / 0,65 / 0,50 | 35 (8,4 %) / 5 (3,6 %) / 87 (23,3 %) | 11,0 % / 7,5 % / 27,1 % | 127 (13,7 %) | 2 / 4 / 4 | 0,5 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | solo PLATE | 0,40 / 0,65 / 0,50 | 35 (8,4 %) / 5 (3,6 %) / 88 (23,5 %) | 11,0 % / 7,5 % / 27,4 % | 128 (13,8 %) | 2 / 4 / 2 | 0,5 % / 0,8 % / 0,5 % | 0 / 0 / 0 |
+| det ∧ seg | ninguna | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 242 (26,1 %) | 2 / 2 / 2 | 0,5 % / 0,5 % / 0,5 % | 0 / 0 / 0 |
+
+Con la misma regla, pero contando sin las 3 negativas con un auto real al fondo (≤ 5 de 1 197):
+
+| Decisor | Patente | Umbrales `car` / `plate` / `seg` | Rechazo de válidas G / P / D | Cota 95 % | Total rechazado (de 928) | S1 nuevas G / P / D | Cota 95 % | S1 vistas |
+|---|---|---|---|---|---|---|---|---|
+| det | todas | 0,50 / 0,75 / 0,50 | 10 (2,4 %) / 9 (6,6 %) / 42 (11,2 %) | 4,0 % / 11,2 % / 14,3 % | 61 (6,6 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | PLATE y DETAIL (actual) | 0,50 / 0,75 / 0,50 | 12 (2,9 %) / 9 (6,6 %) / 42 (11,2 %) | 4,6 % / 11,2 % / 14,3 % | 63 (6,8 %) | 4 / 5 / 5 | 0,8 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det | solo PLATE | 0,50 / 0,75 / 0,50 | 12 (2,9 %) / 9 (6,6 %) / 43 (11,5 %) | 4,6 % / 11,2 % / 14,6 % | 64 (6,9 %) | 4 / 5 / 4 | 0,8 % / 0,9 % / 0,8 % | 0 / 0 / 0 |
+| det | ninguna | 0,50 / 0,40 / 0,50 | 12 (2,9 %) / 114 (83,2 %) / 43 (11,5 %) | 4,6 % / 88,2 % / 14,6 % | 169 (18,2 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| seg | todas | 0,40 / 0,40 / 0,50 | 27 (6,5 %) / 1 (0,7 %) / 79 (21,1 %) | 8,8 % / 3,4 % / 24,9 % | 107 (11,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | PLATE y DETAIL (actual) | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 112 (12,1 %) | 0 / 5 / 5 | 0,2 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| seg | solo PLATE | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 1 (0,7 %) / 79 (21,1 %) | 10,2 % / 3,4 % / 24,9 % | 112 (12,1 %) | 0 / 5 / 0 | 0,2 % / 0,9 % / 0,2 % | 0 / 0 / 0 |
+| seg | ninguna | 0,40 / 0,40 / 0,50 | 32 (7,7 %) / 106 (77,4 %) / 79 (21,1 %) | 10,2 % / 83,1 % / 24,9 % | 217 (23,4 %) | 0 / 0 / 0 | 0,2 % / 0,2 % / 0,2 % | 0 / 0 / 0 |
+| det ∨ seg | todas | 0,50 / 0,75 / 0,50 | 5 (1,2 %) / 9 (6,6 %) / 28 (7,5 %) | 2,5 % / 11,2 % / 10,1 % | 42 (4,5 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | PLATE y DETAIL (actual) | 0,50 / 0,75 / 0,50 | 7 (1,7 %) / 9 (6,6 %) / 28 (7,5 %) | 3,1 % / 11,2 % / 10,1 % | 44 (4,7 %) | 4 / 5 / 5 | 0,8 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∨ seg | solo PLATE | 0,50 / 0,75 / 0,50 | 7 (1,7 %) / 9 (6,6 %) / 28 (7,5 %) | 3,1 % / 11,2 % / 10,1 % | 44 (4,7 %) | 4 / 5 / 4 | 0,8 % / 0,9 % / 0,8 % | 0 / 0 / 0 |
+| det ∨ seg | ninguna | 0,50 / 0,40 / 0,50 | 7 (1,7 %) / 99 (72,3 %) / 28 (7,5 %) | 3,1 % / 78,5 % / 10,1 % | 134 (14,4 %) | 4 / 4 / 4 | 0,8 % / 0,8 % / 0,8 % | 0 / 0 / 0 |
+| det ∧ seg | todas | 0,40 / 0,40 / 0,50 | 30 (7,2 %) / 1 (0,7 %) / 87 (23,3 %) | 9,6 % / 3,4 % / 27,1 % | 118 (12,7 %) | 5 / 5 / 5 | 0,9 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | PLATE y DETAIL (actual) | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 1 (0,7 %) / 87 (23,3 %) | 11,0 % / 3,4 % / 27,1 % | 123 (13,3 %) | 0 / 5 / 5 | 0,2 % / 0,9 % / 0,9 % | 0 / 0 / 0 |
+| det ∧ seg | solo PLATE | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 1 (0,7 %) / 88 (23,5 %) | 11,0 % / 3,4 % / 27,4 % | 124 (13,4 %) | 0 / 5 / 0 | 0,2 % / 0,9 % / 0,2 % | 0 / 0 / 0 |
+| det ∧ seg | ninguna | 0,40 / 0,40 / 0,50 | 35 (8,4 %) / 119 (86,9 %) / 88 (23,5 %) | 11,0 % / 91,3 % / 27,4 % | 242 (26,1 %) | 0 / 0 / 0 | 0,2 % / 0,2 % / 0,2 % | 0 / 0 / 0 |
+
+Cumplir S1 ≤ 1 % cuesta pasar de 23 o 24 a **52 a 55** válidas rechazadas de 928 con `det ∨ seg` (patente en `todas` o en
+`PLATE y DETAIL`, `car` ≥ 0,55 y `plate` ≥ 0,80) y de 34 o 35 a **81 a 85** con el detector solo. La frontera completa
+(umbrales de cada configuración, de menor a mayor rechazo) está en `r1_grid.json` (`frontera`). En esos puntos se rechazan
+13 o 14 de los 137 recortes de PLATE y de 34 a 52 de las 374 fotos de DETAIL (con la patente en 0,80 y `car` en 0,55).
+
+#### Registro por foto: detector contra segmentador (umbrales actuales)
+
+| Conjunto | Fotos | det sí / seg sí | det sí / seg no | det no / seg sí | det no / seg no | det solo por patente |
+|---|---|---|---|---|---|---|
+| válidas GENERAL | 417 | 382 | 30 | 3 | 2 | 0 |
+| válidas PLATE | 137 | 31 | 105 | 0 | 1 | 108 |
+| válidas DETAIL | 374 | 287 | 58 | 8 | 21 | 1 |
+| sin auto, vistas | 489 | 0 | 0 | 0 | 489 | 0 |
+| sin auto, nuevas | 1200 | 2 | 18 | 0 | 1180 | 5 |
+
+"det" es el auto del detector y, en PLATE, DETAIL y las negativas, también su patente; "det solo por patente" cuenta
+las fotos donde el detector solo marcó una patente. El segmentador **nunca se enciende solo en una foto sin auto**
+(0 en "det no / seg sí" en las 1 689 negativas), y en las válidas rescata 11 fotos (3 de GENERAL y 8 de DETAIL).
+
+#### De las 15 negativas que pasan por la clase auto, ¿el segmentador también vio un auto?
+
+| Foto | Confianza del auto | Segmentador: mejor instancia (cualquier tamaño) | Segmentador: cuenta para R1 (≥ 0,50 y ≥ 5 %) |
 |---|---|---|---|
-| 0,05 | 22 (0,05 %) | 0,26 % | 0,01 % |
-| **0,075** | **48 (0,10 %)** | **0,55 %** | **0,03 %** |
-| 0,10 | 86 (0,18 %) | 1,01 % | 0,05 % |
-| 0,20 | 303 (0,63 %) | 4,21 % | 0,35 % |
-| 0,30 | 902 (1,86 %) | 8,33 % | 1,51 % |
-| 0,40 | 2 413 (4,98 %) | 15,8 % | 5,02 % |
-| 0,50 (valor anterior) | 6 770 (13,98 %) | 31,3 % | 15,6 % |
+| `05b216c9501d4389` | 0,49 | 0,07 | no |
+| `139b58bf9981102e` | 0,45 | 0,64 | no |
+| `145225d35029ace7` | 0,79 | 0,91 | no |
+| `1d3e7fa4223dca3e` | 0,46 | 0,39 | no |
+| `1fa203101e83d731` | 0,43 | 0,02 | no |
+| `373bc1f6e343749d` | 0,65 | 0,13 | no |
+| `381d3671020dca70` (auto real al fondo) | 0,73 | 0,91 | **sí** (0,91) |
+| `52491dfdb5474272` (auto real al fondo) | 0,52 | 0,89 | no |
+| `6aea64be3ea593ec` (auto real al fondo) | 0,68 | 0,83 | **sí** (0,83) |
+| `72668dba3d8886b8` | 0,48 | 0,02 | no |
+| `85be4b924320e539` | 0,54 | 0,02 | no |
+| `9b59c0e2c3fe60da` | 0,41 | 0,12 | no |
+| `a21c9ae16959fbae` | 0,47 | 0,06 | no |
+| `a5fd24fe4683492b` | 0,40 | 0,14 | no |
+| `adb32fe9df8bea34` | 0,68 | 0,08 | no |
 
-Los histogramas de similitud se solapan casi por completo: los pares del mismo auto se concentran entre 0,50 y 0,80
-y los de autos distintos entre 0,45 y 0,75. **En VeRi la re-ID no separa lo suficiente** para acusar fraude sin falsos
-rojos: con 0,50 (el valor anterior) el 14 % de los pares del mismo auto se marcaría como otro auto. Con 0,075 el falso
-rojo cae al 0,1 %, pero R2 casi no se dispara (detecta 0,55 % de los autos distintos): solo salta ante recortes
-groseramente distintos. Con la regla "solo con evidencia firme", es lo correcto con estos datos.
+El segmentador cuenta (con el 5 % de área) en **2 de 15**, y las dos son de las 3 con un auto real al fondo. En 3 más
+vio una instancia con confianza ≥ 0,50 pero de menos del 5 % de la foto (5249…, la tercera con un auto real, y 139b… y
+145225…); en las otras 10 no vio nada relevante. Dicho de otro modo: en las negativas con un auto real el segmentador
+acompaña al detector, y en las que no lo tienen no lo acompaña.
 
-**Limitaciones**
+#### Latencia por alerta de 3 fotos
 
-- **Dominio distinto.** VeRi son recortes de cámaras de vigilancia de baja resolución, con cámaras y luz distintas
-  entre fotos del mismo auto. Las fotos de la app son de celular, de la misma escena y en segundos: lo esperable es
-  que el mismo auto se parezca **más** y que 0,075 sea demasiado bajo. Hay que medirlo con fotos propias (pares
-  general–patente del mismo auto y de autos distintos) antes de subirlo.
-- **`REID_T` queda provisorio** hasta esa validación (`.env.example`, `config.py`).
-- Los pares no son independientes (200 autos, unos 24 recortes por auto): la cota 3/N con N = 48 437 es optimista; el
-  tamaño efectivo está más cerca de la cantidad de autos y de pares de cámaras.
-- El 20 % de los recortes sin auto segmentado es por la baja resolución; en fotos de celular no se espera.
-- Se usan hasta 3 recortes por auto y cámara (5 011 de los 11 579) para acotar el costo (unos 40 minutos en CPU).
+La regla R1 no cambia la latencia (compara tres números por foto): la cambian los modelos que corren. Las configuraciones
+`det` usan los modelos de **a**; `seg`, `det ∨ seg` y `det ∧ seg` necesitan el segmentador y usan los de **b**. Son las
+mismas corridas limpias de arriba (`cascade.py --long-side 4000`, 20 alertas por escenario, una a la vez):
+
+| Modelos | CRASHED de 3 fotos: mediana / p95 | PARKED_ON_GARAGE de 3 fotos: mediana / p95 |
+|---|---|---|
+| sin segmentador (`det`) | 5 316 / 6 139 ms | 5 490 / 6 020 ms |
+| con segmentador (`seg`, `det ∨ seg`, `det ∧ seg`) | 6 491 / 6 755 ms | 6 611 / 7 348 ms |
+
+Con 20 alertas el p95 es casi el máximo y varía de una corrida limpia a otra: conviene mirar la mediana.
+
+### R1 con la patente que ya no valida sola: P1 contra P2, por zoom (`plate_zoom.py`, `plate_rule.py`)
+
+**Decisión (11/11/2026):** una patente sola **no valida** una foto, porque alcanza con una patente arrancada o
+impresa para hacer pasar cualquier imagen. En GENERAL y DETAIL la patente **dejó de contar** como presencia
+(`_has_car`: solo `car` del detector, auto del segmentador y, en DETAIL, daño). En PLATE hay dos variantes, que
+se miden acá sin aplicar ninguna (el servicio sigue con P1):
+
+- **P1** (la actual): un auto **o** una patente.
+- **P2**: una patente **y** un auto (det ∨ seg), con el umbral de auto en barrido desde 0,30.
+
+**Cómo se armó el set de primeros planos realistas** (`plate_zoom.py`). Los recortes de siempre (137, de
+`presence.py`) llevan medio ancho de margen: la patente ocupa el 50 % del ancho, mucho más ajustado que lo que
+saca la app. El set nuevo sale de **imágenes completas**: las del dataset de Roboflow "patentes" (todas sus
+particiones, 135 imágenes) y las fotos con patente de la **partición de prueba de Open Images** de v1 (204 fotos).
+De cada patente anotada (lado menor ≥ 16 px: 252 en total) se recorta, **en memoria**, una ventana **4:3
+horizontal centrada en la patente** cuyo ancho es `ancho_de_la_patente / zoom`, con zoom 25 %, 40 % y 60 % (la
+patente ocupa ese porcentaje del ancho de la foto). Si la ventana se sale de la imagen se la corre hasta que
+entre; si no cabe, o queda de menos de 128 px de ancho, esa patente no entra. **Se usan solo las patentes que
+admiten los tres zooms**, para que la comparación entre niveles sea sobre las mismas: **151 patentes** (84 de
+Roboflow y 67 de Open Images), 151 fotos por zoom. Los identificadores no llevan nombres de archivo. Límites: 151
+patentes dan cotas anchas (de 5 a 9 puntos), las fotos de 128 a 400 px de ancho son de menor resolución que las
+de la app, y la ventana siempre es 4:3 horizontal y centrada: una app real puede inclinar, descentrar y variar.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:EVAL_DATA_DIR = "D:\vv-eval"; $env:MODELS_DIR = "models\weights"
+$env:EVAL_OUT = "D:\vv-eval\out\zoom-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_zoom.py   # ~8 min con v1; --detector <modelo> para otro
+$env:EVAL_OUT = "D:\vv-eval\out\r1-regla-v1"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_rule.py --report D:\vv-eval\out\presence-sin-segmentador\presence_report.json --zoom-report D:\vv-eval\out\zoom-v1\plate_zoom_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas
+```
+
+`plate_rule.py` no vuelve a inferir: barre decisor (`det`, `seg`, `det ∨ seg`, `det ∧ seg`), variante y umbrales
+de auto, patente y segmentador de 0,30 a 0,95 (11 760 configuraciones). Son umbrales **solo de la medición**:
+ninguno se aplica. El área mínima de cada hallazgo es la del servicio (5 % de la foto).
+
+#### Rechazo de válidas por tipo y zoom (umbrales actuales 0,40 / 0,40 / 0,50; entre paréntesis la cota del 95 %)
+
+| Decisor | Regla | GENERAL (de 417) | PLATE 50 % (de 137) | PLATE 25 % (de 151) | PLATE 40 % (de 151) | PLATE 60 % (de 151) | DETAIL (de 374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 1 (≤ 3,4 %) | 8 (≤ 9,4 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 109 (≤ 85,1 %) | 129 (≤ 89,9 %) | 47 (≤ 37,9 %) | 99 (≤ 72,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 2 (≤ 1,5 %) | 1 (≤ 3,4 %) | 3 (≤ 5,1 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 21 (≤ 8,0 %) |
+| det ∨ seg | P2 | 2 (≤ 1,5 %) | 96 (≤ 76,5 %) | 128 (≤ 89,4 %) | 33 (≤ 28,1 %) | 85 (≤ 63,1 %) | 21 (≤ 8,0 %) |
+
+- **P2 rechaza casi todos los primeros planos de patente**, y por dos motivos distintos. En los **ajustados (50 %)
+  y en el 60 %** no hay auto que ver: el detector no encuentra un auto en una foto que es casi solo la patente
+  (96 y 85 de 151 con det ∨ seg). En el **25 %** sí hay auto, pero la patente ocupa cerca del **3 % del área** de
+  la foto y el mínimo del servicio es **5 %**: no cuenta (128 de 151). Con un mínimo de 1 % para la patente, P2 en
+  el 25 % baja de 128 a 13 rechazadas (última tabla), pero eso es otro cambio que nadie pidió. P2 solo anda bien
+  en el término medio (40 %: 33 de 151).
+- **P1** rechaza entre 1 y 4 de 151 con det ∨ seg a cualquier zoom, porque la patente sola (o el auto solo)
+  alcanza.
+
+#### Fotos sin auto aceptadas y U3 por alerta (mismos umbrales)
+
+La columna "nuevas" cuenta las aceptadas de 1 200 en GENERAL / PLATE / DETAIL (cada foto evaluada como si se
+hubiera enviado en ese rol); "sin las 3" las cuenta sin las 3 que tienen un auto real al fondo (de 1 197); en las
+489 vistas, 0 en todas. **U3 por alerta** = `1 - (1 - pG)(1 - pP)(1 - pD)` con una foto de cada rol (GENERAL +
+PLATE + un DETAIL; una alerta `PARKED_ON_GARAGE` trae CONTEXT en vez de DETAIL y no está medida), con la PLATE del
+zoom indicado.
+
+| Decisor | Regla | nuevas G / P / D | sin las 3 | U3 por alerta (PLATE 25 / 40 / 60 %) | S1 ≤ 5 |
+|---|---|---|---|---|---|
+| det | P1 | 15 / 20 / 15 | 12 / 17 / 12 | 13,9 % · 10,9 % · 11,5 % | no |
+| det | P2 | 15 / 0 / 15 | 12 / 0 / 12 | 86,8 % · 37,4 % · 68,7 % | no |
+| det ∨ seg | P1 | 15 / 20 / 15 | 12 / 17 / 12 | 7,9 % · 7,9 % · 8,6 % | no |
+| det ∨ seg | P2 | 15 / 0 / 15 | 12 / 0 / 12 | 85,7 % · 26,6 % · 58,9 % | no |
+
+**El supuesto de U3.** Se supone que las fotos de una misma alerta **fallan de forma independiente**. Es una
+estimación, no una medición: no hay alertas reales (las tres fotos salen de conjuntos distintos), y en la
+práctica las fallas de una alerta pueden estar correlacionadas (mismo auto, misma luz), lo que haría la unión
+real **menor**. La cota usa las cotas de cada foto en la misma fórmula: es conservadora, no un intervalo exacto.
+
+#### Configuraciones que cumplen S1 (≤ 5 de 1 200 en cada rol) y su costo
+
+La mejor de cada decisor y variante: la que minimiza el U3 medio de los tres zooms entre las que cumplen S1
+(optimizar un zoom solo mueve un umbral; todas están en `plate_rule.json`). Umbrales `car` / `plate` / `seg`.
+Columnas de rechazo: rechazadas de 417 / 137 / 151 / 151 / 151 / 374.
+
+| Decisor | Regla | Umbrales | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,55 / 0,80 / – | 19 | 14 | 17 | 19 | 27 | 53 | 5 / 5 / 5 | 27,3 · 28,4 · 32,7 % |
+| det | P2 | 0,55 / 0,30 / – | 19 | 119 | 130 | 65 | 116 | 53 | 5 / 0 / 5 | 88,6 · 53,3 · 81,0 % |
+| det ∨ seg | P1 | 0,55 / 0,80 / 0,30 | 4 | 10 | 6 | 6 | 18 | 27 | 5 / 5 / 5 | **11,8 · 11,8 · 19,1 %** |
+| det ∨ seg | P2 | 0,55 / 0,30 / 0,30 | 4 | 81 | 127 | 29 | 74 | 27 | 5 / 0 / 5 | 85,4 · 25,8 · 53,1 % |
+
+En las 489 vistas, 0 aceptadas. Sin las 3 con auto real al fondo (≤ 5 de 1 197) la mejor es det ∨ seg con P1 y
+0,55 / 0,65 / 0,30: rechaza 4 / 5 / 4 / 3 / 8 / 27 y da un U3 de 10,5 · 9,9 · 13,0 %. Notas:
+
+- **Costo de cumplir S1, contra el punto actual (det ∨ seg, P1):** el U3 por alerta pasa de ~8 % a ~12 % (zoom 25
+  y 40 %) o 19 % (60 %), y DETAIL de 21 a 27 rechazadas de 374. Con det solo (sin segmentador) el costo es mucho
+  mayor: 27 a 33 % por alerta.
+- **P2 no se recupera con ningún umbral:** cumple S1 sin esfuerzo (0 negativas aceptadas en PLATE) pero rechaza el
+  85 % de las alertas con un PLATE al 25 % y la mitad al 60 %, porque el costo no viene del umbral sino de que el
+  auto no está en la foto (o de que la patente es chica para el mínimo de área).
+- El umbral de segmentador 0,30 que eligen las mejores configuraciones está **por debajo del 0,50 vigente**: es la
+  primera vez que se barre por debajo. El segmentador no se enciende solo en ninguna negativa (ver arriba), así
+  que bajar su umbral casi no cuesta falsos de S1.
+- El criterio S1 ≤ 5 y la lectura de U3 son mi interpretación (ver más arriba). Los umbrales se eligieron sobre
+  las mismas negativas con las que se cuentan: es una cota optimista de lo que daría con fotos nuevas.
+
+#### Sensibilidad del área mínima de la patente (det ∨ seg, umbrales actuales; rechazadas de 137 / 151)
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 1 | 3 | 3 | 4 |
+| 5 % (servicio) | P2 | 96 | 128 | 33 | 85 |
+| 1 % | P1 | 1 | 1 | 2 | 4 |
+| 1 % | P2 | 96 | 13 | 30 | 85 |
+| 0 % | P1 | 1 | 1 | 2 | 4 |
+| 0 % | P2 | 96 | 12 | 30 | 85 |
+
+Es un diagnóstico para explicar por qué P2 rechaza el 25 %; no se propone cambiar `PRESENCE_MIN_AREA`.
+
+### Detector v2 contra v1
+
+El detector v2 (`rfdetr_openimages_v2`, ver [tools/training/detector_v2/README.md](../training/detector_v2/README.md)) se
+compara con v1 sobre **la prueba de v1**: las 204 fotos del split `test` de Open Images que ninguno de los dos vio. Mismas
+condiciones que arriba: el adaptador real, los umbrales del servicio (autos 0,40, patentes 0,20), cada foto reducida a
+1 024 px, IoU 0,5. Las cuatro corridas (v1 y v2, con y sin `PLATE_TILING`) se hicieron seguidas, una por vez, con la PC
+sin otras cargas.
+
+```powershell
+$env:TRAIN_DATA_DIR = "D:\vv-eval\cardd"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\cmp-v2-sin"
+uv run --frozen --extra dev --extra tools python tools/eval/detector.py --split test --model rfdetr_openimages_v2 --dump-fp
+# con mosaico: --plate-tiling (EVAL_OUT distinto). Para v1: --model rfdetr_openimages
+```
+
+**Cómo leerla.** La verdad de la prueba solo anota `Car`, no `Truck`, `Bus` ni `Van`: v2 detecta esas clases como `car`
+(son presencia), así que sus camiones, vans y colectivos cuentan como falsos positivos de la precisión **oficial**. Por eso
+se da también la precisión corregida (abajo). v2 no tiene rueda ni rostro: solo se comparan autos y patentes.
+
+| Métrica | v1, sin mosaico | v2, sin mosaico | v1, con mosaico | v2, con mosaico |
+|---|---|---|---|---|
+| **Auto**: recall | 0,898 | 0,881 | 0,898 | 0,881 |
+| Auto: precisión oficial | 0,747 | 0,754 | 0,747 | 0,754 |
+| Auto: AP50 | 0,897 | 0,873 | 0,897 | 0,873 |
+| Auto: recall en chicos (< 32 px) | 0,333 (6 cajas) | 0,167 | 0,333 | 0,167 |
+| **Patente**: recall | 0,830 | 0,807 | 0,904 | 0,874 |
+| Patente: precisión oficial | 0,737 | 0,727 | 0,632 | 0,634 |
+| Patente: AP50 | 0,787 | 0,809 | 0,831 | 0,835 |
+| Patente: recall en chicas | 0,608 | 0,627 | 0,765 | 0,745 |
+| **Auto + patente (micro)**: recall | 0,873 | 0,855 | 0,900 | 0,879 |
+| Auto + patente: precisión oficial | 0,744 | 0,745 | 0,702 | 0,707 |
+| Auto + patente: AP50 | 0,851 | 0,832 | 0,866 | 0,852 |
+| Falsos positivos (auto / patente) | 74 / 40 | 70 / 41 | 74 / 71 | 70 / 68 |
+| **Latencia por foto** (media · mediana · p95, ms) | 324 · 315 · 394 | 334 · 317 · 430 | 1 569 · 1 616 · 1 800 | 1 620 · 1 675 · 1 864 |
+
+(Cajas reales: 244 autos y 135 patentes; el auto no cambia con el mosaico, que solo afecta a las patentes. Latencia en
+CPU, ONNX Runtime, AMD Ryzen 5 3600; sin contar decodificación ni reducción.)
+
+**Precisión corregida, por revisión manual de un solo revisor** (`fp_audit.py`, junto a la oficial, que no se
+reemplaza). La corregida de v1 es la ya revisada. Para v2 **reutilicé la revisión de v1** en cada falso positivo que
+coincide (misma foto, misma clase, IoU ≥ 0,5: 73 de 111 sin mosaico y 88 de 138 con mosaico) y **revisé a mano los
+nuevos** (38 y 50, con las cajas en hojas de contacto). La corregida cuenta como acierto un auto o patente real que el
+dataset no anotó; para v2 se da además una columna donde los camiones, vans y colectivos (`otro_vehiculo`) cuentan como
+acierto, porque en v2 son presencia de vehículo.
+
+| Auto + patente (micro) | Oficial | Corregida | Corregida con los dudosos | Corregida con otros vehículos como acierto |
+|---|---|---|---|---|
+| v1, sin mosaico | 0,744 | 0,888 | 0,924 | 0,910 |
+| v2, sin mosaico | 0,745 | 0,874 | 0,906 | **0,906** |
+| v1, con mosaico | 0,702 | 0,844 | 0,889 | 0,864 |
+| v2, con mosaico | 0,707 | 0,843 | 0,900 | **0,873** |
+
+Por clase, sin mosaico: **auto** corregida 0,904 (v1) y 0,902 (v2); con otros vehículos como acierto 0,939 y **0,951**.
+**Patente** corregida 0,855 (v1) y 0,820 (v2).
+
+Límites: es **un solo revisor**, y los veredictos de v2 no son idénticos en criterio a los de v1: sobre los mismos tipos
+de caja marqué más "dudosos" (9 contra 5 patentes sin mosaico; 22 contra 11 con mosaico), así que la cifra "con dudosos"
+es la más comparable. Los falsos positivos que heredé de v1 conservan su veredicto aunque v2 los hubiera visto distinto.
+Las diferencias de unas décimas entre v1 y v2 están dentro de lo que mueve esa revisión.
+
+**Lectura.** v2 es **un poco peor que v1 en recall** (auto 0,881 contra 0,898, patente 0,807 contra 0,830; micro 0,855
+contra 0,873) y en AP50 de auto (0,873 contra 0,897), y **un poco mejor en AP50 de patente** (0,809 contra 0,787). Su
+precisión oficial es igual (0,745 contra 0,744) y con camiones, vans y colectivos como aciertos la corregida de auto sube
+(0,951 contra 0,939). El recall de autos chicos baja de 0,33 a 0,17, pero son 6 cajas. La latencia es la misma
+(334 contra 324 ms; 1 620 contra 1 569 ms con mosaico). Estas diferencias son chicas para 204 fotos y 379 cajas; no
+alcanzan para decir que uno detecta mejor que el otro en esta prueba. Lo que v2 agrega no se ve acá: autos que no son
+`Car` (camiones, vans, colectivos) y las confusoras. Eso se mide en R1, abajo.
+
+### S3: umbral de redacción de patentes en 0,10 (16/11/2026)
+
+`PLATE_REDACT_MIN_CONF` pasa de 0,20 a **0,10** (`config.py` y `.env.example`). Misma prueba que arriba (las 204 fotos de
+Open Images, con mosaico de patentes, IoU 0,5, cada foto reducida a 1 024 px) y los mismos adaptadores; el recall y los
+falsos positivos son los de `detector.py --plate-tiling --plate-min-conf <umbral>`. **Cajas extra** = cajas de patente que
+se tapan de más por foto, en promedio, respecto del umbral de 0,20 (cajas con confianza ≥ umbral, sobre 204 fotos).
+
+| Umbral | v2: recall | v2: cajas tapadas por foto | v2: **cajas extra** | v2: falsos positivos por foto | v1: recall | v1: **cajas extra** |
+|---|---|---|---|---|---|---|
+| 0,20 (el anterior) | 0,874 | 0,912 | 0 | 0,333 | **0,904** | 0 |
+| 0,15 | 0,889 | 1,176 | +0,264 | 0,588 | 0,919 | +0,196 |
+| **0,10 (el nuevo)** | **0,911** (**91,1 %**) | 1,647 | **+0,735** | 1,044 | 0,919 | +0,691 |
+
+- **Contra v1** (0,904 con 0,20): v2 con 0,10 llega a **0,911**, 0,7 puntos más que v1 con 0,20, a cambio de **~0,7 cajas más
+  tapadas por foto** (1,65 cajas de patente por foto contra 0,95 de v1 con 0,20). v1 con 0,10 sube a 0,919 y tapa 1,64 por foto.
+- Entre 0,15 y 0,10 no se midió. Sin mosaico, v2: 0,807 / 0,830 / 0,859.
+- Los falsos positivos que se agregan se tapan (relleno opaco): cuestan en pantalla, no en privacidad. Las tablas de las
+  secciones anteriores siguen con 0,20 (el umbral de entonces).
+
+**¿Tapa la redacción la patente denunciada?** La excepción tapa todo salvo la caja que el OCR lee igual que la patente
+reportada (`MATCH` o `FUZZY`). Para ver el riesgo de bajar el umbral se corrió el plan de redacción **real** del caso de uso
+sobre las 204 fotos, como si cada una fuera la foto de PATENTE: la patente denunciada es la que lee el OCR en la caja de mayor
+confianza (R3, lectura segura: confianza ≥ `OCR_MIN_CONF`), y se mide qué fracción de esa caja queda dentro de alguna caja a tapar.
+Hay lectura segura en 62 fotos (0,20) y 66 (0,10). Solo las que tienen un formato en alcance (ABC123 o AB123CD) pueden
+exceptuarse: las demás (patentes de otros países, 38 y 40 fotos) son ilegibles para `plate_check`, no se exceptúan y se tapan
+con cualquier umbral, que es el comportamiento seguro, no un efecto del umbral.
+
+| Umbral | Fotos con formato en alcance | Denunciada exceptuada (no se tapa) | **La redacción la tapa (algo)** | La tapa por completo |
+|---|---|---|---|---|
+| 0,20 | 24 | 23 | **1 de 24** | 1 |
+| 0,10 | 26 | 25 | **2 de 26** | 1 |
+
+- **Siempre la misma foto, con ambos umbrales** (tapada al 100 %): la caja del mosaico difiere 1-2 px de la del pase simple y
+  el OCR la lee con confianza 0,57 (< `OCR_MIN_CONF` = 0,78), así que queda ilegible y no se exceptúa.
+- **Nueva con 0,10** (tapada al 28 %): una caja de confianza 0,11 sobre un fragmento de la patente; el OCR no la lee y se tapa. La
+  caja de la patente completa sí se exceptúa (lectura `MATCH`).
+- Con 0,10 se tapan en promedio 4,26 cajas por foto (con 0,20, 3,24), contando rostros.
+
+Es una muestra chica (26 fotos con formato en alcance, de patentes de terceros y no del encuadre de la app) y un solo
+conjunto: no es una tasa. Para cerrar la excepción también cuando el OCR no lee una caja que cae dentro de la patente
+denunciada, habría que exceptuar las cajas contenidas en una exceptuada; no se hizo. **Se hizo después**
+(`EXEMPT_CONTAINED` = 80 %, ver "¿Tapa la redacción la patente denunciada?" más arriba) y se mide sobre el set etiquetado
+con `redaction_set.py`.
+
+**OCR por defecto.** `MODEL_OCR=parseq` también es ahora el default de `config.py` y `.env.example` (antes `null`, que no era
+una decisión sino el valor inicial del registro de modelos: no hay nada en el historial que lo justifique por licencia). Sin OCR,
+R3 no compara y la patente reportada no se exceptúa. Los pesos de PARSeq son Apache-2.0 según el autor (ficha
+`baudm/parseq-small` en Hugging Face; verificados por SHA-256, ver [THIRD_PARTY.md](../../THIRD_PARTY.md)). Con el OCR por
+defecto, `MODELS_DIR` es obligatorio para arrancar sin definir `MODEL_OCR=null`.
+
+### R1 con el detector v2: la regla de patente, v1 y v2 lado a lado
+
+Misma medición que la sección anterior (`presence.py`, `plate_zoom.py` y `plate_rule.py`, una por vez), repetida con
+`--detector rfdetr_openimages_v2`. En v2 **"auto" es cualquier clase de presencia** (`car`, `truck`, `van`, `bus`: el
+adaptador devuelve una caja `car`); v2 no tiene rueda, así que R1 nunca la usó. Las señales de v2 están en
+`D:\vv-eval\out\presence-v2` y `zoom-v2`, el análisis en `r1-regla-v2`.
+
+```powershell
+$env:EVAL_OUT = "D:\vv-eval\out\presence-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/presence.py --detector rfdetr_openimages_v2 --fresh-negatives D:\vv-eval\presence-negativas-nuevas --fresh-limit 1200   # ~1 h
+$env:EVAL_OUT = "D:\vv-eval\out\zoom-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_zoom.py --detector rfdetr_openimages_v2
+$env:EVAL_OUT = "D:\vv-eval\out\r1-regla-v2"
+uv run --frozen --extra dev --extra tools python tools/eval/plate_rule.py --report D:\vv-eval\out\presence-v2\presence_report.json --zoom-report D:\vv-eval\out\zoom-v2\plate_zoom_report.json --fresh-negatives D:\vv-eval\presence-negativas-nuevas --exclude-negatives D:\vv-eval\out\neg-v2\vehiculos_reales.json
+```
+
+#### Las "negativas" de v2 no son todas sin vehículo (revisión a mano)
+
+Las negativas (489 vistas y 1 200 nuevas) son fotos de Open Images **sin `Car`, `Wheel` ni patente anotados**. No excluyen
+`Truck`, `Bus` ni `Van`, que para v2 **sí son presencia**. Con los umbrales actuales v2 acepta 16 de las 1 200 (v1, 15) y 3
+de las 489 (v1, 0). Revisé a mano las **22 fotos** donde v2 ve un auto con confianza ≥ 0,30 (área ≥ 5 %), con la misma
+regla que usé para los falsos positivos (un solo revisor):
+
+| Qué hay en la foto | Fotos |
+|---|---|
+| **Un vehículo real** (camión, colectivo, van, ambulancia, auto parcial o al fondo) | 11 |
+| Dudoso (una mujer dentro de un auto, gente arriba de un colectivo de dos pisos, un auto de carrera, un quitanieves con un auto cubierto de nieve al fondo) | 4 |
+| Error de v2 (un vehículo de nieve, un blindado, un autoelevador, una topadora, un flipper, un avión, una escalera caracol) | 7 |
+
+Las 11 con un vehículo real **dejan de ser "sin auto"**: v2 hace bien en aceptarlas. Se excluyen de las columnas "sin las
+excluidas" (que para v1 ya excluían las 3 con un auto real al fondo, dentro de estas 11) y de `cumple_s1_sin_fondo`. Las 4
+dudosas y las 7 errores **se siguen contando** como aceptadas. **Esta exclusión es una decisión mía sobre 11 fotos, de un
+solo revisor**, y favorece a v2: sin ella, v2 no cumple S1 con ninguna configuración razonable (abajo, "S1 literal").
+La lista (`vehiculos_reales.json`) queda fuera del repo con las fotos. Se aplica igual a v1, que acepta solo 4 de
+esas 11: v1 hoy **rechaza** como `NO_VEHICLE` la mayoría de los camiones, vans y colectivos reales.
+
+#### Rechazo de válidas por tipo y zoom (umbrales actuales 0,40 / 0,40 / 0,50; cota del 95 % entre paréntesis)
+
+**v1** (`rfdetr_openimages`):
+
+| Decisor | Regla | GENERAL (417) | PLATE 50 % (137) | PLATE 25 % (151) | PLATE 40 % (151) | PLATE 60 % (151) | DETAIL (374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 1 (≤ 3,4 %) | 8 (≤ 9,4 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 109 (≤ 85,1 %) | 129 (≤ 89,9 %) | 47 (≤ 37,9 %) | 99 (≤ 72,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 2 (≤ 1,5 %) | 1 (≤ 3,4 %) | 3 (≤ 5,1 %) | 3 (≤ 5,1 %) | 4 (≤ 6,0 %) | 21 (≤ 8,0 %) |
+| det ∨ seg | P2 | 2 (≤ 1,5 %) | 96 (≤ 76,5 %) | 128 (≤ 89,4 %) | 33 (≤ 28,1 %) | 85 (≤ 63,1 %) | 21 (≤ 8,0 %) |
+
+**v2** (`rfdetr_openimages_v2`):
+
+| Decisor | Regla | GENERAL (417) | PLATE 50 % (137) | PLATE 25 % (151) | PLATE 40 % (151) | PLATE 60 % (151) | DETAIL (374) |
+|---|---|---|---|---|---|---|---|
+| det | P1 | 5 (≤ 2,5 %) | 9 (≤ 11,2 %) | 4 (≤ 6,0 %) | 7 (≤ 8,5 %) | 13 (≤ 13,3 %) | 30 (≤ 10,7 %) |
+| det | P2 | 5 (≤ 2,5 %) | 91 (≤ 73,1 %) | 129 (≤ 89,9 %) | 48 (≤ 38,6 %) | 88 (≤ 65,0 %) | 30 (≤ 10,7 %) |
+| det ∨ seg | P1 | 3 (≤ 1,8 %) | 9 (≤ 11,2 %) | 4 (≤ 6,0 %) | 6 (≤ 7,7 %) | 12 (≤ 12,6 %) | 22 (≤ 8,3 %) |
+| det ∨ seg | P2 | 3 (≤ 1,8 %) | 85 (≤ 69,0 %) | 129 (≤ 89,9 %) | 40 (≤ 33,1 %) | 81 (≤ 60,6 %) | 22 (≤ 8,3 %) |
+
+P2 sigue rechazando casi todos los primeros planos con v2, por las mismas razones que con v1 (no hay auto en una foto que
+es la patente, y la patente al 25 % no llega al 5 % del área). **v2 con P1 rechaza más primeros planos de patente
+ajustados que v1** (9 contra 1 de 137 al 50 %; 12 contra 4 de 151 al 60 %): le cuesta más encontrar una patente cuando casi
+llena la foto (no investigué la causa). En GENERAL rechaza 3 contra 2 de 417 y en DETAIL
+22 contra 21 de 374: iguales.
+
+#### Fotos sin auto aceptadas y U3 por alerta (mismos umbrales)
+
+**v1:**
+
+| Decisor | Regla | nuevas G / P / D (de 1 200) | sin las excluidas | vistas (de 489) | U3 por alerta, PLATE 25 / 40 / 60 % |
+|---|---|---|---|---|---|
+| det | P1 | 15 / 20 / 15 | 11 / 16 / 11 | 0 / 0 / 0 | 13,9 · 10,9 · 11,5 % |
+| det | P2 | 15 / 0 / 15 | 11 / 0 / 11 | 0 / 0 / 0 | 86,8 · 37,4 · 68,7 % |
+| det ∨ seg | P1 | 15 / 20 / 15 | 11 / 16 / 11 | 0 / 0 / 0 | 7,9 · 7,9 · 8,6 % |
+| det ∨ seg | P2 | 15 / 0 / 15 | 11 / 0 / 11 | 0 / 0 / 0 | 85,7 · 26,6 · 58,9 % |
+
+**v2:**
+
+| Decisor | Regla | nuevas G / P / D (de 1 200) | sin las excluidas | vistas (de 489) | U3 por alerta, PLATE 25 / 40 / 60 % |
+|---|---|---|---|---|---|
+| det | P1 | 16 / 16 / 16 | 7 / 7 / 7 | 3 / 3 / 3 | 11,5 · 13,3 · 17,0 % |
+| det | P2 | 16 / 0 / 16 | 7 / 0 / 7 | 3 / 0 / 3 | 86,8 · 38,0 · 62,1 % |
+| det ∨ seg | P1 | 16 / 16 / 16 | 7 / 7 / 7 | 3 / 3 / 3 | 9,0 · 10,3 · 14,0 % |
+| det ∨ seg | P2 | 16 / 0 / 16 | 7 / 0 / 7 | 3 / 0 / 3 | 86,4 · 31,3 · 56,7 % |
+
+(Columna "sin las excluidas": sin las 11 fotos con un vehículo real. U3 por alerta: GENERAL + PLATE + un DETAIL, con
+independencia entre fotos; es una estimación, ver el supuesto arriba.)
+
+#### Configuraciones que cumplen S1 (≤ 5 de 1 200 sin las excluidas) y su costo
+
+La mejor de cada decisor y variante: la que minimiza el U3 medio de los tres zooms (las demás están en `plate_rule.json`).
+Columnas de rechazo: rechazadas de 417 / 137 / 151 / 151 / 151 / 374.
+
+**v1:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,50 / 0,75 / – | 12 | 9 | 15 | 10 | 18 | 43 | 4 / 5 / 4 | 22,6 · 19,7 · 24,3 % |
+| det | P2 | 0,50 / 0,30 / – | 12 | 114 | 128 | 60 | 109 | 43 | 4 / 0 / 4 | 86,9 · 48,2 · 76,1 % |
+| det ∨ seg | P1 | 0,55 / 0,65 / 0,30 | 4 | 5 | 4 | 3 | 8 | 27 | 3 / 5 / 3 | 10,5 · 9,9 · 13,0 % |
+| det ∨ seg | P2 | 0,50 / 0,30 / 0,30 | 4 | 80 | 127 | 27 | 72 | 24 | 4 / 0 / 4 | 85,3 · 23,9 · 51,5 % |
+
+**v2:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,45 / 0,30 / – | 6 | 4 | 4 | 5 | 9 | 31 | 5 / 5 / 5 | 12,0 · 12,6 · 15,0 % |
+| det | P2 | 0,45 / 0,30 / – | 6 | 94 | 130 | 48 | 87 | 31 | 5 / 0 / 5 | 87,4 · 38,3 · 61,7 % |
+| det ∨ seg | P1 | 0,45 / 0,30 / 0,30 | 1 | 4 | 4 | 3 | 8 | 19 | 5 / 5 / 5 | 7,8 · 7,2 · 10,3 % |
+| det ∨ seg | P2 | 0,45 / 0,30 / 0,30 | 1 | 73 | 129 | 36 | 68 | 19 | 5 / 0 / 5 | 86,2 · 27,9 · 47,9 % |
+
+- **La mejor configuración de cada detector, det ∨ seg con P1, da un U3 por alerta de 10,5 · 9,9 · 13,0 % con v1 y de
+  7,8 · 7,2 · 10,3 % con v2** (zoom 25 · 40 · 60 %). Con v2 alcanza con `car` ≥ 0,45, `plate` ≥ 0,30 y `seg` ≥ 0,30 (v1
+  pide 0,55 / 0,65 / 0,30). Es una mejora de ~3 puntos que sale de rechazar menos GENERAL (1 contra 4 de 417) y menos
+  DETAIL (19 contra 27 de 374), y se apoya en la exclusión de 11 fotos y en umbrales elegidos sobre las mismas negativas
+  con las que se miden: es una cota optimista, no una promesa.
+- **Sin segmentador (solo det)**: v2 da 12,0 · 12,6 · 15,0 % y v1 22,6 · 19,7 · 24,3 %. Ahí la diferencia es más grande:
+  v2 rechaza 6 contra 12 de GENERAL y 31 contra 43 de DETAIL.
+- **P2 no cumple en la práctica con ningún detector**: cumple S1 (0 negativas aceptadas en PLATE) pero rechaza 85 a 87 % de
+  las alertas con una PLATE al 25 %, 24 a 48 % al 40 % y 48 a 76 % al 60 %.
+- El umbral de segmentador de 0,30 está por debajo del 0,50 vigente (ver la sección anterior).
+
+**S1 literal (≤ 5 de 1 200 contando todas, también las de vehículo real).** Para ver cuánto depende v2 de la revisión:
+
+**v1:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,55 / 0,80 / – | 19 | 14 | 17 | 19 | 27 | 53 | 5 / 5 / 5 | 27,3 · 28,4 · 32,7 % |
+| det | P2 | 0,55 / 0,30 / – | 19 | 119 | 130 | 65 | 116 | 53 | 5 / 0 / 5 | 88,6 · 53,3 · 81,0 % |
+| det ∨ seg | P1 | 0,55 / 0,80 / 0,30 | 4 | 10 | 6 | 6 | 18 | 27 | 5 / 5 / 5 | 11,8 · 11,8 · 19,1 % |
+| det ∨ seg | P2 | 0,55 / 0,30 / 0,30 | 4 | 81 | 127 | 29 | 74 | 27 | 5 / 0 / 5 | 85,4 · 25,8 · 53,1 % |
+
+**v2:**
+
+| Decisor | Regla | Umbrales car / plate / seg | GENERAL | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % | DETAIL | nuevas G/P/D | U3 por alerta 25 / 40 / 60 % |
+|---|---|---|---|---|---|---|---|---|---|---|
+| det | P1 | 0,90 / 0,30 / – | 398 | 5 | 126 | 19 | 14 | 368 | 2 / 2 / 2 | 100,0 · 99,9 · 99,9 % |
+| det | P2 | 0,90 / 0,30 / – | 398 | 137 | 151 | 151 | 151 | 368 | 2 / 0 / 2 | 100,0 · 100,0 · 100,0 % |
+| det ∨ seg | P1 | 0,90 / 0,30 / 0,30 | 11 | 4 | 11 | 3 | 9 | 47 | 4 / 4 / 4 | 21,1 · 16,6 · 20,0 % |
+| det ∨ seg | P2 | 0,90 / 0,30 / 0,30 | 11 | 83 | 130 | 42 | 76 | 47 | 4 / 0 / 4 | 88,2 · 38,6 · 57,7 % |
+
+Con v2 y sin la exclusión, S1 solo se cumple con `car` ≥ 0,90: ahí rechaza 11 de 417 GENERAL y 47 de 374 DETAIL con
+det ∨ seg (U3 por alerta de 16,6 a 21,1 %), y con det solo rechaza casi todo. Esos altos umbrales existen porque
+camiones y colectivos reales salen con confianza 0,97: no son errores del detector.
+
+#### Sensibilidad del área mínima de la patente (det ∨ seg, umbrales actuales; rechazadas de 137 / 151)
+
+**v1:**
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 1 | 3 | 3 | 4 |
+| 5 % (servicio) | P2 | 96 | 128 | 33 | 85 |
+| 1 % | P1 | 1 | 1 | 2 | 4 |
+| 1 % | P2 | 96 | 13 | 30 | 85 |
+| 0 % | P1 | 1 | 1 | 2 | 4 |
+| 0 % | P2 | 96 | 12 | 30 | 85 |
+
+**v2:**
+
+| Área mínima de la patente | Regla | PLATE 50 % | PLATE 25 % | PLATE 40 % | PLATE 60 % |
+|---|---|---|---|---|---|
+| 5 % (servicio) | P1 | 9 | 4 | 6 | 12 |
+| 5 % (servicio) | P2 | 85 | 129 | 40 | 81 |
+| 1 % | P1 | 9 | 3 | 5 | 12 |
+| 1 % | P2 | 85 | 22 | 34 | 81 |
+| 0 % | P1 | 9 | 3 | 5 | 12 |
+| 0 % | P2 | 85 | 21 | 34 | 81 |
+
+Es un diagnóstico; no se propone cambiar `PRESENCE_MIN_AREA`.
+
+#### Lo que esta medición no mide
+
+- Fotos válidas de **camiones, vans y colectivos**: no hay un set de reportes válidos de esos vehículos. v1 los rechaza como
+  `NO_VEHICLE` (las negativas que acepta v2 lo muestran) y v2 los acepta, pero cuánto cambia el rechazo de reportes
+  válidos no está medido.
+- El costo de latencia por alerta: v1 y v2 son iguales (ver "Detector v2 contra v1"). Cualquier ganancia de v2 en el rechazo
+  viene del modelo, no de la regla.
+
+### Precisión corregida del detector, por revisión manual de un solo revisor (`fp_audit.py`)
+
+Open Images no anota todo lo que se ve, así que parte de los "falsos positivos" son autos o patentes reales sin anotar.
+`detector.py --dump-fp` escribe cada falso positivo (de auto y de patente, con los umbrales del servicio) y `fp_audit.py`
+arma hojas de contacto (fuera del repo) con la caja en rojo y las reales en verde. La precisión corregida es **una corrección por
+revisión manual de un solo revisor**: un solo revisor miró los 145 distintos (114 sin mosaico, más 33 que solo aparecen
+con mosaico; el resto se hereda por IoU ≥ 0,5), sin segunda opinión. El veredicto es subjetivo y por eso se da con y sin
+los dudosos. **La precisión oficial no se reemplaza**: la corregida va aparte, al lado de la oficial.
+
+```powershell
+uv run --frozen --extra dev --extra tools python tools/eval/detector.py --split test --dump-fp
+uv run --frozen --extra dev --extra tools python tools/eval/fp_audit.py sheets --dump <falsos_positivos.json> --out <carpeta>
+# se mira cada hoja y se anota veredictos.json ({categoría: [números de panel]}) en <carpeta>
+uv run --frozen --extra dev --extra tools python tools/eval/fp_audit.py corrected --report <detector_report.json> --audit <carpeta>
+```
+
+| Clase | Falsos positivos | Auto o patente real sin anotar | Otro vehículo (camión, pickup, furgoneta) | Duplicada o mal ubicada | No es | Dudoso | Precisión oficial | **Corregida** (con dudosos) |
+|---|---|---|---|---|---|---|---|---|
+| Auto | 74 | 46 | 10 | 5 | 2 | 11 | 0,747 | **0,904** (0,942) |
+| Patente, sin mosaico | 40 | 18 | 0 | 5 | 12 | 5 | 0,737 | **0,855** (0,888) |
+| Patente, con mosaico | 71 | 23 | 0 | 10 | 27 | 11 | 0,632 | **0,751** (0,808) |
+| Auto + patente (micro), sin mosaico | 114 | 64 | 10 | 10 | 14 | 16 | 0,744 | **0,888** (0,924) |
+| Auto + patente (micro), con mosaico | 145 | 69 | 10 | 15 | 29 | 22 | 0,702 | **0,844** (0,889) |
+
+La corregida cuenta como acierto solo lo de la columna "real sin anotar". Los "otros vehículos" no cuentan: Open Images los
+anota con otra clase (`Truck`, `Van`), aunque para el servicio una pickup o una furgoneta sean un vehículo. Los falsos
+positivos de patente son sobre todo textos o piezas con forma de patente (marcas, insignias, carteles, faros): 12 de 40
+sin mosaico y 27 de 71 con mosaico, así que el mosaico agrega ruido real, no solo patentes sin anotar. Los falsos
+positivos de auto que no lo son casi no existen (2 de 74: un scooter y un cartel con la foto de un auto).
+
+## Re-ID con 3DRealCar: general contra patente (`reid_parciales.py`)
+
+> **Medición vigente de re-ID (15/11/2026).** La sección siguiente ("Re-ID con 3DRealCar") es la de la primera versión (411 autos,
+> detector v1, pares de auto entero) y queda como historia. **`dinov2_vits14_reid_v2` está activado** (`MODEL_EMBEDDER` en `.env.example`) con
+> `REID_T` = **0,2565** (el mayor umbral con la cota de U1 <= 1 % en validación). La opción conservadora, **0,0638**
+> (el menor con S4 >= 70 %), queda documentada abajo.
+
+**Alcance de R2 (decisión del 15/11/2026): R2 compara solo la foto GENERAL contra la de PLATE.** La foto de detalle no se calibra, no se mide y
+no se simula (se descartó su simulación, que ya se había ajustado). Con US-15 (15/11/2026) el contrato la eliminó: las alertas traen
+exactamente dos fotos, GENERAL y PLATE, y la validación de roles de foto del servicio solo acepta esas dos.
+
+**Qué compara R2 en el servicio.** El recorte de la **caja del vehículo dominante del detector** (v2, auto 0,35), **sin máscaras del segmentador**: es
+el recorte con el que se calibró. El segmentador (`rfdetr_seg_coco`) sigue decidiendo la presencia (R1) pero ya no interviene en R2.
+
+Esta medición usa el dataset completo de 3DRealCar (**2 009 autos usables**: 1 321 de luz estándar, 424 reflectivos y 264 oscuros). Los pares son:
+
+- **general_patente** (el que decide R2): una vista entera contra un recorte **simulado** de trompa o cola con la patente al 8-15 % del ancho,
+  de vistas separadas por 30° o más. Se simula a partir de las vistas del auto entero con la ventana de patente de los conjuntos de R1
+  (`capture_sets.plate_window`), eligiendo las vistas frontales y traseras por la pose; cómo se arman, paso a paso, está en
+  [tools/training/reid](../training/reid/README.md#pares-parciales);
+- **entero** (solo referencia, no entra al umbral): dos vistas del auto entero.
+
+```powershell
+$env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-patente"
+uv run --frozen --extra dev --extra tools python tools/eval/reid_parciales.py --models dinov2_vits14 dinov2_vits14_reid_v2
+```
+
+### Datos y partición
+
+La descarga terminó sin cortes de cuota: los 10 zips se leyeron desde la copia propia de Drive, con verificación de CRC y de la
+cantidad de autos de cada zip. (3DRealCar repite 17 autos entre `200-400.zip` y `1200-1400.zip`: `fetch.py verify` los acepta si el índice
+los tiene en otro zip con las mismas vistas, y se bajan una sola vez.) La partición **conserva la asignación congelada** (los 411 autos
+de antes no se movieron, y los 59 de prueba siguen siendo de prueba) y sortea los autos nuevos estratificados por luz, tipo y color:
+
+| Partición | Autos | Estándar | Reflectiva | Oscura | Recortes enteros |
+|---|---|---|---|---|---|
+| Entrenamiento | 1 401 (69,7 %) | 914 | 300 | 187 | 16 705 |
+| Validación | 305 (15,2 %) | 204 | 62 | 39 | 3 631 |
+| Prueba | 303 (15,1 %) | 203 | 62 | 38 | 3 614 |
+| **Total** | **2 009** | **1 321** | **424** | **264** | **23 950** |
+
+De 24 108 fotos, el detector v2 no encontró un vehículo en 158 (0,7 %). **Recortes de patente simulados** (validación y prueba, 608 autos): 175 en
+128 autos, **93 en validación (estándar 72, reflectiva 15, oscura 6) y 82 en prueba (63, 15 y 4)**. Solo 284 de los 608 autos tuvieron un ajuste claro del
+aspecto contra el azimut (amplitud >= 20 % y R² >= 0,5), y de sus 1 373 vistas frontales o traseras el detector vio una patente utilizable en 475 (35 %);
+121 de esas no admitieron la ventana de patente. **Hay pocos pares de patente: 871 del mismo auto en validación y 778 en prueba** (37 en luz oscura).
+
+### Entrenamiento
+
+DINOv2 ViT-S/14 ajustado con CosFace sobre los **1 401 autos de entrenamiento** (16 705 recortes del detector v2), con el procedimiento de
+la primera versión (FP32, lote 16 con acumulación de 4, lr 2e-5, parada temprana con paciencia 3). Sobre validación (pares de autos
+enteros, S4 con U1 <= 1 %): sin ajustar 12,3 %; época 1: 76,1 %; 2: 80,1 %; 3: 81,5 %; 4: 83,7 %; 5: 84,5 %; **6: 86,0 % (la mejor)**; 7: 85,5 %;
+8: 84,8 %; 9: 83,8 % → parada temprana. El ONNX (`dinov2_vits14_reid_v2`) reproduce a PyTorch: diferencia máxima de 6,7e-7 por componente
+y coseno mínimo de 0,9999999; SHA-256 `39c304b2...6887d` en `models/manifest.json`. (La primera corrida se cortó en la época 2 por
+falta de memoria de la máquina; `train.py` ahora guarda `last.pt` por época y sigue con `--resume`.)
+
+### Umbral
+
+**Un único umbral, calibrado en validación con los 871 pares general-patente del mismo auto y 100 000 de autos distintos.** Hay dos candidatos, y los
+dos están en `.env.example`:
+
+- **0,2565, el activo (decisión del 15/11/2026): el mayor umbral con la cota del 95 % de U1 de validación en 1 % o menos** (el umbral de U1 del proyecto). En
+  validación: U1 3 de 871 (0,34 %, cota 0,89 %), S4 98,1 % y 88,8 % en difíciles.
+- **0,0638, la opción conservadora: el menor umbral con S4 >= 70 %** en validación (S4 y U1 suben juntos con el umbral, así que es el de menor U1), con la cota
+  de U1 de validación en 2 % o menos. En validación: U1 0 de 871 (cota 0,34 %), S4 70,0 % y 38,4 % en difíciles.
+
+Los pares general-patente se separan tanto (AUC 0,999) que el menor umbral con S4 >= 70 % deja mucho S4 sin usar. **R2 solo rechaza con certeza; ante la
+duda, GREEN.** Como hay una sola comparación por alerta (GENERAL contra PLATE), **U1 por par es también U1 por alerta**.
+
+### Resultados en prueba (cotas del 95 % de una cola)
+
+Prueba: 778 pares del mismo auto general-patente, 100 000 de autos distintos y 3 736 difíciles (misma marca y color). Los dos umbrales salen de validación.
+
+| | AUC | **U1** (cota) | **S4** | S4 en difíciles |
+|---|---|---|---|---|
+| **Ajustado con `REID_T` = 0,2565 (el activo)** | **0,9991** | **0,39 %** (3 de 778; cota **≤ 0,99 %**) | **98,0 %** | **90,5 %** |
+| Ajustado con 0,0638 (la opción conservadora) | 0,9991 | 0,00 % (0 de 778; cota ≤ 0,39 %) | 69,6 % | 46,2 % |
+| DINOv2 sin ajustar (umbral para S4 >= 70 %: 0,393) | 0,646 | 54,8 % (cota 57,7 %) | 67,2 % | 58,5 % |
+
+- **Con 0,2565, U1 cumple el 1 % del proyecto** (3 de 778, cota 0,99 %; por alerta es lo mismo), **y S4 cumple el 70 %** (98,0 %, y 90,5 % en los
+  pares difíciles). La cota de U1 queda a 0,01 puntos del 1 %: con tan pocos pares (778) no hay margen.
+- **Con 0,0638**, U1 es 0 de 778 (cota 0,39 %) y S4 queda "válido con tolerancia": 69,6 % en prueba contra el 70 % (70,0 % en validación) y 46,2 % en difíciles.
+- **Por qué el DINOv2 sin ajustar no sirve:** con el mismo criterio (S4 >= 70 %) marca como distinto al 55 % de los pares del mismo auto; con el umbral que
+  deja U1 en 1 % (0,064), su S4 es de 12,8 % en validación.
+- Referencia, no es una comparación de R2: con 0,2565 los pares de auto entero (dos vistas del auto entero) darían U1 3,05 % (cota 3,28 %) y S4 98,0 %.
+
+**Por condición de luz** (ajustado, prueba):
+
+| Luz | Pares del mismo auto | U1 con 0,2565 (cota) | S4 con 0,2565 | S4 en difíciles con 0,2565 | S4 con 0,0638 |
+|---|---|---|---|---|---|
+| Estándar | 601 | 0,33 % (2 de 601; ≤ 1,04 %) | 97,7 % | 91,6 % (n = 2 285) | 68,5 % |
+| Reflectiva | 140 | 0,71 % (1 de 140; ≤ 3,34 %) | 97,1 % | 78,6 % (n = 168) | 64,6 % |
+| Oscura | 37 | 0,00 % (≤ 8,11 %) | 95,7 % | 33,3 % (n = 12) | 54,6 % |
+
+Con 0,0638, U1 es 0 en las tres luces (cotas de 0,50 %, 2,14 % y 8,11 %). Las cifras de luz oscura salen de muy pocos pares (37 del mismo auto, 604 de
+distintos y 12 difíciles): las cotas son anchas y el S4 en difíciles no dice nada. Por rango de ángulo entre la vista entera y la de patente (30-60°,
+60-90°, 90-135° y 135-180°), con 0,2565 U1 es 0 %, 0 %, 0,46 % y 0,74 % (132, 158, 217 y 271 pares). Con el `REID_T` anterior del servicio (0,075) el modelo
+ajustado daba U1 0 de 778 y S4 73,1 % (49,5 % en difíciles).
+
+**El umbral se decide con fotos propias.** Los pares de patente son simulados y de una misma sesión de captura (U1 optimista): si en producción U1 resultara mayor al esperado,
+bajar `REID_T` hacia 0,0638 es un cambio de un número (con 0,15, en prueba: U1 0,26 %, cota 0,81 %, S4 89,7 %).
+
+### U por alerta de R1 con 2 fotos (general + patente), con `car` 0,35 y segmentador 0,50
+
+Recalculado con las señales de `capture_r1.py` (ver "R1 con el encuadre de 1-2 m"): rechazos independientes entre las dos fotos,
+`1 − (1 − pG)(1 − pP)`; la cota usa las cotas de cada tipo (conservadora).
+
+| Conjunto | GENERAL rechazadas | PLATE rechazadas | **U2 por alerta** (cota) |
+|---|---|---|---|
+| Mitad B (la de reporte) | 0 de 200 | 0 de 150 | **0,0 %** (≤ 3,47 %) |
+| Todas (A y B) | 0 de 400 | 0 de 300 | 0,0 % (≤ 1,74 %) |
+
+Con los umbrales anteriores (`car` 0,40) eran 1,17 % (cota 5,4 %) en B y 0,92 % (cota 3,24 %) en todas. (La alerta de 3 fotos del 14/11, con detalle, daba
+4,5 %: el detalle era el que más se rechazaba.)
+
+### Limitaciones
+
+- **U1 es optimista**: los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma luz).
+- **El parque automotor puede ser distinto del argentino** (marcas y modelos de las calles donde se capturó 3DRealCar, anotados en chino).
+- **Los pares de patente son simulados**, a partir de recortes de vistas del auto entero y no de fotos con el encuadre de la app; la patente de una foto
+  real (resolución, desenfoque, reflejos) no está representada.
+- **Pocos pares de patente** (778 en prueba, 37 en luz oscura) y solo la mitad de los autos tuvo un eje claro por la pose: las cotas por luz son anchas.
+- Una sola partición (semilla 0); el modelo se eligió por la mejor época de validación con pares enteros, no con los de patente.
+- **R2 usa en el servicio la caja del detector sin máscaras** (lo calibrado); la comparación con el recorte enmascarado por el segmentador no se midió.
+- No se probó el modelo con fotos propias de celular: el umbral es **provisorio** hasta validarlo con ellas.
+
+## Re-ID con 3DRealCar (`reid_3drealcar.py`): primera versión (histórica)
+
+Compara DINOv2 ViT-S/14 **sin ajustar** (`dinov2_vits14`) con el **ajustado** con 3DRealCar (`dinov2_vits14_reid`, ver
+[tools/training/reid](../training/reid/README.md)), los dos sobre el **recorte de la caja `car` del detector** (la cascada
+ya no tiene segmentador), con la regla del servicio: otro auto si el coseno es menor que `REID_T`. 3DRealCar (Du et al.,
+ICCV 2025) es Apache-2.0 con uso comercial; licencia y cita en [THIRD_PARTY.md](../../THIRD_PARTY.md).
+
+```powershell
+$env:REID_DATA_DIR = "D:\vv-eval\3drealcar"; $env:MODELS_DIR = "models\weights"; $env:EVAL_OUT = "D:\vv-eval\out\reid-eval"
+uv run --frozen --extra dev --extra tools python tools/eval/reid_3drealcar.py --models dinov2_vits14 dinov2_vits14_reid
+```
+
+**Protocolo.** Partición agrupada por auto (ninguno está en dos particiones), estratificada por luz, tipo y color, con
+semilla fija. Pares del mismo auto: vistas separadas por **30° o más** según la pose de la cámara (se reportan por rango
+de ángulo). Pares de autos distintos: una muestra de 100 000 y los **difíciles** (misma marca y mismo color, 30 000). El
+umbral se **calibra sobre validación**: el mayor con la cota del 95 % de U1 en 1 % o menos; con eso fijo se reporta sobre
+prueba. **U1** = pares del mismo auto marcados como distintos; **S4** = pares de autos distintos detectados.
+
+**Datos que se usaron (límite importante).** El zip de 3DRealCar pesa 55 a 110 GB por tramo y Google Drive agotó la
+cuota de descarga cuando se habían bajado 406 autos completos: **175 de luz estándar y 231 de luz oscura, ninguno de luz
+reflectiva** (los 425 reflectivos seleccionados quedaron sin bajar). Con 411 autos (4 864 recortes; el detector no
+encontró auto en 49 de 4 913 fotos) la partición queda en 293 autos de entrenamiento, 59 de validación y 59 de prueba
+(26 estándar y 33 oscuros). **La condición reflectiva no se midió, ni se entrenó con ella.** Para completarla, repetir
+`fetch.py pull` cuando se libere la cuota (baja lo que falta), luego `prepare.py`, `train.py`, `export.py` y esta
+evaluación: la partición de los autos que ya están no cambia.
+
+### Tabla 3: línea base contra ajustado (prueba: 59 autos, 3 287 pares del mismo auto, 100 000 distintos, 30 000 difíciles)
+
+Con el umbral calibrado en validación (0,0736 sin ajustar; 0,0862 ajustado). Entre paréntesis, la cota del 95 % de U1.
+
+| Conjunto | Modelo | AUC | U1 | S4 |
+|---|---|---|---|---|
+| Todos | sin ajustar | 0,684 | 0,3 % (0,6 %) | 5,1 % |
+| | **ajustado** | **0,988** | **0,8 % (1,1 %)** | **76,5 %** |
+| Difíciles (misma marca y color) | sin ajustar | 0,590 | 0,3 % (0,6 %) | 0,9 % |
+| | **ajustado** | **0,951** | 0,8 % (1,1 %) | **47,4 %** |
+| Luz estándar | sin ajustar | 0,681 | 0,8 % (1,3 %) | 9,2 % |
+| | **ajustado** | **0,991** | 0,5 % (0,9 %) | **69,4 %** |
+| Luz oscura | sin ajustar | 0,622 | 0,0 % (0,2 %) | 0,6 % |
+| | **ajustado** | **0,974** | 1,1 % (1,6 %) | **70,4 %** |
+| Luz reflectiva | ambos | no medida (sin datos, ver arriba) | | |
+| Difíciles, luz estándar | ajustado | 0,997 | | 76,3 % |
+| Difíciles, luz oscura | ajustado | 0,881 | | 30,2 % |
+
+Con el `REID_T` que hoy usa el servicio (0,075): sin ajustar, U1 0,3 % y S4 5,2 %; ajustado, U1 0,6 % (cota 0,9 %) y S4 74,0 %.
+U1 por rango de ángulo del ajustado (umbral 0,0862): 30-60° 0,7 % (de 550 pares), 60-90° 0,3 % (636), 90-135° 1,4 % (1 029)
+y 135-180° 0,7 % (1 072): las vistas más separadas no fallan más que las cercanas.
+
+**Lo que se separa.** El efecto del *ajuste* es enorme: el AUC sube de 0,68 a 0,99 y el S4 de 5 % a 76 %, con el mismo
+recorte. Esta primera versión usaba la caja del detector y no la máscara del segmentador, que es el recorte que el servicio usa hoy;
+la comparación entre los dos recortes se hizo con un dataset que el proyecto dejó de usar (sin camino comercial) y no se mantiene acá.
+Sin ajustar, la re-ID casi no detecta autos distintos.
+
+**Propuesta de `REID_T` (no aplicada).** Para `dinov2_vits14_reid`: **0,086**, con **U1 0,8 % (cota 1,1 %) y S4 76,5 %**
+sobre prueba (objetivo S4 >= 70 % cumplido; la cota de U1 queda apenas sobre el 1 % pedido: 27 pares de 3 287). Sin ajustar,
+con el recorte de la caja, el umbral calibrado (0,074) es casi el actual (0,075): U1 0,3 % y S4 5 %. **El servicio sigue con
+`dinov2_vits14` y `REID_T` = 0,075: el modelo nuevo no está activado** (`MODEL_EMBEDDER`) y el umbral no se cambió.
+
+### Limitaciones
+
+- **U1 es optimista:** los pares del mismo auto salen de una misma sesión de captura (el mismo lugar, el mismo día y la misma
+  luz), así que se parecen más que dos fotos de personas distintas en momentos distintos. El S4 de los pares difíciles, no.
+- **Puede haber diferencias con el parque automotor argentino:** las marcas y modelos están anotados en chino (BYD, Changan...).
+- **No hay primeros planos de partes del auto:** el recorte de un primer plano no es comparable. Desde US-15 el servicio
+  ya no recibe fotos de detalle.
+- **Pocos autos de prueba** (59, sin reflectivos): las cotas de los grupos chicos (luz estándar, 26 autos) son anchas.
+- Ajustado con la partición de entrenamiento (293 autos de luz estándar y oscura): hay que repetirlo con los reflectivos.
 
 ## Veredicto de la IA: solo GREEN o RED
 
-La IA emite **GREEN o RED**; ya no hay amarillo. RED solo con evidencia firme:
+La IA emite **GREEN o RED**; ya no hay amarillo. Toda alerta (CRASHED y PARKED_ON_GARAGE) lleva exactamente dos fotos,
+GENERAL y PLATE, y la redacción procesa las dos (sin las dos redactadas no hay veredicto aprobable). RED solo con evidencia firme:
 
 | Regla | Código | Cuándo |
 |---|---|---|
-| R1 | `NO_VEHICLE` (fraude) | En alguna foto no hay evidencia de un auto: GENERAL y CONTEXT, un auto; PLATE, un auto, una parte o una patente; DETAIL, lo mismo o una caja de daño de confianza `DAMAGE_PRESENCE_T`. |
-| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que es otro auto (coseno < `REID_T`, provisorio: 0,075 con VeRi). Dudoso o no comparable: GREEN. |
+| R1 | `NO_VEHICLE` (fraude) | En alguna de las dos fotos no hay un vehículo (la misma regla para GENERAL y PLATE): una caja `car` del detector o una instancia del segmentador (det ∨ seg) que ocupa al menos `PRESENCE_MIN_AREA` de la foto. La patente, la rueda y el daño no cuentan. |
+| R2 | `BURST_MISMATCH` (fraude) | La re-ID confirma que GENERAL y PLATE son otro auto (coseno < `REID_T`, provisorio: 0,2565, calibrado solo con 3DRealCar). Dudoso o no comparable: GREEN. |
 | R3 | `PLATE_MISMATCH` (fraude) | Lectura segura (confianza >= `OCR_MIN_CONF`) que no coincide. Casi igual o ilegible: GREEN. |
 | R4 | `EVIDENCE_UNREADABLE`, `REDACTION_UNAVAILABLE`, `VALIDATION_FAILED` | Sin fraude: foto ilegible, no se pudo redactar todas las fotos, o el mensaje terminó en la DLQ sin veredicto (`VALIDATION_FAILED`, ver abajo). |
 | R5 | (sin códigos) | Todo lo demás: GREEN. |
@@ -853,11 +2725,16 @@ como en cualquier veredicto: una redelivery repite el mismo aviso y Alert lo ded
 - El aviso lleva solo el `alert_id`, el `eventId` de causa y el código; nunca se loguea el payload ni `pat_enc_ia`.
 
 Salieron de la cascada el chequeo de **rebajes** (experimental y en construcción: `MODEL_CURB` vacío, sin pesos) y el
-chequeo de **daño** (solo queda como prueba de presencia en DETAIL). `presence.py` calibra `DAMAGE_PRESENCE_T`: el primer
-valor sobre la mayor confianza de daño de una de las 489 fotos sin auto de Open Images (0,97: pasan 0 de 489, cota del
-95 % = 0,6 %), que recupera 5 de los 21 primeros planos de CarDD que las otras reglas rechazaban.
+chequeo de **daño**: el daño no cuenta como presencia en ninguna foto (decisión del 12/11/2026). Verificar el daño o la
+rampa es trabajo futuro. `DAMAGE_PRESENCE_T` queda solo como la confianza
+mínima del adaptador de daño (`MODEL_DAMAGE`, experimental).
 
 ## Rebajes: ¿el auto bloquea el rebaje? (`curb.py`)
+
+> **Congelado y experimental, atado al detector v1 (decisión del 11/11/2026).** Es lo único que sigue usando
+> la clase `wheel` (`domain/ramp.py::wheel_diameter` mide la rueda para la escala del rebaje) y esa clase
+> existe solo en los pesos de v1 (`rfdetr_openimages`). El detector v2 no la tiene: con v2 no hay diámetro de
+> rueda y se usa la escala de respaldo. No se modifica ni se mantiene hasta que se retome el rebaje.
 
 Mide cómo decide el servicio si un auto bloquea el tramo rebajado del cordón, sobre las fotos de **prueba**
 del dataset propio (`EVAL_DATA_DIR\curb\dataset\test`, que arma `tools/training/curb/prepare.py` y no cambia).

@@ -18,7 +18,6 @@ from tests.fakes import (
     FakeWriter,
     Scenario,
     build_scenario,
-    detail_marker,
     happy_models,
     vec,
 )
@@ -69,7 +68,7 @@ def _no_vehicle(_: Scenario, models: FakeModels) -> None:
 
 
 def _burst_mismatch(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(85)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(85)
 
 
 def _plate_mismatch(_: Scenario, models: FakeModels) -> None:
@@ -81,7 +80,7 @@ def _unreadable(scenario: Scenario, _: FakeModels) -> None:
 
 
 def _redaction_unavailable(_: Scenario, models: FakeModels) -> None:
-    models.face.by_marker[GENERAL] = None
+    models.vehicle.by_marker[PLATE] = None  # falla el detector de patentes en una foto
 
 
 RED = {
@@ -132,15 +131,11 @@ def _plate_without_reading(_: Scenario, models: FakeModels) -> None:
 
 
 def _burst_in_between(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = vec(55)
+    models.embedder.by_marker_area[(PLATE, 8100)] = vec(55)
 
 
 def _burst_not_comparable(_: Scenario, models: FakeModels) -> None:
-    models.embedder.by_marker_area[(PLATE, 6400)] = None
-
-
-def _no_damage(_: Scenario, models: FakeModels) -> None:
-    models.damage.by_marker[detail_marker(0)] = []
+    models.embedder.by_marker_area[(PLATE, 8100)] = None
 
 
 def _no_curb_model(_: Scenario, models: FakeModels) -> None:
@@ -153,8 +148,7 @@ GREEN = {
     "OCR sin lectura": _plate_without_reading,
     "BURST_UNCERTAIN": _burst_in_between,
     "ráfaga que no se puede comparar": _burst_not_comparable,
-    "daño ausente": _no_damage,
-    "contexto sin modelo de rebajes": _no_curb_model,
+    "sin modelo de rebajes": _no_curb_model,
 }
 
 
@@ -169,7 +163,7 @@ def test_lo_dudoso_o_incomparable_es_green_sin_codigos(name: str, alert: AlertTy
     assert (
         result.verdict == Verdict.GREEN and result.reason_codes == ()
     )  # regla C: el caso válido no termina rojo
-    assert len(result.redacted) == 3
+    assert len(result.redacted) == 2
 
 
 @pytest.mark.parametrize("alert", [CRASHED, GARAGE])

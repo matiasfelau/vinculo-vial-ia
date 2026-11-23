@@ -1,0 +1,19 @@
+# Excepciones de Trivy. Solo se admiten acá, y cada una lleva un comentario con el
+# motivo y la fecha de revisión, en la línea anterior:
+#
+#   # Motivo: <por qué no aplica o no tiene corrección> | Revisar: AAAA-MM-DD
+#   CVE-AAAA-NNNN
+#
+# Las cuatro vulnerabilidades de abajo están en el extra `tools` (fiftyone, evaluación y etiquetado),
+# que corre fuera de Docker. La imagen se construye con `uv sync --no-dev` y sin extras, así que
+# ninguno de estos paquetes llega al servicio: el cierre de runtime (37 paquetes) no los incluye.
+
+# Motivo: pymongo 4.9.2 llega por fiftyone y todas las versiones de fiftyone exigen pymongo<4.10, y la
+# corrección es 4.18.x; no hay combinación posible. Solo extra tools, no entra a la imagen | Revisar: 2026-12-16
+CVE-2026-106435
+CVE-2026-96748
+CVE-2026-96749
+
+# Motivo: strawberry-graphql 0.316.0 llega por fiftyone 1.22.1; subirlo a 0.326.1 obliga a bajar fiftyone
+# a 1.13.0 y arrastra otros cambios en las herramientas. Solo extra tools, no entra a la imagen | Revisar: 2026-12-16
+CVE-2026-107728

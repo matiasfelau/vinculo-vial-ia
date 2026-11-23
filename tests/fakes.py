@@ -34,11 +34,7 @@ SIZE = 100
 REPORTED_PLATE = "TST123"
 BUCKET = "bucket-de-prueba"
 
-GENERAL, PLATE, CONTEXT = 10, 20, 40
-
-
-def detail_marker(index: int) -> int:
-    return 30 + index
+GENERAL, PLATE = 10, 20
 
 
 def marker_of(img: Pixels) -> int:
@@ -77,10 +73,8 @@ def plate_box(conf: float = 0.9) -> Box:
 THRESHOLDS = Thresholds(
     reid_t=0.50,
     ocr_min_conf=0.60,
-    damage_presence_t=0.70,
     presence_min_area=0.05,
     model_max_side_px=1024,
-    presence_plate_min_conf=0.40,
 )
 
 
@@ -164,12 +158,16 @@ class FakeDamageDetector:
 
 
 class FakeFaceDetector:
+    """Módulo experimental: la cascada no lo llama (`calls` lo prueba). Por defecto, None como el nulo."""
+
     version = "fake-face"
 
     def __init__(self, by_marker: dict[int, list[Box] | None] | None = None) -> None:
         self.by_marker = by_marker or {}
+        self.calls = 0
 
     def detect(self, img: Pixels) -> list[Box] | None:
+        self.calls += 1
         return self.by_marker.get(marker_of(img))
 
 
@@ -191,41 +189,35 @@ class FakeModels:
 
 def happy_models() -> FakeModels:
     """Modelos que producen GREEN en CRASHED y en PARKED_ON_GARAGE (patente = REPORTED_PLATE)."""
-    curb = rect(80, 86, 0, 20) | rect(80, 86, 81, 100)
-    cut = rect(80, 86, 20, 81)
     embedder = FakeEmbedder()
     embedder.by_marker_area = {
-        (GENERAL, 6400): vec(0),
-        (PLATE, 6400): vec(10),
-        (CONTEXT, 1600): vec(5),
-        (CONTEXT, 400): vec(90),
+        (GENERAL, 8100): vec(
+            0
+        ),  # R2 compara la caja del vehículo dominante del detector (90 x 90), sin máscara
+        (PLATE, 8100): vec(10),
     }
     return FakeModels(
         vehicle=FakeVehicleDetector(
             {
                 GENERAL: [car_box(), plate_box()],
-                PLATE: [plate_box(0.95)],
-                CONTEXT: [car_box(), Box(35, 60, 45, 80, 0.9, BoxLabel.WHEEL)],
-                **{detail_marker(i): [Box(0, 0, 80, 80, 0.9, BoxLabel.WHEEL)] for i in range(3)},
+                PLATE: [car_box(), plate_box(0.95)],
             }
         ),
         cars=FakeCarSegmenter(
             {
                 GENERAL: [CarInstance(rect(10, 90, 10, 90))],
                 PLATE: [CarInstance(rect(10, 90, 10, 90))],
-                CONTEXT: [CarInstance(rect(40, 80, 30, 70)), CarInstance(rect(20, 40, 0, 20))],
-                **{detail_marker(i): [] for i in range(3)},  # en un primer plano no se segmenta ningún auto
             }
         ),
-        curb=FakeCurbSegmenter({CONTEXT: (curb, cut)}),
+        curb=FakeCurbSegmenter({}),
         embedder=embedder,
         plate=FakePlateReader({GENERAL: (REPORTED_PLATE, 0.9), PLATE: (REPORTED_PLATE, 0.95)}),
-        damage=FakeDamageDetector({detail_marker(i): [Box(10, 10, 50, 50, 0.8)] for i in range(3)}),
-        face=FakeFaceDetector({m: [] for m in (GENERAL, PLATE, CONTEXT, *map(detail_marker, range(3)))}),
+        damage=FakeDamageDetector({}),
+        face=FakeFaceDetector(),  # None en todas las fotos, como el nulo: la redacción no depende de él
     )
 
 
-REDACTION = RedactionSettings(required=True, face_min_conf=0.30, plate_min_conf=0.20, max_side_px=1600)
+REDACTION = RedactionSettings(required=True, plate_min_conf=0.20, max_side_px=1600)
 
 
 class FakeWriter:
@@ -320,17 +312,13 @@ class Scenario:
         self.payload = self.payload.model_copy(update={"pat_enc_ia": base64.b64encode(raw).decode()})
 
 
-def build_scenario(alert_type: AlertType = AlertType.CRASHED, details: int = 1) -> Scenario:
+def build_scenario(alert_type: AlertType = AlertType.CRASHED) -> Scenario:
     alert_id = str(uuid.uuid4())
     store = FakeStore()
     roles: list[tuple[EvidenceRole, int, int]] = [
         (EvidenceRole.GENERAL, 0, GENERAL),
         (EvidenceRole.PLATE, 0, PLATE),
     ]
-    if alert_type == AlertType.CRASHED:
-        roles += [(EvidenceRole.DETAIL, i, detail_marker(i)) for i in range(details)]
-    else:
-        roles.append((EvidenceRole.CONTEXT, 0, CONTEXT))
     items: list[EvidenceItem] = []
     for role, index, marker in roles:
         ciphertext = FakeDecryptor.seal(f"IMG{marker}".encode(), alert_id)

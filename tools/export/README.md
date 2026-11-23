@@ -174,9 +174,11 @@ tienen otra licencia (PML 1.0): el script ni siquiera los ofrece.
 
 ## PARSeq (puerto `ocr`)
 
-Es el modelo que lee el texto de la foto de una patente. Se usa preentrenado, sin reentrenar. El
-código es Apache 2.0, pero **el repositorio no declara una licencia para los pesos**: por eso figura
-como `escalable` y hay que confirmar la licencia con los autores antes de un uso comercial.
+Es el modelo que lee el texto de la foto de una patente. Se usa preentrenado, sin reentrenar. Código y pesos son
+Apache 2.0: la licencia de los pesos la declara el autor en la ficha `baudm/parseq-small` de Hugging Face
+(<https://huggingface.co/baudm/parseq-small>), cuyo `pytorch_model.bin` es byte a byte el `parseq-bb5792a6.pt` de la
+release v1.0.0 que baja este exportador (SHA-256 `bb5792a68e36...cd00`, verificado el 16/11/2026; ver
+[THIRD_PARTY.md](../../THIRD_PARTY.md)). Por eso figura como `yes`.
 
 Limitación: lee una sola línea de texto. Las patentes de dos líneas (motos) están fuera de alcance.
 
