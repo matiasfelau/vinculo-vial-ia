@@ -138,3 +138,14 @@ docker build -t vinculo-vial-ia:local .   # con los pesos en models/weights/
 ```
 
 El `.dockerignore` deja entrar al contexto solo los cuatro `.onnx` de la cascada.
+
+### Tiempo de arranque y healthcheck
+
+El servicio carga los 4 modelos (verificando su sha256) antes de levantar el servidor de salud y empezar
+a consumir. Medido el 23/11/2026 con la imagen en Docker Desktop (Windows), con el rootfs de solo
+lectura y sin caché: unos 75 s hasta `/ready` (detector ~30 s, segmentador ~30 s, re-ID ~12 s, OCR
+~17 s, y el resto de las dependencias). En un host más lento puede tardar más.
+
+Por eso el `healthcheck` de `docker-compose.yml` usa `start_period: 120s`: mientras dura, un fallo no
+cuenta contra los reintentos. El `Dockerfile` no define `HEALTHCHECK`; quien corra la imagen fuera del
+compose tiene que usar el mismo margen (`/health` en el puerto `HEALTH_PORT`, 8080 por defecto).
