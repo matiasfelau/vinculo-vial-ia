@@ -1,4 +1,4 @@
-FROM python:3.12.12-slim-bookworm AS builder
+FROM python:3.15.1-slim-bookworm AS builder
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
@@ -13,7 +13,7 @@ RUN uv sync --frozen --no-dev --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
-FROM python:3.12.12-slim-bookworm
+FROM python:3.15.1-slim-bookworm
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
